@@ -315,7 +315,8 @@ const char* romsetName(int32_t composite);
     /* OSD::click applies to its own click. Read straight from Config at click time, */ \
     /* so hook_uiLook (a no-op) is all it needs; F_PREVIEW makes the very next click */ \
     /* — the one the nav plays for this keypress — come out at the new level.        */ \
-    X(SET_UI_CLICK_VOL,    AC_LIVE,   F_PREVIEW,             get_uiClickVol, put_uiClickVol, hook_uiLook,    -1)
+    X(SET_UI_CLICK_VOL,    AC_LIVE,   F_PREVIEW,             get_uiClickVol, put_uiClickVol, hook_uiLook,    -1)         \
+    X(SET_TSCONF_RAM,      AC_REBOOT, 0,                     get_tsconfRam,  put_tsconfRam,  nullptr,        -1)
 
 #define NM_X_ENUM(id, cls, flags, g, p, h, f) id,
 enum SettingId : uint16_t {
