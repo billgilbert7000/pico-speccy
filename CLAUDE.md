@@ -854,6 +854,46 @@ frame deficit itself is untouched (a capacity fact: the Z80 half of a GMX frame
 doubles); `[NEG2]` attribution is compiled for Profi only (ESPectrum.cpp) — lift
 that gate for Scorpion before investigating it.
 
+## ...and the held sample was a DC pedestal that made every stream hole CLICK (hw-confirmed 2026-09-13)
+
+The same hold branch, one layer up. Open the menu with music playing and the
+capture card's meter **pins at ~-10 dBFS and stays there**: `ESPectrum::loop`
+does not run while the OSD owns core0, so `pwm_audio_write()` is never called,
+`m_off >= m_size` for ever, and `pcm_call_inner` freezes the last ZX sample.
+The ZX half of the mix is **UNIPOLAR 0..255** (ESPectrum.cpp, the final mix
+loop) scaled by `vol8` with no mid-scale subtraction, so a frozen sample of
+playing music is a large positive constant — pure DC on the wire, for as long
+as the menu, a pause, or a late frame lasts.
+
+- **A DC pedestal is silent by itself and turns every hole in the audio stream
+  into a CLICK**: the step becomes DC->0->DC instead of signal->0->signal. The
+  holes here were the known HOST-side OBS/PipeWire xruns (~70 ms every 2-4 s,
+  see the 2026-09-08 note) — nothing in the firmware had to glitch. And because
+  the pedestal is there whenever the machine makes any sound, the same xruns
+  click during ordinary play too, which is why the user's report said the clicks
+  "remain" after leaving the menu.
+- **The tell that named the mechanism**: moving the cursor in the menu silenced
+  it, because `OSD::click()`'s `click48`/`click128` waveforms END AT 0
+  (OSDMain.cpp) — the click's last sample becomes the new held sample. Any
+  report of "the level drops when I touch the menu" is this.
+- **Fix: a one-pole DC blocker on the MIXED output, inside the 31250 Hz tick**
+  (`s_dc_L/R`, pwm_audio.cpp) — the same Q16 form as `dcblock_run` (the FM
+  coupling-cap model, 2026-09-02), but here rather than per buffer, because the
+  DC is created in this function and the hold branch is what freezes it. Per
+  buffer it would not touch a held sample at all. Reset in `pcm_setup` so a
+  machine switch does not subtract the previous machine's pedestal.
+- **The clamps around it are load-bearing**: at Q16 an int16 input is exactly
+  int32-wide (`32767<<16` = 2147418112, `-32768<<16` = INT32_MIN) and the
+  UNCLAMPED sum (ZX + live GS, up to ~65534) is not — so clamp, block, clamp.
+- Measured on the host before shipping: held sample under 32 LSB in **29 ms**
+  (the meter falls by itself right after F1); 1 kHz square keeps 20545 of 20000
+  peak-to-peak (+2.7%, the ordinary high-pass tilt); corner ~19 Hz; the
+  menu-EXIT step is the same magnitude it always was (it is the signal's own
+  swing) and the transient settles in 26 ms — i.e. no pop is traded in.
+- Cost: +8 B `.bss`, flash unchanged, two int64 shifts per output sample.
+- Side benefit: the pedestal used to eat headroom against the 0..255 ceiling and
+  against the int16 clip; it no longer does.
+
 ## OPL3 (YMF262) + VGM plugin support (2026-08-28; hw-confirmed 2026-09-01)
 
 **hw-confirmed 2026-09-01** with generated test VGMs (`tools`-less one-offs in

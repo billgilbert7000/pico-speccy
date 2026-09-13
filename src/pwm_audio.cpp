@@ -454,6 +454,11 @@ void pcm_audio_in_stop(void) {
 volatile uint32_t g_pcm_tick_ct = 0;
 volatile uint32_t g_pcm_hold_ct = 0;
 
+// Running DC estimate of the mixed output, Q16 (see the blocker in
+// pcm_call_inner). Reset by pcm_setup so a machine switch does not subtract
+// the previous machine's pedestal for the first few ms.
+static int32_t s_dc_L = 0, s_dc_R = 0;
+
 static void __not_in_flash_func(pcm_call_inner)() {
     g_pcm_tick_ct++;
     // Live GS contribution (signed offset around silence=128 × vol8).
@@ -500,6 +505,32 @@ static void __not_in_flash_func(pcm_call_inner)() {
     }
     int32_t sL = zL + gs_offL;
     int32_t sR = zR + gs_offR;
+    if (sL < -32768) sL = -32768; else if (sL > 32767) sL = 32767;
+    if (sR < -32768) sR = -32768; else if (sR > 32767) sR = 32767;
+
+    // The output coupling cap, modelled on the whole mix — the same one-pole
+    // Q16 DC blocker the FM chips already get per buffer (dcblock_run,
+    // ESPectrum.cpp), but applied HERE because the DC this removes is created
+    // in this function: the ZX half of the mix is UNIPOLAR 0..255 scaled by
+    // vol8, so every non-silent frame rides on a pedestal, and the hold branch
+    // above freezes that pedestal as pure DC for as long as the frame buffer
+    // stays empty — which is the whole time the menu or a pause owns core0.
+    // A DC pedestal is inaudible by itself and then turns every hole in the
+    // audio stream into a CLICK, because the step is DC->0->DC instead of
+    // signal->0->signal. That is what the capture-card reports are: open the
+    // menu with music playing and the OBS meter pins at the last sample's
+    // level (~-10 dBFS) while the known host-side xruns (~every 2-4 s, see the
+    // OBS/PipeWire note) chop it into random clicks; moving the cursor
+    // "fixed" it only because OSD::click()'s waveform ends at 0, so the held
+    // sample became silence. k = 255/256, ~19 Hz at 31250 — inaudible against
+    // anything a Spectrum emits, and it costs the ZX path nothing a real
+    // machine's output capacitor does not already cost it.
+    // Clamped first: at Q16 an int16 input is exactly int32-wide (32767<<16
+    // and -32768<<16 both fit), the unclamped sum is not.
+    s_dc_L += (int32_t)((((int64_t)sL << 16) - s_dc_L) >> 8);
+    s_dc_R += (int32_t)((((int64_t)sR << 16) - s_dc_R) >> 8);
+    sL -= s_dc_L >> 16;
+    sR -= s_dc_R >> 16;
     if (sL < -32768) sL = -32768; else if (sL > 32767) sL = 32767;
     if (sR < -32768) sR = -32768; else if (sR > 32767) sR = 32767;
 
@@ -564,6 +595,8 @@ void pcm_setup(int hz) {
     // Flush output buffer so the audio timer outputs silence until new data arrives
     m_size = 0;
     m_off = 0;
+    s_dc_L = 0;
+    s_dc_R = 0;
     if (Config::audio_driver == 4) {
         // HDMI audio — timer only, no I2S/PWM hardware
         if (m_timer.delay_us) cancel_repeating_timer(&m_timer);
