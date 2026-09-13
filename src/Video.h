@@ -566,8 +566,18 @@ public:
   static void regenerateUlaPlusAluBytes();
   static void ulaPlusUpdatePaletteEntry(uint8_t entry);
   static void ulaPlusFlushPalette();   // apply pending palette to hardware
-  // TS-Conf: CRAM (gpal bank) → hardware slots 0..15, deferred to EndFrame.
+  // TS-Conf: CRAM → hardware slots. A guest change marks tsCramDirty and the
+  // framebuffer row it lands on (tsCramChanged); tsPalettePoll applies it when
+  // the display beam reaches that row (or at once when the beam is above it /
+  // in blanking), so a palette written at the top of a frame lands on the
+  // same display frame as that frame's pixels — see the RobFgift note at
+  // tsPalettePoll.
   static bool tsCramDirty;
+  static void tsCramChanged();
+  static void tsPalSelWritten();    // PalSel: like tsCramChanged, plus the per-line (raster) detection
+  static void tsPalettePoll(bool force);
+  static int  displayBeamRow();     // fb row under the beam, -1 = blanking, -2 = driver has none
+  static void setVsyncLead(bool on);   // TS whole-line modes: frame-pacing v_sync fires before blanking
   static void tsPaletteFlush();
   static void tsPaletteRestore();
   static void ulaPlusUpdateBorder();

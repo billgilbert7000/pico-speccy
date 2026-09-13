@@ -82,6 +82,12 @@ extern "C" void hdmi_set_profi_ds80_mode(bool active, const uint32_t *palette16,
 extern "C" void vga_set_profi_ds80_mode(bool active, const uint32_t *palette16, const uint8_t *pair_lut);
 extern "C" volatile bool profi_ds80_active;
 extern "C" volatile uint hdmi_current_line;
+#ifdef VGA_HDMI
+extern "C" int hdmi_beam_row(void);
+extern "C" int vga_beam_row(void);
+extern "C" void hdmi_set_vsync_line(unsigned line);
+extern "C" void vga_set_vsync_line(uint32_t line);
+#endif
 
 #ifndef VGA_HDMI
 // Profi DS80 packed-pair display mode is implemented entirely inside the VGA/HDMI
@@ -470,6 +476,39 @@ uint8_t  VIDEO::ts_render_live = 0;
 uint32_t VIDEO::ts_line_t   = 0xFFFFFFFFu;   // T-state at which the next content line renders
 static uint32_t ts_line_idx = 0;             // that line, 0..(lin_end2 - lin_end - 1)
 static bool     ts_fast_armed = false;       // TsDraw armed for this frame (EndFrame)
+// Beam-scheduled palette apply (tsPalettePoll): the fb row the pending CRAM
+// change lands on (-1 = none / "from the top"), and how many applies this
+// frame already cost (a per-line CRAM writer must not buy 240 flushes).
+static int32_t ts_pal_row = -1;
+static uint8_t ts_pal_flushes = 0;
+static constexpr uint8_t TS_PAL_MAX_FLUSHES = 8;
+// Frame bookkeeping for the beam rule: which TS frame core0 is posting
+// (bumped at the EndFrame arming), which frame the pending change belongs to,
+// and where the RENDERER is — published by tsRenderExec as
+// (frame seq << 16) | content line about to be drawn, i.e. lines below it are
+// done. The seq travels in bits 7..2 of the job's `kind` byte (6 bits).
+static uint8_t  ts_frame_seq = 0;
+static uint8_t  ts_pal_seq = 0;
+static volatile uint32_t ts_render_pos = 0;
+// PalSel written while the frame's lines were being rendered = a per-line
+// palette-bank effect. 16c without the TSU renders nibbles onto slots 0..15
+// (one gpal bank per frame), so such a frame goes through the ts256 remap
+// instead, which carries {palsel, nibble} per line. Frames of hold, refreshed
+// by every mid-frame write; the switch itself costs one frame of wrong colours.
+static uint16_t ts_palsel_raster = 0;
+static bool     ts_pal_assigned = false;   // ts256Assign already ran for the pending change
+static constexpr uint16_t TS_PALSEL_RASTER_HOLD = 150;
+// [TSPAL] diagnostic (1 Hz while CRAM changes happen): which path applied the
+// palette and where the beam was — the numbers a report of "wrong palette /
+// split picture" on a TS-Conf title needs before any theory.
+static struct {
+    uint32_t changes, applies, p_force, p_nobeam, p_norow, p_blank, p_vis, p_later, blocked_seq, waited;
+    int      beam_min, beam_max;
+    uint32_t lat_max_us, chg_gt_max_us;
+    uint64_t change_us;
+    uint32_t c1_prev;
+} ts_pal_dbg = {0,0,0,0,0,0,0,0,0,0, 999,-999, 0,0, 0, 0};
+static uint64_t ts_frame_start_us = 0;
 uint8_t g_ts_fastmem = 0;
 bool     VIDEO::ts_tsu_live = false;
 bool     VIDEO::ts_pal256_live = false;
@@ -915,6 +954,9 @@ void VIDEO::tsVideoForceOff() {
     ts_render_live = 0;
     ts_tsu_live = false;
     ts_pal256_live = false;
+    ts_palsel_raster = 0;
+    ts_pal_row = -1;
+    setVsyncLead(false);
     if (c256) applyPalette();     // the ts256 remap had taken over the hardware palette
     TsConf::wrGateRecalc(); tsC1LiveRecalc();
     ts_rres_live = 0;
@@ -2116,13 +2158,27 @@ static void tsPairPaletteLoad() {
 // The 8bpp framebuffer has 256 slots but not all are ours: 184..199 and
 // 216..239 are HDMI Data-Island words (audio), 240..244 sync/scanline, 255 the
 // border fill, and 152..167 the nm:: UI block (UI_PAL_BASE — the menu must keep
-// working over a 256c screen). That leaves 184 slots for 256 CRAM cells, so a
-// cell gets its own slot while any remain (identical colours share one), and
-// after that the NEAREST already-placed colour (RGB555 distance). Rebuilt from
-// EndFrame when CRAM is dirty; only slots whose colour changed are re-encoded
-// (the shadow below), so a per-frame palette fade costs its changed entries.
+// working over a 256c screen). That leaves 184 slots for 256 CRAM cells.
+//
+// The assignment is STICKY (2026-09-13): a cell keeps its slot for as long as
+// it lives, and a colour change of a cell that owns its slot alone is written
+// INTO that slot — so the framebuffer effectively holds CRAM cell numbers, the
+// way the hardware's does, and a line rendered at any time shows the palette
+// current when the beam reaches it. The first cut assigned slots in order of
+// first appearance of each distinct colour: two cells with the same colour
+// shared a slot, and any change of which cells coincide renumbered every cell
+// behind them. RobFgift permutes its 16 greys every second frame while its
+// text and sprite cells (0x11, 0x20.., 0xE0..) hold the same greys — 78 of 79
+// palette steps moved the slots of cells the demo never touched, and the lines
+// core1 had rendered with the old numbering came out in other cells' colours
+// ("blue flashes on the letters"). Sharing happens only when the 184 slots run
+// out (then a cell joins the slot of its colour, else the nearest colour);
+// cells never assigned share nothing.
 static uint8_t  ts256_map[256];        // CRAM index → slot
 static uint16_t ts256_slot_col[256];   // slot → CRAM555 it currently shows, 0xFFFF = none
+static uint8_t  ts256_slot_ref[256];   // cells mapped to the slot
+static uint32_t ts256_dirty[8];        // slots whose colour must reach the hardware
+static bool     ts256_valid = false;   // map assigned (else full rebuild)
 static uint8_t  ts256_pool[184];
 static uint8_t  ts256_pool_n = 0;
 
@@ -2145,44 +2201,99 @@ static inline uint32_t ts555Dist(uint16_t a, uint16_t b) {
     return (uint32_t)(dr * dr + dg * dg + db * db);
 }
 
-// invalidate = forget what the hardware slots hold (mode entry: they hold the
-// standard palette, every assigned slot must be written).
-static void tsPalette256Flush(bool invalidate) {
+static inline void ts256MarkDirty(uint8_t slot) { ts256_dirty[slot >> 5] |= 1u << (slot & 31); }
+
+// Bring the cell→slot map up to date with CRAM. Cheap when nothing changed
+// (one pass of 256 compares); called at the first poll after a CRAM change so
+// lines rendered from then on use the new numbering, while the hardware
+// colours follow at the beam-scheduled apply (ts256Program). `full` forgets
+// everything (mode entry: the slots hold the standard palette).
+static void ts256Assign(bool full) {
     ts256PoolInit();
-    if (invalidate) for (int i = 0; i < 256; i++) ts256_slot_col[i] = 0xFFFF;
-    // Colour placed in this pass, indexed by pool position.
-    uint16_t placed[184];
-    uint8_t  nplaced = 0;
+    if (full || !ts256_valid) {
+        for (int i = 0; i < 256; i++) { ts256_slot_col[i] = 0xFFFF; ts256_slot_ref[i] = 0; }
+        for (int i = 0; i < 8; i++) ts256_dirty[i] = 0;
+        ts256_valid = false;
+    }
+    uint8_t pending[256]; int npend = 0;
     for (int i = 0; i < 256; i++) {
         const uint16_t c = TsConf::cram[i] & 0x7FFF;
-        int hit = -1;
-        for (int k = 0; k < nplaced; k++) if (placed[k] == c) { hit = k; break; }
-        if (hit < 0) {
-            if (nplaced < ts256_pool_n) {
-                placed[nplaced] = c;
-                hit = nplaced++;
-            } else {
-                uint32_t bestd = 0xFFFFFFFFu;
-                for (int k = 0; k < nplaced; k++) {
-                    const uint32_t d = ts555Dist(placed[k], c);
-                    if (d < bestd) { bestd = d; hit = k; }
-                }
+        if (ts256_valid) {
+            const uint8_t s = ts256_map[i];
+            if (ts256_slot_col[s] == c) continue;                     // unchanged
+            if (ts256_slot_ref[s] == 1) {                             // sole owner: recolour in place
+                ts256_slot_col[s] = c;
+                ts256MarkDirty(s);
+                continue;
+            }
+            ts256_slot_ref[s]--;                                      // shared: leave it
+        }
+        pending[npend++] = (uint8_t)i;
+    }
+    for (int k = 0; k < npend; k++) {
+        const int i = pending[k];
+        const uint16_t c = TsConf::cram[i] & 0x7FFF;
+        int hit = -1, freeSame = -1, freeAny = -1;
+        for (int p = 0; p < ts256_pool_n; p++) {
+            const uint8_t s = ts256_pool[p];
+            if (ts256_slot_ref[s]) { if (hit < 0 && ts256_slot_col[s] == c) hit = s; }
+            else {
+                if (ts256_slot_col[s] == c) { if (freeSame < 0) freeSame = s; }
+                else if (freeAny < 0) freeAny = s;
             }
         }
-        ts256_map[i] = ts256_pool[hit];
+        // Join a live slot of the same colour first (256 cells, 184 slots: the
+        // unused cells alone would exhaust the pool), else a free one. Sharing
+        // is safe here: only the cell that CHANGES ever moves, the others keep
+        // their slot and its colour.
+        if (hit < 0 && freeSame >= 0) hit = freeSame;
+        else if (hit < 0 && freeAny >= 0) { hit = freeAny; ts256_slot_col[hit] = c; ts256MarkDirty((uint8_t)hit); }
+        else if (hit < 0) {                                           // full: nearest live colour
+            uint32_t bestd = 0xFFFFFFFFu;
+            for (int p = 0; p < ts256_pool_n; p++) {
+                const uint8_t s = ts256_pool[p];
+                if (!ts256_slot_ref[s]) continue;
+                const uint32_t d = ts555Dist(ts256_slot_col[s], c);
+                if (d < bestd) { bestd = d; hit = s; }
+            }
+        }
+        ts256_map[i] = (uint8_t)hit;
+        ts256_slot_ref[hit]++;
     }
-    for (int k = 0; k < nplaced; k++) {
-        const uint8_t slot = ts256_pool[k];
-        if (ts256_slot_col[slot] == placed[k]) continue;
-        ts256_slot_col[slot] = placed[k];
-        const uint32_t col = paletteFinal(VIDEO::tsCramToRgb(placed[k]));
-        graphics_set_palette(slot, col);
-        vga_set_palette_entry_solid(slot, col);
+    ts256_valid = true;
+}
+
+// Write the slots whose colour changed since the last programming.
+static void ts256Program() {
+    for (int w = 0; w < 8; w++) {
+        uint32_t bits = ts256_dirty[w];
+        ts256_dirty[w] = 0;
+        while (bits) {
+            const int b = __builtin_ctz(bits); bits &= bits - 1;
+            const uint8_t slot = (uint8_t)(w * 32 + b);
+            if (!ts256_slot_ref[slot]) continue;                      // freed meanwhile
+            const uint32_t col = paletteFinal(VIDEO::tsCramToRgb(ts256_slot_col[slot]));
+            graphics_set_palette(slot, col);
+            vga_set_palette_entry_solid(slot, col);
+        }
     }
+}
+
+// invalidate = forget what the hardware slots hold (mode entry / after an
+// applyPalette rewrote them): every assigned slot is written.
+static void tsPalette256Flush(bool invalidate) {
+    ts256Assign(invalidate);
+    if (invalidate) {
+        for (int p = 0; p < ts256_pool_n; p++)
+            if (ts256_slot_ref[ts256_pool[p]]) ts256MarkDirty(ts256_pool[p]);
+    }
+    ts256Program();
 }
 
 void VIDEO::tsPaletteFlush() {
     tsCramDirty = false;
+    ts_pal_row = -1;
+    ts_pal_assigned = false;
     if (ts_pal256_live) {
         tsPalette256Flush(false);
         return;
@@ -2236,6 +2347,171 @@ void VIDEO::tsPaletteRestore() {
         uint32_t color = paletteFinal(spectrum_rgb888[i]);
         graphics_set_palette(i, color);
         vga_set_palette_entry_solid(i, color);
+    }
+}
+
+// ── When a CRAM change reaches the hardware palette ─────────────────────────
+// The framebuffer holds palette INDICES and the palette is one global table, so
+// a CRAM change is visible on every row the beam has not scanned yet — the
+// display shows old colours above the beam and new ones below it from the
+// moment the slots are rewritten. Flushing at EndFrame put that moment ~75% down
+// the display (the guest frame finishes early, the beam is mid-picture): the
+// RobFgift demo (16c + TSU) re-indexes its whole picture every second frame and
+// DMAs the matching 16-colour palette right after the frame INT, so every second
+// display frame showed the new pixels with the OLD palette below a wandering
+// split line — "half white, half yellow, flickering" (2026-09-13).
+//
+// Hardware semantics are the target: a change made while the raster is on guest
+// line L takes effect from line L. Our line renderer runs AHEAD of the display
+// beam (guest visible line 56 is reached ~3 ms after v_sync, the beam's first
+// visible row comes ~4.7 ms after it), so the rows above L are already in the
+// framebuffer but not yet displayed. Hence: remember the fb row the change lands
+// on (tsCramChanged) and apply the slots when the beam reaches it — at once if
+// the beam is already below it or in blanking with the change meant "from the
+// top" (this demo: written during the guest's top blanking, beam in blanking →
+// immediate → the whole display frame is consistent). Polled at every rendered
+// guest line (tsDrawTick), at EndFrame and from the frame-pacing waits.
+void VIDEO::tsCramChanged() {
+    tsCramDirty = true;
+    if (ts_pal_row >= 0) return;
+    if (!ts_fast_armed || ts_line_t == 0xFFFFFFFFu) {
+        // Before the first / after the last content line: it is the NEXT frame's
+        // top that first shows the new colours.
+        ts_pal_row = (int32_t)lin_end;
+        ts_pal_seq = (uint8_t)(ts_frame_seq + (ts_fast_armed ? 1 : 0));
+    } else {
+        ts_pal_row = (int32_t)(lin_end + ts_line_idx);   // the next line to render
+        ts_pal_seq = ts_frame_seq;
+    }
+    ts_pal_dbg.changes++;
+    ts_pal_dbg.change_us = time_us_64();
+    const uint32_t gt = (uint32_t)(ts_pal_dbg.change_us - ts_frame_start_us);
+    if (gt > ts_pal_dbg.chg_gt_max_us) ts_pal_dbg.chg_gt_max_us = gt;
+}
+
+static void tsPalDbgApplied(uint32_t& path, int beam) {
+    path++;
+    ts_pal_dbg.applies++;
+    if (beam < ts_pal_dbg.beam_min) ts_pal_dbg.beam_min = beam;
+    if (beam > ts_pal_dbg.beam_max) ts_pal_dbg.beam_max = beam;
+    const uint32_t lat = (uint32_t)(time_us_64() - ts_pal_dbg.change_us);
+    if (lat > ts_pal_dbg.lat_max_us) ts_pal_dbg.lat_max_us = lat;
+}
+
+static void tsPalDbgPrint() {
+    static uint32_t frames = 0;
+    if (++frames < 50) return;
+    frames = 0;
+    if (!ts_pal_dbg.changes && !ts_pal_dbg.applies) return;
+    extern volatile uint32_t ts_c1_us;
+    const uint32_t c1 = ts_c1_us - ts_pal_dbg.c1_prev; ts_pal_dbg.c1_prev = ts_c1_us;
+    Debug::log("[TSPAL] vsync=%d chg=%u app=%u (force %u nobeam %u norow %u blank %u vis %u later %u) beam=%d..%d latMax=%uus chgAt<=%uus blockedSeq=%u waited=%u pal256=%d c1=%uus/f pos=%08lX",
+               (int)Config::v_sync_enabled, ts_pal_dbg.changes, ts_pal_dbg.applies, ts_pal_dbg.p_force, ts_pal_dbg.p_nobeam,
+               ts_pal_dbg.p_norow, ts_pal_dbg.p_blank, ts_pal_dbg.p_vis, ts_pal_dbg.p_later,
+               ts_pal_dbg.beam_min, ts_pal_dbg.beam_max, ts_pal_dbg.lat_max_us, ts_pal_dbg.chg_gt_max_us,
+               ts_pal_dbg.blocked_seq, ts_pal_dbg.waited, (int)VIDEO::ts_pal256_live, c1 / 50, (unsigned long)ts_render_pos);
+    ts_pal_dbg.changes = ts_pal_dbg.applies = ts_pal_dbg.p_force = ts_pal_dbg.p_nobeam = ts_pal_dbg.p_norow = 0;
+    ts_pal_dbg.p_blank = ts_pal_dbg.p_vis = ts_pal_dbg.p_later = ts_pal_dbg.blocked_seq = ts_pal_dbg.waited = 0;
+    ts_pal_dbg.beam_min = 999; ts_pal_dbg.beam_max = -999; ts_pal_dbg.lat_max_us = 0; ts_pal_dbg.chg_gt_max_us = 0;
+}
+
+void VIDEO::tsPalSelWritten() {
+    if (ts_fast_armed && ts_line_idx > 0 && ts_line_t != 0xFFFFFFFFu) ts_palsel_raster = TS_PALSEL_RASTER_HOLD;
+    // Under the ts256 remap every CRAM cell already has a slot and each line
+    // carries its own palsel — nothing to flush.
+    if (!ts_pal256_live) tsCramChanged();
+}
+
+// EndFrame: switch plain 16c between "nibbles on slots 0..15" and the ts256
+// remap as the per-line PalSel evidence comes and goes (nygift's splash: the
+// LINE INT writes PalSel on every line for a top-down palette wipe).
+static void tsPalSelRasterPoll() {
+    if (ts_palsel_raster) ts_palsel_raster--;
+    if (!VIDEO::ts_render_live || VIDEO::ts_tsu_live || VIDEO::ts_vmode_live != VIDEO::TSV_16C) return;
+    const bool want = ts_palsel_raster != 0;
+    if (want == VIDEO::ts_pal256_live) return;
+    VIDEO::tsRenderDrain();
+    if (want) {
+        tsPalette256Flush(true);
+        VIDEO::tsCramDirty = false;
+        VIDEO::ts_pal256_live = true;
+    } else {
+        VIDEO::ts_pal256_live = false;
+        VIDEO::applyPalette();          // standard ramp back; slots 0..15 from gpal below
+        VIDEO::tsCramDirty = true;
+    }
+    ts_pal_row = -1;
+    Debug::log("[TSV] 16c per-line PalSel %s -> ts256 remap %s", want ? "seen" : "gone", want ? "ON" : "off");
+}
+
+// TS-Conf whole-line modes: fire the frame-pacing v_sync TS_VSYNC_LEAD_LINES
+// before blanking start (see hdmi_vsync_line). 0 restores the default.
+static constexpr unsigned TS_VSYNC_LEAD_LINES = 100;   // ~3.2 ms at 31.5 kHz
+void VIDEO::setVsyncLead(bool on) {
+#ifdef VGA_HDMI
+    const unsigned v_active = (unsigned)vga.yres * 2;
+    const unsigned line = on && v_active > TS_VSYNC_LEAD_LINES ? v_active - TS_VSYNC_LEAD_LINES : 0;
+    hdmi_set_vsync_line(line);
+    vga_set_vsync_line(line);
+#else
+    (void)on;
+#endif
+}
+
+int VIDEO::displayBeamRow() {
+#ifdef VGA_HDMI
+    extern bool SELECT_VGA;
+    return SELECT_VGA ? vga_beam_row() : hdmi_beam_row();
+#else
+    return -2;
+#endif
+}
+
+void VIDEO::tsPalettePoll(bool force) {
+    if (!tsCramDirty) return;
+    // The cell→slot map follows CRAM at once (lines rendered from here on use
+    // the new numbering); only the slot COLOURS wait for the beam below.
+    if (ts_pal256_live && !ts_pal_assigned) { ts256Assign(false); ts_pal_assigned = true; }
+    if (force || !ts_render_live || ESPectrum::maxSpeed || ts_pal_flushes >= TS_PAL_MAX_FLUSHES) {
+        tsPalDbgApplied(ts_pal_dbg.p_force, displayBeamRow());
+        tsPaletteFlush();
+        ts_pal_flushes++;
+        return;
+    }
+    const int beam = displayBeamRow();
+    const int32_t want = ts_pal_row;
+    if (beam == -2 || want < 0) {          // no beam position / a change with no row (mode switch): at once
+        tsPalDbgApplied(beam == -2 ? ts_pal_dbg.p_nobeam : ts_pal_dbg.p_norow, beam);
+        tsPaletteFlush();
+        ts_pal_flushes++;
+        return;
+    }
+    // Apply when the beam is on a row that holds pixels rendered AFTER the
+    // change — the rule that is right whether the renderer runs ahead of the
+    // beam (v-sync pacing, fast frame) or behind it (slow frame, or v-sync off
+    // with the two frames drifting): rows the beam scans before the renderer
+    // got there keep old pixels AND the old palette, rows after carry both new.
+    const uint32_t pos = ts_render_pos;
+    int dseq = (int)(((pos >> 16) - ts_pal_seq) & 0x3F);
+    if (dseq >= 32) dseq -= 64;
+    if (dseq < 0) { ts_pal_dbg.blocked_seq++; return; }   // renderer still on an earlier frame: nothing new is on screen yet
+    const int32_t top = (int32_t)lin_end;
+    const int32_t doneTo = top + (int32_t)(pos & 0xFFFF) - 1;   // last completed row of the renderer's frame
+    bool apply;
+    if (dseq == 0) {
+        // The change frame: new pixels on rows want..doneTo.
+        apply = (beam < 0) ? (want <= top && doneTo >= want) : (beam >= want && beam <= doneTo);
+    } else {
+        // A later frame: rows from `want` down were completed in the change
+        // frame, rows top..doneTo in this one.
+        apply = (beam < 0) ? (want <= top || doneTo >= top) : (beam >= want || beam <= doneTo);
+    }
+    if (apply) {
+        tsPalDbgApplied(dseq ? ts_pal_dbg.p_later : (beam < 0 ? ts_pal_dbg.p_blank : ts_pal_dbg.p_vis), beam);
+        tsPaletteFlush();
+        ts_pal_flushes++;
+    } else {
+        ts_pal_dbg.waited++;
     }
 }
 
@@ -3643,6 +3919,9 @@ void VIDEO::Reset() {
         ts_render_live = 0;
         ts_tsu_live = false;
         ts_pal256_live = false;
+        ts_palsel_raster = 0;
+        ts_pal_row = -1;
+        setVsyncLead(false);
         ts_rres_live = 0;
         ts_crop_top = 0;
         TsConf::wrGateRecalc(); tsC1LiveRecalc();
@@ -4810,6 +5089,7 @@ void VIDEO::tsFastMemRecalc() {
 IRAM_ATTR void VIDEO::tsDrawTick() {
     const uint32_t lines = lin_end2 - lin_end;
     TsConf::dmaLineTick();   // a queued DMA whose DMA_ACT has dropped must be complete before the guest goes on
+    if (__builtin_expect(tsCramDirty, 0)) tsPalettePoll(false);   // beam-scheduled palette apply, once per line
     do {
         linedraw_cnt = lin_end + ts_line_idx;   // keep the shared counters coherent
         curline = ts_line_idx;
@@ -4968,12 +5248,14 @@ void VIDEO::tsVideoApplyPending() {
     // cell). Hand it back on the way out (applyPalette rewrites the standard
     // ramp + the 16 ZX solids), take it over on the way in (full write — the
     // slots hold the standard palette now).
-    const bool wantPal256 = (want == TSV_256C) || (wantTsu && !wantPair);
+    const bool wantPal256 = (want == TSV_256C) || (wantTsu && !wantPair)
+                         || (want == TSV_16C && ts_palsel_raster != 0);   // per-line PalSel, see tsPalSelRasterPoll
     if (ts_pal256_live && !wantPal256) applyPalette();
     ts_vmode_live = want;
     ts_tsu_live = wantTsu;
     ts_render_live = wantRender;
     ts_rres_live = rres;
+    setVsyncLead(wantRender != 0);
     if (wantRender && !ts_tmb) {
         const size_t bytes = (size_t)TS_C1_RING * TS_TMB_WORDS * 2 + 2 * 16 * TS_TMB_WORDS * 2;
         uint8_t* blk = (uint8_t*)Buffer::palloc(bytes, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
@@ -5231,6 +5513,7 @@ void VIDEO::tsRenderLine(uint32_t curline) {
         // Full ring (a HALT fast-forward posts a whole frame in microseconds):
         // wait for a slot — core0 would be idle for exactly that render anyway.
         { while (ts_c1_w - ts_c1_r >= TS_C1_RING) tsC1Spin(); tsC1SpinEnd(); }
+        j.l.kind = (uint8_t)((j.l.kind & 3) | ((ts_frame_seq & 0x3F) << 2));   // frame tag for ts_render_pos
         ts_c1_ring[ts_c1_w & (TS_C1_RING - 1)] = j;
         __dmb();
         ts_c1_w = ts_c1_w + 1;
@@ -5241,6 +5524,7 @@ void VIDEO::tsRenderLine(uint32_t curline) {
         return;
     }
     const uint64_t t0 = time_us_64();
+    j.l.kind = (uint8_t)((j.l.kind & 3) | ((ts_frame_seq & 0x3F) << 2));
     tsRenderExec(j, ts_tsu_live ? &st : nullptr, TsConf::sfile, seq);
     ts_line_seq++;
     ts_render_us += (uint32_t)(time_us_64() - t0);
@@ -5396,6 +5680,7 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
     const uint32_t curline = j.l.line;
     const uint32_t ygctr = j.l.ygctr;
     const uint32_t frow = curline + lin_end;
+    ts_render_pos = ((uint32_t)(j.l.kind >> 2) << 16) | curline;   // lines below this one are done (tsPalettePoll)
     if (!vga.frameBuffer || frow >= (uint32_t)vga.yres) return;
     uint8_t* fb_row = (uint8_t*)vga.frameBuffer[frow];
     if (!fb_row) return;
@@ -5676,6 +5961,12 @@ void TS_RENDER_HOT VIDEO::tsuComposeLine(uint32_t line, uint8_t* ts, const TsuSt
         }
         uint32_t col = xoffs >> 3;
         uint32_t pos = (0u - (xoffs & 7)) & 0x1FF;
+        // One-element memo: a tile repeated along the row (the background tile,
+        // tile 0 with TxZ_EN) is read from PSRAM once — RobFgift's T1 layer is
+        // 42 copies of tile 0 a line, its T0 has 14 of tile 4; each read is an
+        // XIP line fill, and the compose is XIP-bound (hw 2026-09-13).
+        const uint8_t* m_src = nullptr;
+        uint32_t m_s4 = 0;
         for (int i = 0; i < ntiles; i++, col++, pos = (pos + 8) & 0x1FF) {
             const uint32_t c = col & 63;
             uint16_t tw;
@@ -5687,9 +5978,13 @@ void TS_RENDER_HOT VIDEO::tsuComposeLine(uint32_t line, uint8_t* ts, const TsuSt
             const uint8_t* src = bm[(bl >> 6) & 7];
             if (!src) continue;
             src += ((bl & 63) << 8) + ((tnum & 63) << 2);
+            uint32_t s4;
+            if (src == m_src) s4 = m_s4;
+            else { s4 = tsuLd32(src); m_src = src; m_s4 = s4; }
+            if (!s4) continue;                              // transparent element: nothing to write
             const uint8_t pal = (uint8_t)(tpal | ((tw >> 12) & 3) << 4);
-            if (tw & 0x4000) tsuBlit8(ts, (pos + 7) & 0x1FF, -1, pal, src);
-            else             tsuBlit8(ts, pos, 1, pal, src);
+            if (tw & 0x4000) tsuBlit8w(ts, (pos + 7) & 0x1FF, -1, pal, s4);
+            else             tsuBlit8w(ts, pos, 1, pal, s4);
         }
     };
 
@@ -6273,17 +6568,28 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
         }
     }
 
-    // TS-Conf CRAM → the 16 ZX palette slots, same deferred-to-blanking rule
-    // as the ULA+ flush above (16 entries ≈ 65 µs).
+    // TS-Conf CRAM → hardware slots. NOT "deferred to blanking" like the ULA+
+    // flush above: EndFrame is mid-scanout (the guest frame finishes early), and
+    // a palette rewritten there splits the display into old/new halves. The
+    // apply is scheduled on the BEAM instead (tsPalettePoll — see the comment
+    // there); here it only runs when the beam has reached the change's row, or
+    // unconditionally in the cases where the beam cannot be followed. Anything
+    // still pending is polled from the frame-pacing waits in ESPectrum::loop.
     // NO tsRenderDrain() here: the core1 line queue is allowed to run across the
     // frame boundary (the HALT fast-forward posts most of a frame in one burst
     // and waiting for it here cost core0 ~3.3 ms/frame on TMNT, hw 2026-09-07).
     // Whoever writes what a pending line READS drains first: TsConf::dmaStart
     // (guest memory), do_OSD / osdCenteredMsg / progressDialog / gfxBegin (the
-    // framebuffer), mode switches and Reset. The palette flush below runs with
-    // lines pending on purpose — ts256_map is read byte by byte, so a pending
-    // line takes old-or-new slots per pixel for one frame on a palette change.
-    if (Z80Ops::isTsconf && tsCramDirty) tsPaletteFlush();
+    // framebuffer), mode switches and Reset. The palette flush runs with lines
+    // pending on purpose — ts256_map is read byte by byte, so a pending line
+    // takes old-or-new slots per pixel for one frame on a palette change.
+    if (Z80Ops::isTsconf) {
+        tsPalettePoll(false);
+        ts_pal_flushes = 0;
+        tsPalSelRasterPoll();
+        tsPalDbgPrint();
+        ts_frame_start_us = time_us_64();
+    }
 
     static uint8_t skipCnt = 0;
     static bool wasMaxSpeed = false;
@@ -6311,6 +6617,7 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
         // pictures once lines rendered at their own time (Ninja Gaiden, hw 2026-09-07).
         ts_line_t = tStatesScreen << ESPectrum::multiplicator;
         ts_line_idx = 0;
+        ts_frame_seq++;                    // the frame whose lines are posted from here (tsPalettePoll)
         Draw = &TsDraw;
         Draw_Opcode = &TsDraw_Opcode;
         ts_fast_armed = true;

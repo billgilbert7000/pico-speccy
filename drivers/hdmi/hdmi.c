@@ -537,6 +537,27 @@ static inline void __not_in_flash_func(nf_copy64)(uint64_t *dst, const uint64_t 
 // Current HDMI scanline counter (exposed for Profi palette refresh sync).
 volatile uint hdmi_current_line = 0;
 
+// Framebuffer row the scanout beam is on (two display lines per row), or -1
+// while it is in vertical blanking. Read from core0 by VIDEO::tsPalettePoll,
+// which holds a guest palette change until the beam reaches the row the guest
+// made it on — a palette applied at the wrong beam position shows as a split
+// picture (old palette above, new below) for one display frame.
+// Scanout line at which ESPectrum_vsync() fires; 0 = the default, v_active
+// (blanking start). VIDEO moves it EARLIER for the TS-Conf whole-line renderer
+// (hdmi_set_vsync_line): that renderer only gets its lines after the guest's
+// frame-top DMA has landed (~4-5 ms on RobFgift) and the beam's first row comes
+// 5.24 ms after blanking start, so the top rows raced the beam. Firing while the
+// beam is still ~100 lines above the bottom hands the renderer that time; no
+// renderer reaches the bottom rows within it, so the previous frame's tail is
+// displayed intact.
+volatile uint hdmi_vsync_line = 0;
+void hdmi_set_vsync_line(uint line) { hdmi_vsync_line = line; }
+
+int hdmi_beam_row(void) {
+    const uint l = hdmi_current_line;
+    return (l < hdmi_isr_mode.v_active) ? (int)(l >> 1) : -1;
+}
+
 // IRQ-latency diagnostic: largest gap between consecutive HDMI line IRQs (µs).
 // If the IRQ is serviced late (line not ready in time), this spikes well above
 // the nominal per-IRQ interval. Read+reset from core0 (Video PERF log).
@@ -594,8 +615,9 @@ static void __scratch_x("hdmi_driver") dma_handler_HDMI_body() {
     // Сигнализируем vsync в начале blanking-периода (после последней видимой строки),
     // чтобы эмулятор рендерил следующий кадр во время blanking,
     // пока HDMI не читает frameBuffer — предотвращает тиринг в верхней части экрана
-    if (line == modep->v_active) {
-        ESPectrum_vsync();
+    {
+        const uint vs = hdmi_vsync_line;
+        if (line == (vs ? vs : modep->v_active)) ESPectrum_vsync();
     }
 
     // Pixel-doubling: рендерим один раз на пару строк.

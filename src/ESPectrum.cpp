@@ -4042,6 +4042,9 @@ void ESPectrum::loop() {
           // The SD mailbox does have to stay: the GS-Z80 blocks on it.
           if (GS::neogs) NgsSd::service();
           Debug::pumpUart();
+          // A TS-Conf palette change waiting for the beam to reach its row
+          // (VIDEO::tsPalettePoll): the beam moves while we wait here.
+          if (Z80Ops::isTsconf && VIDEO::tsCramDirty) VIDEO::tsPalettePoll(false);
           if (v_sync) {
             v_sync = false;
             break;
@@ -4051,17 +4054,32 @@ void ESPectrum::loop() {
         // any pending Profi DS80 palette refresh now, while the scanout DMA is
         // off-screen — tear-free palette animation (see profiPaletteApplyPending).
         VIDEO::profiPaletteApplyPending();
+        // ...and whatever TS-Conf palette change the beam never reached — the
+        // next display frame starts now and must carry it.
+        if (Z80Ops::isTsconf && VIDEO::tsCramDirty) VIDEO::tsPalettePoll(true);
       } else {
         if (idle > 0) {
           Debug::pumpUart();
           if (ZiFi::cdcNicActive) {
             int64_t e = (int64_t)time_us_64() + idle;
-            while ((int64_t)time_us_64() < e) ZiFi::cdcPump();
+            while ((int64_t)time_us_64() < e) {
+              ZiFi::cdcPump();
+              if (Z80Ops::isTsconf && VIDEO::tsCramDirty) VIDEO::tsPalettePoll(false);
+            }
           } else
           if (GS::neogs) {
             int64_t e = (int64_t)time_us_64() + idle;
             // SD only — see the note in the v_sync branch above.
-            while ((int64_t)time_us_64() < e) NgsSd::service();
+            while ((int64_t)time_us_64() < e) {
+              NgsSd::service();
+              if (Z80Ops::isTsconf && VIDEO::tsCramDirty) VIDEO::tsPalettePoll(false);
+            }
+          } else
+          if (Z80Ops::isTsconf && VIDEO::tsCramDirty) {
+            // Palette change waiting for the beam (tsPalettePoll): poll instead
+            // of sleeping through the rows it is waiting for.
+            int64_t e = (int64_t)time_us_64() + idle;
+            while ((int64_t)time_us_64() < e) VIDEO::tsPalettePoll(false);
           } else
           {
             delayMicroseconds(idle);

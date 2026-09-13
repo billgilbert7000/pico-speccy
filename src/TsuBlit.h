@@ -42,12 +42,18 @@ TSU_BLIT_INLINE uint32_t tsuBlit8Slow(uint8_t* ts, uint32_t pos, int dir, uint8_
 // dir = +1: pixel k lands at pos + k; dir = -1 (X flip): pixel k lands at pos - k.
 // Returns the position after the element, (pos + 8*dir) & 0x1FF — what the
 // sprite loop chains on.
-TSU_BLIT_INLINE uint32_t tsuBlit8(uint8_t* ts, uint32_t pos, int dir, uint8_t pal, const uint8_t* src) {
-    const uint32_t s4 = tsuLd32(src);
+// Same blit from the element's four bytes already loaded as one little-endian
+// word (byte k of the element = bits 8k..8k+7) — the tile loop keeps the last
+// element it read and feeds repeats (a background tile across a whole row) back
+// in without touching PSRAM again; on an XIP-bound compose the load IS the cost.
+TSU_BLIT_INLINE uint32_t tsuBlit8w(uint8_t* ts, uint32_t pos, int dir, uint8_t pal, uint32_t s4) {
     const uint32_t next = (pos + 8u * (uint32_t)dir) & 0x1FF;
     if (!s4) return next;                                   // whole element transparent
     const uint32_t start = (dir > 0) ? pos : ((pos - 7u) & 0x1FF);
-    if (start > 504) return tsuBlit8Slow(ts, pos, dir, pal, src);   // wraps the line
+    if (start > 504) {                                      // wraps the line
+        uint8_t bytes[4]; memcpy(bytes, &s4, 4);
+        return tsuBlit8Slow(ts, pos, dir, pal, bytes);
+    }
     // nibble k of s4 (k = 0..7, bits 4k..4k+3): even k = low nibble of byte k/2 =
     // the RIGHT pixel of that byte (pixel 2*(k/2)+1), odd k = the left one.
     uint32_t nz = s4 | (s4 >> 1); nz |= nz >> 2; nz &= 0x11111111u;   // bit 4k = nibble k non-zero
@@ -68,4 +74,8 @@ TSU_BLIT_INLINE uint32_t tsuBlit8(uint8_t* ts, uint32_t pos, int dir, uint8_t pa
     tsuSt32(d,     (tsuLd32(d)     & ~m0) | (w0 & m0));
     tsuSt32(d + 4, (tsuLd32(d + 4) & ~m1) | (w1 & m1));
     return next;
+}
+
+TSU_BLIT_INLINE uint32_t tsuBlit8(uint8_t* ts, uint32_t pos, int dir, uint8_t pal, const uint8_t* src) {
+    return tsuBlit8w(ts, pos, dir, pal, tsuLd32(src));
 }

@@ -574,7 +574,7 @@ TS_HOT void TsConf::portWrite(uint8_t reg, uint8_t val) {
         case TSW_TSCONF: TSVT("TSCONF=%02X", val); r.tsconf = r.tsconf_d = val; tsuSeen |= val & 0xE0; tsUpdateWrGate(); break;
         case TSW_PALSEL:
             r.palsel = r.palsel_d = val;
-            VIDEO::tsCramDirty = true;  // gpal re-points the 16 ZX slots
+            VIDEO::tsPalSelWritten();  // gpal re-points the 16 ZX slots; mid-frame = raster effect
             break;
         case TSW_GXOFFSL: r.g_xoffs = (r.g_xoffs & 0x100) | val; break;
         case TSW_GXOFFSH: r.g_xoffs = (r.g_xoffs & 0xFF) | ((uint16_t)(val & 1) << 8); break;
@@ -639,7 +639,7 @@ TS_HOT void TsConf::fmWrite(uint16_t addr, uint8_t val) {
     switch ((addr >> 9) & 0x07) {
         case 0:
             cram[(addr >> 1) & 0xFF] = w;
-            VIDEO::tsCramDirty = true;
+            VIDEO::tsCramChanged();
             break;
         case 1:
             sfile[(addr >> 1) & 0xFF] = w;
@@ -1063,7 +1063,7 @@ TS_HOT void TsConf::dmaStart(uint8_t ctrl) {
                 case M_CRAM: {
                     const uint8_t idx = (uint8_t)(dd >> 1);
                     cram[idx] = src.rd(ss);
-                    VIDEO::tsCramDirty = true;
+                    VIDEO::tsCramChanged();
                     break;
                 }
                 case M_SFILE:
@@ -1435,7 +1435,7 @@ void TsConf::reset(bool cold) {
     setBanks();
     applyZclk();
     frameIntRecalc();
-    VIDEO::tsCramDirty = true;
+    VIDEO::tsCramChanged();
     // TS-BIOS validates its NVRAM config (Gluk cells #B0..#E7) at every START
     // and falls into the text-mode SETUP — invisible until phase 3 — when the
     // CRC fails. Re-check here on every reset: a no-op (logged "valid") when

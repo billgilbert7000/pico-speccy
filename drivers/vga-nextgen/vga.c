@@ -165,6 +165,20 @@ static uint16_t* txt_palette_fast = NULL;
 
 enum graphics_mode_t graphics_mode = GRAPHICSMODE_DEFAULT;
 
+// Beam position exposed to core0 — the HDMI driver's hdmi_current_line twin.
+volatile uint32_t vga_current_line = 0;
+volatile uint32_t vga_current_v_active = 0;
+
+volatile uint32_t vga_vsync_line = 0;      // see hdmi_vsync_line
+void vga_set_vsync_line(uint32_t line) { vga_vsync_line = line; }
+
+// Framebuffer row under the scanout beam (two lines per row), -1 in vertical
+// blanking. See hdmi_beam_row() for the consumer.
+int vga_beam_row(void) {
+    const uint32_t l = vga_current_line;
+    return (l < vga_current_v_active) ? (int)(l >> 1) : -1;
+}
+
 void __time_critical_func() dma_handler_VGA() {
     dma_hw->ints0 = 1u << dma_chan_ctrl;
     static uint32_t frame_number = 0;
@@ -175,6 +189,8 @@ void __time_critical_func() dma_handler_VGA() {
     struct video_mode_t mode = graphics_get_video_mode(get_video_mode());
     int v_total = mode.vga_v_total ? mode.vga_v_total : mode.v_total;
     int v_active = mode.vga_v_active ? mode.vga_v_active : mode.v_active;
+    vga_current_line = screen_line;          // beam position for vga_beam_row()
+    vga_current_v_active = (uint32_t)v_active;
 
     if (screen_line == v_total) {
         screen_line = 0;
@@ -185,8 +201,9 @@ void __time_critical_func() dma_handler_VGA() {
     // Signal vsync at start of blanking (after last visible line), so emulator
     // renders the next frame during blanking while VGA isn't reading frameBuffer —
     // prevents tearing at the top of the screen.
-    if (screen_line == v_active) {
-        ESPectrum_vsync();
+    {
+        const uint32_t vs = vga_vsync_line;
+        if (screen_line == (vs ? vs : (uint32_t)v_active)) ESPectrum_vsync();
     }
 
     if (screen_line >= v_active) {

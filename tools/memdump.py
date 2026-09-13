@@ -258,7 +258,7 @@ def main():
                     if line.startswith("nv["):
                         nv.append(line[6:8])
                     elif line.startswith("cram["):
-                        cram.append(line[10:14])
+                        cram.append(line[9:13])
                     else:
                         out.write(line + "\n")
             for i in range(0, len(cram), 16):

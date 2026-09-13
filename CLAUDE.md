@@ -2329,6 +2329,107 @@ of `aligned(4096)` padding. Free heads: DVp2 82.7 KB, z0p2 79.1, z0p2-PIOUSB 64.
   question: does TS-BIOS Setup (SS+F12) need the ZX-Evo AVR (`slavespi`)
   keyboard path? Plain #FE should cover boot + TR-DOS.
 
+### TS-Conf palette changes are applied on the display BEAM, not at EndFrame (2026-09-13, NOT hw-tested)
+
+Found by **RobFgift.spg** ("Zero Processor Time Gift", 16c 320x240 + TSU): the picture
+flickered, half of it in the wrong colours. The demo re-indexes its whole picture every
+second frame (the T0 tile graphics are DMA-copied, 28k of 30k bytes differ) and DMAs the
+matching 16-colour palette into CRAM 0..15 (`DMACtrl 0x84`) right after the frame INT —
+all 80 palettes are permutations of the same 16 GREYS, and the background cell walks
+24→2→5→2→24, so pixels and palette are only consistent when they land on the SAME
+display frame. On hardware both change in the top blanking. We flushed CRAM at EndFrame,
+i.e. ~75 % down the display (the guest frame finishes early; the framebuffer is indices
+and the palette is one global table), so every second display frame showed the new pixels
+with the old palette below a wandering split. Neither the fb dump (indices uniform, slot 13
+top and bottom) nor the ts256 map (stable — 16 distinct colours every frame) was at fault.
+
+- `VIDEO::tsCramChanged()` (every CRAM/PalSel writer in TsConf.cpp) marks dirty AND the fb
+  row the change lands on (`lin_end + ts_line_idx`); `VIDEO::tsPalettePoll()` applies the
+  slots when `displayBeamRow()` (new `hdmi_beam_row()` / `vga_beam_row()`, fb row under the
+  scanout, -1 in blanking) has reached that row — immediately when the beam is already
+  below it or in blanking with a "from the top" change. Polled once per rendered guest
+  line (`tsDrawTick`), at EndFrame, inside every frame-pacing wait in `ESPectrum::loop`,
+  and forced right after v_sync. Cap `TS_PAL_MAX_FLUSHES`=8 per frame (a per-line CRAM
+  writer must not buy 240 flushes); maxSpeed / ZX mode / SOFTTV-TFT (no beam) apply at once.
+- Why the ordering holds: the line renderer runs AHEAD of the beam (guest visible line 56
+  ≈ 3 ms after v_sync, the beam's first row ≈ 4.7 ms after it — the 50 Hz modes have
+  148-164 blanking lines), so the rows above a mid-frame change are already rendered but
+  not yet displayed; applying when the beam reaches the row is the hardware picture within
+  a row. `profiPaletteApplyPending` (apply after v_sync) is NOT the right model here: it
+  would show frame N+1's pixels with palette N — the same 25 Hz mismatch, mirrored.
+- `tools/memdump.py` sliced `cram[XX]=YYYY` as `line[10:14]` and printed 3 hex digits — the
+  top nibble (the red channel) was lost in every dump; fixed to `[9:13]`. The CRAM itself
+  was always right.
+- **Round 2 (same day, after hw: "better, but the wrong palette floats top→bottom and then
+  settles")**: the first cut applied the change when the beam was at/below its row — wrong
+  whenever the beam is already BELOW the renderer (v-sync pacing off: the two frames drift
+  against each other; or a slow frame, `cpu=20.7 ms` in the log). The rule is now "the beam
+  is on a row that was RENDERED after the change": `tsRenderExec` publishes
+  `ts_render_pos` = (frame seq in `kind` bits 7..2, line about to draw), and the poll
+  compares the beam against the rows completed since the change (change frame:
+  `want..doneTo`; a later frame: `want..end` plus `top..doneTo`). Rows the beam scans
+  before the renderer reaches them keep old pixels AND old palette; after, both new.
+  **nygift.spg (sources in `debug/TSCONF/nygift_src/`) is the second case and a different
+  mechanism**: its splash writes PALSEL on EVERY line from the LINE INT (`line_proc`,
+  `pal_lines` = a top-down palette wipe that ends after ~40 frames — exactly "floats down,
+  then settles"). Plain 16c rendered nibbles onto slots 0..15, one gpal bank per frame;
+  a PalSel write while lines are being rendered (`tsPalSelWritten`) now switches 16c to the
+  ts256 remap for `TS_PALSEL_RASTER_HOLD` frames (the TSU path already carries
+  {palsel, nibble} per line), one frame of wrong colours at each switch.
+- **Round 3 (same day): the flicker itself was the ts256 SLOT MAP, not the timing.** With the
+  beam rule in, the `[TSPAL]` line was clean (vsync=1, all 25 applies/s in blanking, latency
+  <=3.7 ms, c1 12.4 ms) and RobFgift still flickered; the owner's capture showed MAGENTA on
+  the letters (177,45,174 = CRAM 0x6018, the sprite palette's key colour). Cause:
+  `tsPalette256Flush` assigned slots in order of first appearance of each distinct colour,
+  so cells with equal colours shared a slot and any change in WHICH cells coincide
+  renumbered every cell behind them. RobFgift's 16 greys are permuted every second frame
+  while its border/text/sprite cells (0x11, 0x20, 0x25, 0x2E, 0x2F, 0xEC-0xEE) hold the same
+  greys: 78 of 79 palette steps moved slots of cells the demo never wrote, and the lines
+  core1 had already rendered with the old numbering showed other cells' colours. (An earlier
+  "map is stable" check used the dump's truncated 3-digit CRAM values and saw no sharing.)
+  Now the assignment is STICKY (`ts256Assign`): a cell keeps its slot, a sole owner's colour
+  change is written INTO its slot, a shared cell that changes moves to a live slot of its
+  new colour / a free slot / the nearest; `ts256Program` writes only dirty slots. The map
+  is updated at the FIRST poll after a change (before any line of the new frame renders),
+  the colours at the beam-scheduled apply — so the fb effectively holds cell numbers like
+  the hardware's. Host model over the demo's 80 palettes: 6 cell moves total (all while
+  settling), zero colour mismatches, 37 slots in use.
+- **Round 4 (same day): with the sticky map the demo is right except the TOP rows (fb 0..~15,
+  occasionally a band at 17..30) — hw capture: those rows show the previous frame's pixels
+  with the new palette, i.e. the beam reached them before core1 re-rendered them.** core1 is
+  at ~100 % on this title (c1 12.4 ms of pure compose + the HDMI ISR + GS::pump), so it is
+  still finishing frame S-1 when frame S starts (`blockedSeq` ≈ 1.2 per change, latMax
+  3.7 ms); the 30 KB tile-graphics DMA then waits in `tsRenderDrainOverlap` (the TSU bitmap
+  ranges are in `tsRenderOverlaps`) for ALL of S-1's lines, and frame S's first lines are
+  posted ~4 ms after v_sync — the beam's first row comes at 5.24 ms, so any hiccup on core1
+  loses the top rows. Not a palette bug: pure core1 throughput. First lever:
+  `tsuComposeLine` keeps a one-element memo of the last tile it read (RobFgift's T1 is 42
+  copies of tile 0 a line, its T0 14 of tile 4; every read is an XIP line fill and the compose
+  is XIP-bound) — `tsuBlit8w` blits from the loaded word, `tools/tsu_blit_test.cpp` passes.
+  Next levers if c1 is still ≥ 12 ms: skip S-1's remaining lines when S's are queued (they are
+  re-rendered before display anyway — needs the frame tag), or let idle core0 render lines
+  (needs per-core s_gline/s_tsline and one seq space for the tile-map prefetch ring).
+- **Round 5: the memo did not move `c1` (12.4 -> 12.8 ms) and the GS was already throttled
+  before the demo ran — the top rows are lost to core0's own copy.** The demo's 30 KB
+  tile-graphics DMA is a PSRAM->PSRAM memcpy through XIP (~4-5 ms, TMNT measured 37 KB in
+  6 ms) executed inside `dmaStart` BEFORE any line of the frame can be posted, so core1
+  idles through it and starts row 0 at ~4.8 ms after v_sync against the beam's 5.24 ms.
+  Owner: without NeoGS only "one dotted line, sometimes" — the GS::pump slice on core1 is
+  what turned a 0.4 ms margin into a miss. Fix: for TS-Conf whole-line modes the
+  frame-pacing v_sync fires `TS_VSYNC_LEAD_LINES` (100 lines, ~3.2 ms) BEFORE blanking
+  start — `hdmi_vsync_line` / `vga_vsync_line` (0 = default v_active), set by
+  `VIDEO::setVsyncLead` from tsVideoApplyPending / ForceOff / Reset. Safe because no
+  renderer reaches the bottom rows within that lead (even a 4 ms full-frame renderer
+  cannot beat the beam to row 193+), so the previous frame's tail is displayed intact;
+  TS-Conf only, since `profiPaletteApplyPending` relies on v_sync = blanking start.
+  The principled alternative, if this ever shows its limits: run large RAM->RAM DMAs
+  progressively over their modelled DMA_ACT window from `dmaLineTick` (hardware order:
+  the copy stays ahead of the raster), instead of one memcpy up front.
+- Hw check owed: RobFgift (no flicker, no magenta on the letters, clean top rows; V-Sync on AND off),
+  nygift's splash wipe, then the palette-changing titles — TMNT (256c, RAM→CRAM DMA every frame), Digger
+  intro (16c), Bruce Lee, Ninja Gaiden, fishbone, TS-BIOS Setup (TEXT mode goes through
+  the pair path, untouched), and a VGA board.
+
 ### TS-Conf DRAM model: CPU/video vs DMA contention + 14 MHz wait states (2026-09-13; hw-confirmed: Bomberman AND fishbone run on the final build)
 
 Found by **Bomberman Evolution** (`prods.tslabs.info/files/bomber_evo.zip`, .spg), which
