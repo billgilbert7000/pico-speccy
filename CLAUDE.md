@@ -2445,6 +2445,72 @@ tag representation, avoiding the `push` in the leaf.
 **hw 2026-09-13, final build (waits unconditional, inline hit test): Bomberman starts
 and fishbone runs** — owner's verdict on `debug/DVp2-dram-1.0.5.elf`.
 
+### The hit test in per-window ROWS (2026-09-13 evening, NOT hw-tested — the host-cost session)
+
+Baseline the owner measured on 720x576: fishbone **45-46 FPS without NeoGS, 42-43
+with** (640x480: 44-45 against 47-48 before the model). Two findings from the
+disassembly of that build, both fixed in `src/TsDramCache.h` (new; TsConf.h includes
+it) + CPU.cpp + TsConf.cpp; test builds `debug/DVp2-dram-rows-1.0.5.elf` (plain) and
+`debug/DVp2-dram-rows-trace-1.0.5.elf` (PERF_TRACE, its cache carries
+`FB_FORCE_CHUNKS=8`):
+
+- **`exec_nocheck` was CALLING the hit test** (`bl _ZL11tsMemNoDramt`) on every opcode
+  fetch — Z80_JLS.cpp compiles at -Os and GCC declined to inline a `static inline`
+  from a header. `TSDC_INLINE` = `always_inline`. Check with `objdump` that the fetch
+  region of `exec_nocheck` has no `bl` but `cpuMemMiss` and `tsDrawTick`.
+- **Representation**: the truth is still one tag per cache index (`g_ts_cache_tag`),
+  but the per-access test reads a per-WINDOW ROW — `tsdc_row[w][idx]` = a[13:9] of the
+  word window w's page has cached at idx, or 0xFF — through a 4-entry pointer table:
+  `g_ts_hitrow[addr >> 14][(addr >> 1) & 0xFF] == (addr >> 9) & 0x1F`. 8 instructions
+  and two scratch registers against 11 + `push {r4}`. ROM in window 0 and a disabled
+  CacheConfig bit are POINTER SWAPS to `tsdc_none` (all 0xFF), not rebuilds; a ROM
+  access therefore takes one cold `cpuMemMiss` call that answers 0 (tsdcFill: no DRAM
+  request) — accepted, ROM code in a whole-line mode is TS-BIOS Setup only. Rows stay
+  maintained for their page while the window is ROM (Bomberman brackets every DMA with
+  MEMCONF=04 / PAGE0=0), every fill updates all four rows, and only a REAL page change
+  rebuilds one row (256 entries, ~1500 cycles; `[PERF] dram:` gained `rowRebuild=N/60f`
+  — if a title shows hundreds per frame, that is the cost to look at). Two windows on
+  one page (`g_ts_alias`) send the write invalidate to a cold path that clears every
+  row. Writes: the leaf tests `tsMemWriteHit` only and tail-calls `poke8_cold` /
+  the new `poke16_cold` on a hit (hits are rare: every 512 bytes of code sweep the
+  whole index space), where `TsConf::cpuMemWrite` runs the full rule — inlining the
+  invalidate cost `poke8` a push on EVERY write.
+- **Register discipline that made the leaves push-free**: the DRAM test runs FIRST,
+  with nothing but the address live, and the `_dram`/`_cold` helpers add the base
+  T-states themselves; placed after `CPU::tstates += 3` it needed two more registers.
+  `peek16`/`poke16` test the second byte only for an ODD address (even = one cache
+  word). `poke16` still pushes `{r4,r5,lr}` for its two-byte store — pre-existing, not
+  the model.
+- Cost: **+1.5 KB RAM** on every board (rows 1 KB, `tsdc_none` 256 B, tables) — static
+  on purpose, they are read per guest access on core0 (the TS scratch-block lesson).
+- **`tools/tsdram_cache_test.cpp`** drives the header against a plain tag model (4 M
+  random reads/writes, page changes from a small pool so windows alias, W0_RAM and
+  CacheConfig toggles, resets) and checks every verdict, every tag and every row;
+  three hand-applied mutations (fill updating one row, no alias cold path, ROM window
+  keeping its row pointer) each fail it. **Re-run after any change there.**
+- **hw 2026-09-13 evening, 640x480, fishbone, PERF builds (A/B = `TSCONF_DRAM_MODEL`
+  OFF vs ON, both with the rows):** the model costs core0 **~1.4 ms/frame** (`cpu=`
+  17.5 -> 18.9 ms, `wait` 1.2 -> 0.0), `cpuWait` = 14 kT/frame = only ~4k misses (the
+  demo's loops fit the 512-byte cache), `rowRebuild=0`. realFPS 48.76 -> 48.5 without
+  NeoGS, 46.9 with — i.e. fishbone at 480p is now at full rate, where the DRAM session
+  measured 44-45. **Fishbone is core1-paced**: `c1=14.4 ms` (base 3.9 / tsu 8.3 / out
+  2.1) plus the HDMI line ISR, and at 720x576 the ISR share and the NeoGS pump on the
+  same core are what make 45-46 / 42-43 — no core0 work can show there. Next lever for
+  it is the TSU compose on core1, a different job. No regression against 2026-09-09
+  (`cpu=` 17.8 then, 17.5 now with the model off; core1 got faster, 16.2 -> 14.4).
+- **720x576 + NeoGS + TS-Conf on DVp2 is at the HEAP EDGE, and the video-mode gate is
+  right to refuse it.** A PERF build (+8 KB `ts_int_ring`, or +1 KB with the new CMake
+  `TS_INT_RING_N=64`) boots into 576p with 6.6 KB free at `setup: COMPLETE` and the
+  first `malloc` after that panics (`Subsystems::request` at boot, or F5's 1.5 KB
+  later) — `pico_malloc` panics instead of returning NULL, and the boot self-heal only
+  fires when the FB itself fails, which `FB_FORCE_CHUNKS=8` prevents. The plain build
+  survives with ~1-2 KB to spare. The budget: 576p FB 103.7 KB + the GS code overlay
+  window 25.7 KB + the TS-Conf one 19.5 KB + the core1 line ring 10.8 KB (SRAM) + the
+  8 SRAM pages. **Do not steer around the gate by editing `hdmi_vmode` in storage.nvs**
+  (done once this session; two boot loops). If a 576p PERF capture is ever needed,
+  free MIDI GM.DLS (7 KB) + ZiFi (12 KB) first, or take the ring to PSRAM for that
+  build only.
+
 **Owed on hardware:** TMNT / Digger / Bruce Lee / Lode Runner / the other demos —
 14 MHz titles now execute FEWER instructions per frame (real waits) and their DMA_ACT
 windows are longer where the picture is visible (256c: x1.56 on visible lines), so

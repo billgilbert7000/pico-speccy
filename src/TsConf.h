@@ -36,30 +36,11 @@ the Free Software Foundation, either version 3 of the License, or
 
 // TS-Conf DRAM model, hot-path half (the rest is in TsConf.cpp). Zero on every
 // other machine. g_ts_memcyc: bit 0 = ZCLK 14 MHz (wait states), bit 1 = DMA_ACT
-// (CPU accesses steal DRAM cycles). g_ts_tagbase[win]: 0 = window makes no DRAM
-// request (ROM in window 0); else 0x8000 | page << 5, plus 0x4000 while the
-// window's cache is DISABLED (CacheConfig) — stored tags never carry 0x4000, so
-// the inline compare misses there without a second test. The cache itself:
-// 256 x 16-bit words, index a[8:1], tag {page, a[13:9]} (zmem.v).
+// (CPU accesses steal DRAM cycles). The cache hit test itself — tsMemNoDram /
+// tsMemWriteInv and the per-window rows behind them — lives in TsDramCache.h so
+// tools/tsdram_cache_test.cpp can prove it against a plain tag model.
 extern uint8_t  g_ts_memcyc;
-extern uint16_t g_ts_tagbase[4];
-extern uint16_t g_ts_cache_tag[256];
-// True when the access costs no DRAM cycle: ROM, or a hit in an enabled cache
-// window. Inline so a hit in the CPU accessors costs no call (fishbone, 14 MHz,
-// cache on: -5 FPS with the call, 2026-09-13).
-static inline bool tsMemNoDram(uint16_t addr) {
-    const uint16_t tb = g_ts_tagbase[addr >> 14];
-    if (!tb) return true;
-    return g_ts_cache_tag[(addr >> 1) & 0xFF] == (uint16_t)(tb | ((addr >> 9) & 0x1F));
-}
-// A CPU write invalidates the cached word (cache_inv) — no wait, and the DMA
-// steal is the caller's business (poke8's cold path / TsConf::cpuMemWrite).
-static inline void tsMemWriteInv(uint16_t addr) {
-    const uint16_t tb = g_ts_tagbase[addr >> 14];
-    if (!tb) return;
-    const uint32_t idx = (addr >> 1) & 0xFF;
-    if (g_ts_cache_tag[idx] == (uint16_t)((tb & ~0x4000u) | ((addr >> 9) & 0x1F))) g_ts_cache_tag[idx] = 0;
-}
+#include "TsDramCache.h"
 
 class TsConf {
 public:

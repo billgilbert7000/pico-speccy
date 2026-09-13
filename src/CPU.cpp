@@ -803,15 +803,19 @@ static IRAM_ATTR __attribute__((noinline)) uint8_t peek8_tick(uint16_t address) 
 // TS-Conf DRAM model live (g_ts_memcyc: 14 MHz wait states and/or a running DMA
 // the access steals a cycle from) — a tail call, so peek8 itself stays a leaf.
 static IRAM_ATTR __attribute__((noinline)) uint8_t peek8_dram(uint16_t address) {   // a cache MISS (tsMemNoDram was false)
-    CPU::tstates += TsConf::cpuMemMiss(address, false);
+    CPU::tstates += 3 + TsConf::cpuMemMiss(address, false);
     if (CPU::tstates >= VIDEO::ts_line_t) VIDEO::tsDrawTick();
     return MemESP::ramCurrent[address >> 14][address & 0x3FFF];
 }
 IRAM_ATTR uint8_t Z80Ops::peek8(uint16_t address) {
     TS_PAGE_HIT(address);
     if (g_ts_fastmem) {
-        CPU::tstates += 3;
+        // The DRAM hit test runs FIRST, while nothing but the address is live:
+        // placed after the T-state add it needed two more registers and GCC
+        // paid a push/pop pair on EVERY access (2026-09-13). The _dram helpers
+        // add the base T-states themselves.
         if (__builtin_expect(g_ts_memcyc != 0, 0) && !tsMemNoDram(address)) return peek8_dram(address);
+        CPU::tstates += 3;
         if (__builtin_expect(CPU::tstates >= VIDEO::ts_line_t, 0)) return peek8_tick(address);
         return MemESP::ramCurrent[address >> 14][address & 0x3FFF];
     }
@@ -968,8 +972,14 @@ static inline void tsPoke8Store(uint16_t address, uint8_t value) {
     p[address & 0x3FFF] = value;
 }
 static IRAM_ATTR __attribute__((noinline)) void poke8_generic(uint16_t address, uint8_t value);
+static IRAM_ATTR __attribute__((noinline)) void poke8_tick(uint16_t address, uint8_t value) {
+    VIDEO::tsDrawTick();
+    tsPoke8Store(address, value);
+}
 static IRAM_ATTR __attribute__((noinline)) void poke8_cold(uint16_t address, uint8_t value) {
-    // line boundary, the FMAddr / W0_WE write gate and/or the DRAM model
+    // the FMAddr / W0_WE write gate, a running DMA and/or a cache invalidate
+    // (the base T-states are ours to add)
+    CPU::tstates += 3;
     if (CPU::tstates >= VIDEO::ts_line_t) VIDEO::tsDrawTick();
     if (g_ts_memcyc) TsConf::cpuMemWrite(address);
     if (g_tsconf_wr && TsConf::cpuWriteGate(address, value)) return;
@@ -978,9 +988,16 @@ static IRAM_ATTR __attribute__((noinline)) void poke8_cold(uint16_t address, uin
 IRAM_ATTR void Z80Ops::poke8(uint16_t address, uint8_t value) {
     TS_PAGE_HIT(address);
     if (g_ts_fastmem) {
+        // Same register discipline as peek8: the cache invalidate and the two
+        // cold gates go first, the T-state add and the line test last.
+        if (__builtin_expect(g_ts_memcyc != 0, 0)) {
+            // a running DMA (the access steals a cycle) or a write that HITS the
+            // cache (invalidate) — both are poke8_cold's, through TsConf::cpuMemWrite
+            if ((g_ts_memcyc & 2) || tsMemWriteHit(address)) return poke8_cold(address, value);
+        }
+        if (__builtin_expect(g_tsconf_wr != 0, 0)) return poke8_cold(address, value);
         CPU::tstates += 3;
-        if (__builtin_expect((CPU::tstates >= VIDEO::ts_line_t) | g_tsconf_wr | (g_ts_memcyc & 2), 0)) return poke8_cold(address, value);
-        if (__builtin_expect(g_ts_memcyc != 0, 0)) tsMemWriteInv(address);   // 14 MHz, no DMA: only the cache line
+        if (__builtin_expect(CPU::tstates >= VIDEO::ts_line_t, 0)) return poke8_tick(address, value);
         tsPoke8Store(address, value);
         return;
     }
@@ -1005,7 +1022,7 @@ static IRAM_ATTR __attribute__((noinline)) uint16_t peek16_tick(uint16_t address
     return tsPeek16Load(address);
 }
 static IRAM_ATTR __attribute__((noinline)) uint16_t peek16_dram(uint16_t address) {   // at least one half misses
-    CPU::tstates += TsConf::cpuMemRead(address, false);
+    CPU::tstates += 6 + TsConf::cpuMemRead(address, false);
     CPU::tstates += TsConf::cpuMemRead((uint16_t)(address + 1), false);
     if (CPU::tstates >= VIDEO::ts_line_t) VIDEO::tsDrawTick();
     return tsPeek16Load(address);
@@ -1013,8 +1030,11 @@ static IRAM_ATTR __attribute__((noinline)) uint16_t peek16_dram(uint16_t address
 IRAM_ATTR uint16_t Z80Ops::peek16(uint16_t address) {
     TS_PAGE_HIT(address);
     if (g_ts_fastmem) {
+        // An even address reads both halves out of ONE cache word (index a[8:1]),
+        // so the second half can only miss when the first did; odd = two words.
+        // Test first, add T-states after (the peek8 register note).
+        if (__builtin_expect(g_ts_memcyc != 0, 0) && (!tsMemNoDram(address) || ((address & 1) && !tsMemNoDram((uint16_t)(address + 1))))) return peek16_dram(address);
         CPU::tstates += 6;
-        if (__builtin_expect(g_ts_memcyc != 0, 0) && (!tsMemNoDram(address) || !tsMemNoDram((uint16_t)(address + 1)))) return peek16_dram(address);
         if (__builtin_expect(CPU::tstates >= VIDEO::ts_line_t, 0)) return peek16_tick(address);
         return tsPeek16Load(address);
     }
@@ -1073,11 +1093,26 @@ static IRAM_ATTR __attribute__((noinline)) void poke16_tick(uint16_t address, Re
     VIDEO::tsDrawTick();
     tsPoke16Store(address, word);
 }
+// DRAM model cases of the fast path: a running DMA (each byte write steals a
+// cycle) and/or a write that hits the cache (invalidate). Two byte cycles on the
+// hardware, so two cpuMemWrite calls even when both halves share a cache word.
+static IRAM_ATTR __attribute__((noinline)) void poke16_cold(uint16_t address, RegisterPair word) {
+    if (g_tsconf_wr) return poke16_generic(address, word);   // the write gate wants the generic path
+    CPU::tstates += 6;
+    TsConf::cpuMemWrite(address);
+    TsConf::cpuMemWrite((uint16_t)(address + 1));
+    if (CPU::tstates >= VIDEO::ts_line_t) VIDEO::tsDrawTick();
+    tsPoke16Store(address, word);
+}
 IRAM_ATTR void Z80Ops::poke16(uint16_t address, RegisterPair word) {
     TS_PAGE_HIT(address);
-    if (g_ts_fastmem && !(g_tsconf_wr | (g_ts_memcyc & 2))) {   // the write gate / a running DMA take the generic path
+    if (g_ts_fastmem) {
+        if (__builtin_expect(g_ts_memcyc != 0, 0)) {
+            // a running DMA or a cache hit on either half -> poke16_cold (even: one cache word)
+            if ((g_ts_memcyc & 2) || tsMemWriteHit(address) || ((address & 1) && tsMemWriteHit((uint16_t)(address + 1)))) return poke16_cold(address, word);
+        }
+        if (__builtin_expect(g_tsconf_wr != 0, 0)) return poke16_generic(address, word);   // the write gate too
         CPU::tstates += 6;
-        if (__builtin_expect(g_ts_memcyc != 0, 0)) { tsMemWriteInv(address); tsMemWriteInv((uint16_t)(address + 1)); }
         if (__builtin_expect(CPU::tstates >= VIDEO::ts_line_t, 0)) return poke16_tick(address, word);
         tsPoke16Store(address, word);
         return;

@@ -134,7 +134,7 @@ string(LENGTH "${PORT_VERSION}" PORT_VERSION_LEN)
 # Framebuffer chunking exercise (Video.cpp ensureMainFB): force the main
 # framebuffer into N whole-row chunks even when one block would fit, so the
 # fragmented-heap path runs on an ordinary boot. 0 = normal (one block first).
-set(FB_FORCE_CHUNKS "0" CACHE STRING "Debug: split the main framebuffer into N whole-row chunks (0 = off, 2/4/8)")
+set(FB_FORCE_CHUNKS "8" CACHE STRING "Debug: split the main framebuffer into N whole-row chunks (0 = off, 2/4/8)")
 
 # A W target IS its carrier, plus a different plugged-in module: turn the carrier
 # on so every pin arm, display matrix and runtime `#if MURM2` below keeps working,
@@ -850,6 +850,11 @@ if (PERF_HIST)
 else()
     target_compile_definitions(${PROJECT_NAME} PRIVATE PERF_HIST=0)
 endif()
+# PERF_TRACE's TS-Conf INT-accept ring (TsConf.cpp ts_int_ring, 16 B per entry):
+# 512 = 8 KB of .bss, enough for ~1.6 fishbone frames; 64 keeps a PERF build
+# light enough for the 720x576 video-mode gate (FB grow 26.9 KB + 10 KB margin).
+set(TS_INT_RING_N "512" CACHE STRING "PERF_TRACE: TS-Conf INT-accept ring entries (power of two)")
+target_compile_definitions(${PROJECT_NAME} PRIVATE TS_INT_RING_N=${TS_INT_RING_N})
 if(TSCONF_HOT_IN_RAM)
     target_compile_definitions(${PROJECT_NAME} PRIVATE TSCONF_HOT_IN_RAM=1)
 else()

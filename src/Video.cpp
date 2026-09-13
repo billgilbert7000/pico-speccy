@@ -5921,13 +5921,15 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
             // the CPU and the video fetcher took from running DMAs, against the
             // DMAs' own cycle count — the numbers that decide Bomberman's copy phase.
             if (Z80Ops::isTsconf) {
-                extern volatile uint32_t ts_cpu_wait_t, ts_dma_steal_cyc, ts_dma_vid_cyc, ts_dma_cyc;
-                static uint32_t wait_accum = 0, steal_accum = 0, vid_accum = 0, dcyc_accum = 0;
-                wait_accum += ts_cpu_wait_t; steal_accum += ts_dma_steal_cyc; vid_accum += ts_dma_vid_cyc; dcyc_accum += ts_dma_cyc;
-                ts_cpu_wait_t = ts_dma_steal_cyc = ts_dma_vid_cyc = ts_dma_cyc = 0;
-                Debug::log("[PERF] dram: cpuWait=%ukT/60f dma=%ukcyc stolen: cpu=%ukcyc vid=%ukcyc",
-                    (unsigned)(wait_accum / 1000), (unsigned)(dcyc_accum / 1000), (unsigned)(steal_accum / 1000), (unsigned)(vid_accum / 1000));
-                wait_accum = steal_accum = vid_accum = dcyc_accum = 0;
+                extern volatile uint32_t ts_cpu_wait_t, ts_dma_steal_cyc, ts_dma_vid_cyc, ts_dma_cyc, ts_row_rebuilds;
+                static uint32_t wait_accum = 0, steal_accum = 0, vid_accum = 0, dcyc_accum = 0, rb_accum = 0;
+                wait_accum += ts_cpu_wait_t; steal_accum += ts_dma_steal_cyc; vid_accum += ts_dma_vid_cyc; dcyc_accum += ts_dma_cyc; rb_accum += ts_row_rebuilds;
+                ts_cpu_wait_t = ts_dma_steal_cyc = ts_dma_vid_cyc = ts_dma_cyc = ts_row_rebuilds = 0;
+                // rowRebuild = cache rows rebuilt because a CPU window changed page (TsDramCache.h,
+                // ~1500 cycles each) — the one cost of the row representation that scales with the guest.
+                Debug::log("[PERF] dram: cpuWait=%ukT/60f dma=%ukcyc stolen: cpu=%ukcyc vid=%ukcyc rowRebuild=%u/60f",
+                    (unsigned)(wait_accum / 1000), (unsigned)(dcyc_accum / 1000), (unsigned)(steal_accum / 1000), (unsigned)(vid_accum / 1000), (unsigned)rb_accum);
+                wait_accum = steal_accum = vid_accum = dcyc_accum = rb_accum = 0;
             }
             // Frame-work budget against fishbone's 32-line interrupt-free window.
             // Its own line: the ts line above is already near Debug::log's 256-byte cut.

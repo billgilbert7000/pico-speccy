@@ -147,16 +147,32 @@ static bool     s_dma_pending;  // int_dma latch
 #define TS_DRAM_MODEL 1
 #endif
 uint8_t  g_ts_memcyc = 0;
-uint16_t g_ts_tagbase[4];           // per CPU window, see TsConf.h
-uint16_t g_ts_cache_tag[256];       // 0 = invalid, else 0x8000 | page << 5 | a[13:9]
+// The cache model's state (TsDramCache.h): tags = the truth, rows = the per-window
+// view the hot path reads. ~1.3 KB of .bss, all of it read per guest access on
+// core0 — static on purpose (a palloc that landed in butter would be the
+// XIP-thrash pattern; see the TS scratch block note).
+uint16_t g_ts_cache_tag[256];
+uint16_t g_ts_tagbase[4];
+uint8_t* g_ts_hitrow[4] = { tsdc_none, tsdc_none, tsdc_none, tsdc_none };
+uint8_t* g_ts_invrow[4] = { tsdc_none, tsdc_none, tsdc_none, tsdc_none };
+uint8_t  g_ts_alias;
+uint8_t  tsdc_row[4][256];
+uint8_t  tsdc_none[256] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+uint16_t tsdc_row_page[4] = { 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF };
+#if PERF_TRACE
+volatile uint32_t ts_row_rebuilds = 0;   // cache rows rebuilt (a window changed page) per PERF window
+#endif
+TS_HOT void tsdcInvCold(uint16_t addr) { tsdcInvColdImpl(addr); }
 
-// g_ts_tagbase follows the bank map and CacheConfig (setBanks, the SysConfig /
+// The rows follow the bank map, W0_RAM and CacheConfig (setBanks, the SysConfig /
 // CacheConfig writes, reset).
 static void tsTagBaseRecalc() {
-    for (uint32_t w = 0; w < 4; w++) {
-        if (w == 0 && !TsConf::r.w0_ram()) { g_ts_tagbase[0] = 0; continue; }
-        g_ts_tagbase[w] = (uint16_t)(0x8000u | ((uint32_t)s_bank_phys[w] << 5) | (((TsConf::r.cacheconf >> w) & 1) ? 0 : 0x4000u));
-    }
+    const uint32_t n = tsdcRecalc(s_bank_phys, TsConf::r.w0_ram(), TsConf::r.cacheconf);
+#if PERF_TRACE
+    ts_row_rebuilds += n;
+#else
+    (void)n;
+#endif
 }
 static uint32_t s_steal_half;       // half-T-state remainder of the stolen cycles (ZCLK 3.5)
 static uint32_t s_dma_steal_t;      // T-states added to s_dma_end by CPU accesses (poll fast-forward)
@@ -192,10 +208,12 @@ TS_HOT static inline void tsDmaSteal() {
 #endif
 }
 
-// Reached only when tsMemNoDram(addr) was false: a RAM read that goes to DRAM.
+// Reached only when tsMemNoDram(addr) was false: a RAM read that goes to DRAM —
+// or a ROM read, which tsdcFill answers with "no DRAM request" (ROM is not in
+// the rows; the wait-free answer costs this one call instead of a load on
+// every access).
 TS_HOT uint32_t TsConf::cpuMemMiss(uint16_t addr, bool opfetch) {
-    const uint16_t tb = g_ts_tagbase[addr >> 14];
-    g_ts_cache_tag[(addr >> 1) & 0xFF] = (uint16_t)((tb & ~0x4000u) | ((addr >> 9) & 0x1F));   // cpu_strobe fills the cache
+    if (!tsdcFill(addr)) return 0;                       // ROM: no DRAM cycle, no wait
     if (g_ts_memcyc & 2) tsDmaSteal();
     if (!(g_ts_memcyc & 1)) return 0;
     const uint32_t w = opfetch ? 4 : 3;
@@ -235,7 +253,9 @@ volatile uint32_t ts_int_late = 0;
 volatile uint32_t ts_int_miss = 0;
 // The ring itself: oldest entry at ts_int_ring_w, newest at w-1.
 #define TS_INT_FREEZE 0   // 1 = stop the ring on fishbone's failure signatures; 0 = always keep the last N accepts
+#ifndef TS_INT_RING_N       // overridable from the compiler line: -DTS_INT_RING_N=64 makes a PERF build
 #define TS_INT_RING_N 512   // accepts kept (power of two); 512 ~ 1.6 fishbone frames
+#endif                      // 7 KB lighter for a 720x576 session (the video-mode gate wants FB grow + 10 KB free)
 struct TsIntRec { uint16_t pc, sp, ppc, vs; uint32_t t; uint8_t lat, src; };  // ppc = prev accept's pc; vs = VSINT
 // t is the frame T-state (>> m) and MUST be 32-bit: a TS-Conf frame is 71680
 // unscaled T, so a uint16 silently wrapped everything past line 292 (65536/224)
@@ -1400,7 +1420,7 @@ void TsConf::reset(bool cold) {
     s_frm_acked = false;
     s_frm_vsint = s_frm_hsint = 0xFFFF;
     s_lin_pending = s_dma_pending = s_dma_busy = false;
-    memset(g_ts_cache_tag, 0, sizeof g_ts_cache_tag);   // the cache comes up invalid
+    tsdcReset();        // the cache comes up invalid
     tsTagBaseRecalc();
     s_steal_half = s_dma_steal_t = s_poll_steal = 0;
     memcycRecalc();
