@@ -134,7 +134,7 @@ string(LENGTH "${PORT_VERSION}" PORT_VERSION_LEN)
 # Framebuffer chunking exercise (Video.cpp ensureMainFB): force the main
 # framebuffer into N whole-row chunks even when one block would fit, so the
 # fragmented-heap path runs on an ordinary boot. 0 = normal (one block first).
-set(FB_FORCE_CHUNKS "8" CACHE STRING "Debug: split the main framebuffer into N whole-row chunks (0 = off, 2/4/8)")
+set(FB_FORCE_CHUNKS "0" CACHE STRING "Debug: split the main framebuffer into N whole-row chunks (0 = off, 2/4/8)")
 
 # A W target IS its carrier, plus a different plugged-in module: turn the carrier
 # on so every pin arm, display matrix and runtime `#if MURM2` below keeps working,
@@ -593,7 +593,10 @@ set(DMAOVL_WIN_SIZE "AUTO" CACHE STRING "Size of the Z80 DMA code overlay window
 if (TSOVL_WIN_SIZE STREQUAL "AUTO")
     set(_TSOVL_BYTES 0)
     if (TSCONF_RENDER_IN_RAM)
-        math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 14336")
+        # Video.cpp's .tsovl measured 6912 B on PICO_DV/VGA_HDMI after the 2026-09-13
+        # renderer split (tsRenderExec at -O2 without unrolling, the GFXOVR merge in
+        # flash); it was 14 776 B before. 10 KB leaves ~3 KB for the fatter variants.
+        math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 10240")
     endif()
     if (TSCONF_HOT_IN_RAM)
         math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 3840")

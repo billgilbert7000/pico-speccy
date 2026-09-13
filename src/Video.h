@@ -366,6 +366,7 @@ public:
   static uint8_t  tsBorderSlot();        // Border register → fb byte for the live mode
   static void     tsRenderLine(uint32_t curline); // whole-line renderer (non-ZX modes / TSU); timed wrapper
   static void     tsRenderExec(const union TsRenderJob& j, const struct TsuState* st, const uint16_t* sfile, uint32_t seq); // one line, core1 or core0
+  static void     tsRenderExecOvr(const union TsRenderJob& j, const struct TsuState* st, const uint16_t* sfile, uint32_t seq, const struct TsLineCtx& c); // the GFXOVR merge (flash)
   static void     tsRenderCore1Pump();   // core1 render loop: run queued lines
   static void     tsRenderDrain();       // core0: wait for the core1 queue to empty
   static bool     tsRenderOverlaps(uint32_t addr, uint32_t len); // a RAM write would race a queued line

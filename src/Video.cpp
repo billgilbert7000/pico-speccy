@@ -42,6 +42,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "ui/UiGfx.h"   // uiPalette() for BMP capture of the new menu
 #include "Debug.h"
 #include "TsConf.h"
+#include "TsuBlit.h"
 #include "CodeOverlay.h"
 #include "TsFastMem.h"
 #include "Subsystem.h"
@@ -5247,6 +5248,150 @@ void VIDEO::tsRenderLine(uint32_t curline) {
 
 // Renders one job. Runs on core1 (queued) or core0 (TSU lines, no ring). Reads
 // nothing from TsConf::r except through tsuComposeLine (core0 only).
+// Per-line buffers of the compose stage. Bytes path: the TSU blits over the
+// base pixels in s_tsline; GFXOVR path: base in s_gline (bit 8 = pixv), TSU in
+// s_tsline, merged per pixel. Static on purpose (the 2026-09-07 palloc attempt
+// lost FPS — see CLAUDE.md).
+static uint16_t s_gline[512];
+static uint8_t  s_tsline[512];
+
+// What the GFXOVR path needs from tsRenderExec's prologue.
+struct TsLineCtx {
+    uint8_t* fb_row; int x0, w, xa, xb, cx0, cx1, xres; bool carveRow;
+    const uint8_t* map; uint8_t border_idx, gpal; bool nogfx; uint32_t curline, ygctr;
+};
+
+// ── GFXOVR path (VConfig b3: gfx pixels with pixv=1 win over the TSU) — the base
+// keeps its visibility bit (s_gline bit 8) and the two layers are merged per
+// pixel. Rare (fishbone, TMNT, Digger, Bruce Lee all run !GFXOVR), so it lives
+// in FLASH and keeps the overlay window for the bytes path (2026-09-13).
+void VIDEO::tsRenderExecOvr(const TsRenderJob& j, const TsuState* st, const uint16_t* sfile, uint32_t seq, const TsLineCtx& c) {
+    uint8_t* fb_row = c.fb_row;
+    const int x0 = c.x0, w = c.w, xa = c.xa, xb = c.xb, cx0 = c.cx0, cx1 = c.cx1;
+    const bool carveRow = c.carveRow;
+    const uint8_t* map = c.map;
+    const uint8_t border_idx = c.border_idx, gpal = c.gpal;
+    const bool nogfx = c.nogfx, gfxovr = true;
+    const uint32_t curline = c.curline, ygctr = c.ygctr;
+    (void)c.xres;
+    const uint32_t t0b = tsRenderUs();
+    if (nogfx) {
+        for (int x = 0; x < w; x++) s_gline[x] = border_idx;
+    } else if (ts_vmode_live == TSV_ZX) {
+        // addr_zx: gfx {row[7:6], row[2:0], row[5:3], col}, attr {110, row[7:3],
+        // col}, 32 columns wrapping (cnt_col[4:1]) across a wider area; colour
+        // {palsel, attr[6], dot ? attr[2:0] : attr[5:3]}, FLASH swaps.
+        const uint8_t* scr = TsConf::pagePtr(j.l.vpage);
+        const uint32_t row = ygctr & 0xFF;
+        const uint32_t goff = ((row & 0xC0) << 5) | ((row & 7) << 8) | ((row & 0x38) << 2);
+        const uint32_t aoff = 0x1800 | ((row & 0xF8) << 2);
+        if (!scr) { for (int x = 0; x < w; x++) s_gline[x] = border_idx; }
+        else for (int x = 0; x < w; x++) {
+            const uint32_t col = (uint32_t)(x >> 3) & 31;
+            const uint8_t b = scr[goff | col];
+            const uint8_t a = scr[aoff | col];
+            uint8_t dot = (b >> (7 - (x & 7))) & 1;
+            if (a & flashing) dot ^= 1;
+            const uint8_t c = (uint8_t)(gpal | (a & 0x40) >> 3 | (dot ? (a & 7) : ((a >> 3) & 7)));
+            s_gline[x] = (uint16_t)c | (dot ? 0x100 : 0);
+        }
+    } else if (ts_vmode_live == TSV_16C) {
+        // addr_16c {vpage[7:3], row[8:0], col[6:0]}: 512x512 4 bpp, 256 B/line
+        // over 8 pages (64 lines each), window at GXOffs wrapping at 512, high
+        // nibble = left pixel; colour {palsel, nibble}.
+        const uint8_t* ln = TsConf::pagePtr((j.l.vpage & 0xF8) + (ygctr >> 6));
+        if (!ln) { for (int x = 0; x < w; x++) s_gline[x] = border_idx; }
+        else {
+            ln += (ygctr & 63) << 8;
+            uint16_t g16[16];
+            for (int n = 0; n < 16; n++) g16[n] = (uint16_t)(gpal | n) | (n ? 0x100 : 0);
+            uint32_t sx = j.l.g_xoffs & 0x1FF;
+            int x = 0;
+            if (sx & 1) { s_gline[0] = g16[ln[sx >> 1] & 0x0F]; x = 1; sx = (sx + 1) & 0x1FF; }
+            for (; x + 1 < w; x += 2, sx = (sx + 2) & 0x1FF) {
+                const uint8_t b = ln[sx >> 1];
+                s_gline[x] = g16[b >> 4]; s_gline[x + 1] = g16[b & 0x0F];
+            }
+            if (x < w) s_gline[x] = g16[ln[sx >> 1] >> 4];
+        }
+    } else { // TSV_256C
+        // addr_256c {vpage[7:4], row, col[7:0]}: 512 B/line, 32 lines per page,
+        // byte = CRAM index.
+        const uint8_t* ln = TsConf::pagePtr((j.l.vpage & 0xF0) + (ygctr >> 5));
+        if (!ln) { for (int x = 0; x < w; x++) s_gline[x] = border_idx; }
+        else {
+            ln += (ygctr & 31) << 9;
+            uint32_t sx = j.l.g_xoffs;
+            for (int x = 0; x < w; x++, sx++) {
+                const uint8_t c = ln[sx & 0x1FF];
+                s_gline[x] = (uint16_t)c | (c ? 0x100 : 0);
+            }
+        }
+    }
+
+    uint32_t t1 = tsRenderUs();
+    ts_base_us += t1 - t0b;
+    if (ts_tsu_live) {
+        memset(s_tsline, 0, 512);   // 0 = transparent: the output loop picks the base pixel there
+        tsuComposeLine((uint32_t)curline + ts_crop_top, s_tsline, *st, sfile, j.l.palsel, seq, (uint8_t)((j.l.kind >> 1) & 1));
+        const uint32_t t2 = tsRenderUs();
+        ts_tsu_us += t2 - t1;
+        t1 = t2;
+    }
+
+    // Output. Without the ts256 remap the fb byte is the palette slot itself:
+    // 16c's gpal bank sits on slots 0..15 (low nibble of the index). The clip
+    // to the fb row is done once; the pixel rule is picked once; four pixels go
+    // out per aligned uint32 store in the ISR's x^2 order (the per-pixel
+    // clip/carve/mode test version cost ~120 ns a pixel on core1).
+    if (carveRow) {
+        for (int x = xa; x < xb; x++) {
+            const int fx = x0 + x;
+            if (fx >= cx0 && fx < cx1) continue;   // stats box / notify banner (the OSD owns it)
+            uint8_t out;
+            if (ts_tsu_live) {
+                const uint8_t t = s_tsline[x];
+                const bool tsu_vis = (t & 0x0F) != 0;
+                const bool gfx_vis = (s_gline[x] & 0x100) != 0;
+                if (gfxovr) out = gfx_vis ? (uint8_t)s_gline[x] : (tsu_vis ? t : border_idx);
+                else        out = tsu_vis ? t : (uint8_t)s_gline[x];
+            } else {
+                out = (uint8_t)s_gline[x];
+            }
+            fb_row[fx ^ 2] = map[out];
+        }
+    } else {
+#define TS_OUT_LOOP(EXPR) do { \
+        int x = xa; int fx = x0 + x; \
+        while (x < xb && (fx & 3)) { fb_row[fx ^ 2] = map[EXPR(x)]; x++; fx++; } \
+        while (x + 4 <= xb) { \
+            const uint32_t p0 = map[EXPR(x)], p1 = map[EXPR(x + 1)], p2 = map[EXPR(x + 2)], p3 = map[EXPR(x + 3)]; \
+            *(uint32_t*)(fb_row + fx) = p2 | (p3 << 8) | (p0 << 16) | (p1 << 24); \
+            x += 4; fx += 4; } \
+        while (x < xb) { fb_row[fx ^ 2] = map[EXPR(x)]; x++; fx++; } } while (0)
+#define TS_PX_G(x) ((uint8_t)s_gline[x])
+#define TS_PX_T(x) ((s_tsline[x] & 0x0F) ? s_tsline[x] : (uint8_t)s_gline[x])
+#define TS_PX_O(x) ((s_gline[x] & 0x100) ? (uint8_t)s_gline[x] : ((s_tsline[x] & 0x0F) ? s_tsline[x] : border_idx))
+        if (!ts_tsu_live)  TS_OUT_LOOP(TS_PX_G);
+        else if (!gfxovr)  TS_OUT_LOOP(TS_PX_T);
+        else               TS_OUT_LOOP(TS_PX_O);
+#undef TS_OUT_LOOP
+#undef TS_PX_G
+#undef TS_PX_T
+#undef TS_PX_O
+    }
+    ts_out_us += tsRenderUs() - t1;
+}
+
+// memset [a,b) of a content row with the border byte, minus the OSD carve rect.
+static inline __attribute__((always_inline)) void tsFillPad(uint8_t* fb_row, int xres, bool carveRow, int cx0, int cx1, uint8_t brd, int a, int b) {
+    if (a < 0) a = 0; if (b > xres) b = xres;
+    if (b <= a) return;
+    if (!carveRow || b <= cx0 || a >= cx1) { memset(fb_row + a, brd, (size_t)(b - a)); return; }
+    if (a < cx0) memset(fb_row + a, brd, (size_t)(cx0 - a));
+    if (b > cx1) memset(fb_row + cx1, brd, (size_t)(b - cx1));
+}
+__attribute__((optimize("O2", "no-unroll-loops")))
 void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st, const uint16_t* sfile, uint32_t seq) {
     const uint32_t curline = j.l.line;
     const uint32_t ygctr = j.l.ygctr;
@@ -5281,13 +5426,9 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
     if (!carveRow && (int)frow >= ts_notice_y0 && (int)frow < ts_notice_y1) {
         carveRow = true; cx0 = ts_notice_x0; cx1 = ts_notice_x1;
     }
-    auto fillPad = [&](int a, int b) {           // memset [a,b) minus the carve
-        if (a < 0) a = 0; if (b > xres) b = xres;
-        if (b <= a) return;
-        if (!carveRow || b <= cx0 || a >= cx1) { memset(fb_row + a, brd, b - a); return; }
-        if (a < cx0) memset(fb_row + a, brd, cx0 - a);
-        if (b > cx1) memset(fb_row + cx1, brd, b - cx1);
-    };
+    // Side pads go through tsFillPad (a function, not a lambda: the lambda's
+    // clone landed in .text = flash, called twice per line from core1).
+#define fillPad(a_, b_) tsFillPad(fb_row, xres, carveRow, cx0, cx1, brd, (a_), (b_))
 
     // Side pads (the area may also overhang the fb: RRES 360 on a 320 fb).
     int x0 = pad_l, x1 = pad_l + (int)g.w;          // area in fb bytes
@@ -5351,8 +5492,6 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
     // (pixv: ZX ink dot after flash, non-zero colour in 16c/256c) — the
     // GFXOVR priority input. TSU pixels land in s_tsline as CRAM indices, 0 =
     // transparent (video_render.v: tsu_visible = |tsdata[3:0]).
-    static uint16_t s_gline[512];
-    static uint8_t  s_tsline[512];
     const uint32_t t0b = tsRenderUs();
     const int w = (int)g.w;
     const uint8_t gpal = (uint8_t)((j.l.palsel & 0x0F) << 4);
@@ -5360,118 +5499,123 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
     const bool nogfx = (ts_vmode_live == TSV_NOGFX);
     const bool gfxovr = j.l.vconf & 0x08;
 
-    if (nogfx) {
-        for (int x = 0; x < w; x++) s_gline[x] = border_idx;
-    } else if (ts_vmode_live == TSV_ZX) {
-        // addr_zx: gfx {row[7:6], row[2:0], row[5:3], col}, attr {110, row[7:3],
-        // col}, 32 columns wrapping (cnt_col[4:1]) across a wider area; colour
-        // {palsel, attr[6], dot ? attr[2:0] : attr[5:3]}, FLASH swaps.
-        const uint8_t* scr = TsConf::pagePtr(j.l.vpage);
-        const uint32_t row = ygctr & 0xFF;
-        const uint32_t goff = ((row & 0xC0) << 5) | ((row & 7) << 8) | ((row & 0x38) << 2);
-        const uint32_t aoff = 0x1800 | ((row & 0xF8) << 2);
-        if (!scr) { for (int x = 0; x < w; x++) s_gline[x] = border_idx; }
-        else for (int x = 0; x < w; x++) {
-            const uint32_t col = (uint32_t)(x >> 3) & 31;
-            const uint8_t b = scr[goff | col];
-            const uint8_t a = scr[aoff | col];
-            uint8_t dot = (b >> (7 - (x & 7))) & 1;
-            if (a & flashing) dot ^= 1;
-            const uint8_t c = (uint8_t)(gpal | (a & 0x40) >> 3 | (dot ? (a & 7) : ((a >> 3) & 7)));
-            s_gline[x] = (uint16_t)c | (dot ? 0x100 : 0);
-        }
-    } else if (ts_vmode_live == TSV_16C) {
-        // addr_16c {vpage[7:3], row[8:0], col[6:0]}: 512x512 4 bpp, 256 B/line
-        // over 8 pages (64 lines each), window at GXOffs wrapping at 512, high
-        // nibble = left pixel; colour {palsel, nibble}.
-        const uint8_t* ln = TsConf::pagePtr((j.l.vpage & 0xF8) + (ygctr >> 6));
-        if (!ln) { for (int x = 0; x < w; x++) s_gline[x] = border_idx; }
-        else {
-            ln += (ygctr & 63) << 8;
-            uint16_t g16[16];
-            for (int n = 0; n < 16; n++) g16[n] = (uint16_t)(gpal | n) | (n ? 0x100 : 0);
-            uint32_t sx = j.l.g_xoffs & 0x1FF;
-            int x = 0;
-            if (sx & 1) { s_gline[0] = g16[ln[sx >> 1] & 0x0F]; x = 1; sx = (sx + 1) & 0x1FF; }
-            for (; x + 1 < w; x += 2, sx = (sx + 2) & 0x1FF) {
-                const uint8_t b = ln[sx >> 1];
-                s_gline[x] = g16[b >> 4]; s_gline[x + 1] = g16[b & 0x0F];
-            }
-            if (x < w) s_gline[x] = g16[ln[sx >> 1] >> 4];
-        }
-    } else { // TSV_256C
-        // addr_256c {vpage[7:4], row, col[7:0]}: 512 B/line, 32 lines per page,
-        // byte = CRAM index.
-        const uint8_t* ln = TsConf::pagePtr((j.l.vpage & 0xF0) + (ygctr >> 5));
-        if (!ln) { for (int x = 0; x < w; x++) s_gline[x] = border_idx; }
-        else {
-            ln += (ygctr & 31) << 9;
-            uint32_t sx = j.l.g_xoffs;
-            for (int x = 0; x < w; x++, sx++) {
-                const uint8_t c = ln[sx & 0x1FF];
-                s_gline[x] = (uint16_t)c | (c ? 0x100 : 0);
-            }
-        }
-    }
-
-    uint32_t t1 = tsRenderUs();
-    ts_base_us += t1 - t0b;
-    if (ts_tsu_live) {
-        tsuComposeLine((uint32_t)curline + ts_crop_top, s_tsline, *st, sfile, j.l.palsel, seq, (uint8_t)((j.l.kind >> 1) & 1));
-        const uint32_t t2 = tsRenderUs();
-        ts_tsu_us += t2 - t1;
-        t1 = t2;
-    }
-
-    // Output. Without the ts256 remap the fb byte is the palette slot itself:
-    // 16c's gpal bank sits on slots 0..15 (low nibble of the index). The clip
-    // to the fb row is done once; the pixel rule is picked once; four pixels go
-    // out per aligned uint32 store in the ISR's x^2 order (the per-pixel
-    // clip/carve/mode test version cost ~120 ns a pixel on core1).
+    // Output map (fb byte = palette slot; ts256 remap while it is live).
     static uint8_t s_nibmap[256];
     static bool s_nibmap_ok = false;
     if (!s_nibmap_ok) { for (int i = 0; i < 256; i++) s_nibmap[i] = (uint8_t)(i & 0x0F); s_nibmap_ok = true; }
     const uint8_t* map = ts_pal256_live ? ts256_map : s_nibmap;
     const int xa = x0 < 0 ? -x0 : 0;
     const int xb = (x0 + w > xres) ? xres - x0 : w;
-    if (carveRow) {
-        for (int x = xa; x < xb; x++) {
-            const int fx = x0 + x;
-            if (fx >= cx0 && fx < cx1) continue;   // stats box / notify banner (the OSD owns it)
-            uint8_t out;
-            if (ts_tsu_live) {
-                const uint8_t t = s_tsline[x];
-                const bool tsu_vis = (t & 0x0F) != 0;
-                const bool gfx_vis = (s_gline[x] & 0x100) != 0;
-                if (gfxovr) out = gfx_vis ? (uint8_t)s_gline[x] : (tsu_vis ? t : border_idx);
-                else        out = tsu_vis ? t : (uint8_t)s_gline[x];
-            } else {
-                out = (uint8_t)s_gline[x];
+
+    if (!gfxovr) {
+        // ── Bytes path (the common case, fishbone included): TSU over gfx ──
+        // The base layer is rendered as CRAM indices straight into the TSU
+        // line buffer and the TSU blits OVER it — a written TSU pixel is one
+        // whose source nibble is non-zero, which is exactly video_render.v's
+        // tsu_visible, so the per-pixel "TSU or base" select of the GFXOVR
+        // path below is not needed and the output is one table lookup per
+        // pixel. 2026-09-13: fishbone c1 = 14.4 ms of which base 3.9 / tsu 8.3 /
+        // out 2.1 — this path plus the SWAR blit (TsuBlit.h) is the answer.
+        uint8_t* bl = s_tsline;
+        if (nogfx) {
+            memset(bl, border_idx, (size_t)w);
+        } else if (ts_vmode_live == TSV_ZX) {
+            const uint8_t* scr = TsConf::pagePtr(j.l.vpage);
+            const uint32_t row = ygctr & 0xFF;
+            const uint32_t goff = ((row & 0xC0) << 5) | ((row & 7) << 8) | ((row & 0x38) << 2);
+            const uint32_t aoff = 0x1800 | ((row & 0xF8) << 2);
+            if (!scr) memset(bl, border_idx, (size_t)w);
+            else {
+                int x = 0;
+                for (; x + 8 <= w; x += 8) {                // one attribute cell = 8 pixels
+                    const uint32_t col = (uint32_t)(x >> 3) & 31;
+                    uint8_t b = scr[goff | col];
+                    const uint8_t a = scr[aoff | col];
+                    if (a & flashing) b ^= 0xFF;
+                    const uint8_t base = (uint8_t)(gpal | ((a & 0x40) >> 3));
+                    const uint8_t ink = (uint8_t)(base | (a & 7)), paper = (uint8_t)(base | ((a >> 3) & 7));
+                    uint8_t* o = bl + x;
+                    o[0] = (b & 0x80) ? ink : paper; o[1] = (b & 0x40) ? ink : paper;
+                    o[2] = (b & 0x20) ? ink : paper; o[3] = (b & 0x10) ? ink : paper;
+                    o[4] = (b & 0x08) ? ink : paper; o[5] = (b & 0x04) ? ink : paper;
+                    o[6] = (b & 0x02) ? ink : paper; o[7] = (b & 0x01) ? ink : paper;
+                }
+                for (; x < w; x++) {
+                    const uint32_t col = (uint32_t)(x >> 3) & 31;
+                    const uint8_t b = scr[goff | col];
+                    const uint8_t a = scr[aoff | col];
+                    uint8_t dot = (b >> (7 - (x & 7))) & 1;
+                    if (a & flashing) dot ^= 1;
+                    bl[x] = (uint8_t)(gpal | (a & 0x40) >> 3 | (dot ? (a & 7) : ((a >> 3) & 7)));
+                }
             }
-            fb_row[fx ^ 2] = map[out];
+        } else if (ts_vmode_live == TSV_16C) {
+            const uint8_t* ln = TsConf::pagePtr((j.l.vpage & 0xF8) + (ygctr >> 6));
+            if (!ln) memset(bl, border_idx, (size_t)w);
+            else {
+                ln += (ygctr & 63) << 8;
+                uint32_t sx = j.l.g_xoffs & 0x1FF;
+                int x = 0;
+                // Up to the next 4-byte source boundary one pixel at a time, then
+                // 8 pixels per aligned 32-bit PSRAM read (the XIP fill is the
+                // expensive half; the nibble expansion is TsuBlit.h's SWAR).
+                for (; x < w && (sx & 7); x++, sx = (sx + 1) & 0x1FF) {
+                    const uint8_t b = ln[sx >> 1];
+                    bl[x] = (uint8_t)(gpal | ((sx & 1) ? (b & 0x0F) : (b >> 4)));
+                }
+                const uint32_t gpal4 = (uint32_t)gpal * 0x01010101u;
+                for (; x + 8 <= w; x += 8, sx = (sx + 8) & 0x1FF) {
+                    const uint32_t s4 = *(const uint32_t*)(ln + (sx >> 1));
+                    uint32_t w0, w1;
+                    tsuIl((s4 >> 4) & 0x0F0F0F0Fu, s4 & 0x0F0F0F0Fu, w0, w1);
+                    tsuSt32(bl + x, w0 | gpal4); tsuSt32(bl + x + 4, w1 | gpal4);
+                }
+                for (; x < w; x++, sx = (sx + 1) & 0x1FF) {
+                    const uint8_t b = ln[sx >> 1];
+                    bl[x] = (uint8_t)(gpal | ((sx & 1) ? (b & 0x0F) : (b >> 4)));
+                }
+            }
+        } else { // TSV_256C: the byte IS the CRAM index — a copy with the 512 wrap
+            const uint8_t* ln = TsConf::pagePtr((j.l.vpage & 0xF0) + (ygctr >> 5));
+            if (!ln) memset(bl, border_idx, (size_t)w);
+            else {
+                ln += (ygctr & 31) << 9;
+                const uint32_t sx = j.l.g_xoffs & 0x1FF;
+                const int n1 = (int)(512 - sx) < w ? (int)(512 - sx) : w;
+                memcpy(bl, ln + sx, (size_t)n1);
+                if (w > n1) memcpy(bl + n1, ln, (size_t)(w - n1));
+            }
         }
-    } else {
-#define TS_OUT_LOOP(EXPR) do { \
-        int x = xa; int fx = x0 + x; \
-        while (x < xb && (fx & 3)) { fb_row[fx ^ 2] = map[EXPR(x)]; x++; fx++; } \
-        while (x + 4 <= xb) { \
-            const uint32_t p0 = map[EXPR(x)], p1 = map[EXPR(x + 1)], p2 = map[EXPR(x + 2)], p3 = map[EXPR(x + 3)]; \
-            *(uint32_t*)(fb_row + fx) = p2 | (p3 << 8) | (p0 << 16) | (p1 << 24); \
-            x += 4; fx += 4; } \
-        while (x < xb) { fb_row[fx ^ 2] = map[EXPR(x)]; x++; fx++; } } while (0)
-#define TS_PX_G(x) ((uint8_t)s_gline[x])
-#define TS_PX_T(x) ((s_tsline[x] & 0x0F) ? s_tsline[x] : (uint8_t)s_gline[x])
-#define TS_PX_O(x) ((s_gline[x] & 0x100) ? (uint8_t)s_gline[x] : ((s_tsline[x] & 0x0F) ? s_tsline[x] : border_idx))
-        if (!ts_tsu_live)  TS_OUT_LOOP(TS_PX_G);
-        else if (!gfxovr)  TS_OUT_LOOP(TS_PX_T);
-        else               TS_OUT_LOOP(TS_PX_O);
-#undef TS_OUT_LOOP
-#undef TS_PX_G
-#undef TS_PX_T
-#undef TS_PX_O
+        uint32_t t1 = tsRenderUs();
+        ts_base_us += t1 - t0b;
+        if (ts_tsu_live) {
+            tsuComposeLine((uint32_t)curline + ts_crop_top, bl, *st, sfile, j.l.palsel, seq, (uint8_t)((j.l.kind >> 1) & 1));
+            const uint32_t t2 = tsRenderUs();
+            ts_tsu_us += t2 - t1;
+            t1 = t2;
+        }
+        int x = xa, fx = x0 + xa;
+        if (carveRow) {
+            for (; x < xb; x++, fx++) {
+                if (fx >= cx0 && fx < cx1) continue;   // stats box / notify banner (the OSD owns it)
+                fb_row[fx ^ 2] = map[bl[x]];
+            }
+        } else {
+            while (x < xb && (fx & 3)) { fb_row[fx ^ 2] = map[bl[x]]; x++; fx++; }
+            while (x + 4 <= xb) {
+                const uint32_t p0 = map[bl[x]], p1 = map[bl[x + 1]], p2 = map[bl[x + 2]], p3 = map[bl[x + 3]];
+                *(uint32_t*)(fb_row + fx) = p2 | (p3 << 8) | (p0 << 16) | (p1 << 24);
+                x += 4; fx += 4;
+            }
+            while (x < xb) { fb_row[fx ^ 2] = map[bl[x]]; x++; fx++; }
+        }
+        ts_out_us += tsRenderUs() - t1;
+        return;
     }
-    ts_out_us += tsRenderUs() - t1;
+
+    tsRenderExecOvr(j, st, sfile, seq, TsLineCtx{ fb_row, x0, w, xa, xb, cx0, cx1, xres, carveRow, map, border_idx, gpal, nogfx, curline, ygctr });
 }
+#undef fillPad
 
 // ── TSU: the Tile-Sprite Unit's line buffer (video_ts.v / Unreal render_ts) ──
 // Layers bottom→top: sprites 0, tiles 0, sprites 1, tiles 1, sprites 2 — each
@@ -5485,31 +5629,23 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
 // walked in order; `leap` closes the current sprite layer after that sprite;
 // visible when (line - y) & 511 <= ys*8+7. Palette: {tXpal(2) tile.pal(2)}
 // or sprite pal(4), high nibble of the CRAM index.
+// Bitmap page pointers: one TsConf::pagePtr per 64-line page group of the
+// 512x512 bitmap instead of a call per tile / sprite element (~130 a line).
+// A plain function, not a lambda: GCC put the lambda's clone in .text (flash).
+static inline __attribute__((always_inline)) void tsuBmPages(uint8_t gpage, const uint8_t** bm) {
+    for (uint32_t p = 0; p < 8; p++) bm[p] = TsConf::pagePtr((gpage & 0xF8) + p);
+}
+
+__attribute__((optimize("O2", "no-unroll-loops")))
 void TS_RENDER_HOT VIDEO::tsuComposeLine(uint32_t line, uint8_t* ts, const TsuState& st, const uint16_t* sfile, uint8_t palsel, uint32_t seq, uint8_t par) {
-    memset(ts, 0, 512);
+    // `ts` arrives PRE-FILLED by the caller: zeros (transparent) on the GFXOVR
+    // path, the base layer's pixels on the bytes path — the blits only ever
+    // write where the source nibble is non-zero, so both read as "TSU over it".
     const uint8_t tsc = st.tsconf;
     const bool s_en = tsc & 0x80, t1_en = tsc & 0x40, t0_en = tsc & 0x20;
     const bool t1z = tsc & 0x08, t0z = tsc & 0x04;
     static const uint8_t TS_RENDER_RO kTiles[4] = { 34, 42, 42, 47 };
     const int ntiles = kTiles[ts_rres_live & 3];
-
-    // 8 pixels of a bitmap element line into the buffer at pos, direction dir.
-    auto blit8 = [&](const uint8_t* src, uint32_t pos, int dir, uint8_t pal) {
-        uint32_t s4; memcpy(&s4, src, 4);
-        if (!s4) return (uint32_t)((pos + 8 * dir) & 0x1FF);   // whole element transparent
-        for (int i = 0; i < 4; i++) {
-            const uint8_t c = src[i];
-            if (c & 0xF0) ts[pos] = (uint8_t)(pal | (c >> 4));
-            pos = (pos + dir) & 0x1FF;
-            if (c & 0x0F) ts[pos] = (uint8_t)(pal | (c & 0x0F));
-            pos = (pos + dir) & 0x1FF;
-        }
-        return pos;
-    };
-    auto bmLine = [&](uint8_t gpage, uint32_t bline) -> const uint8_t* {
-        const uint8_t* p = TsConf::pagePtr((gpage & 0xF8) + ((bline >> 6) & 7));
-        return p ? p + ((bline & 63) << 8) : nullptr;
-    };
 
     auto tiles = [&](int layer) TS_RENDER_HOT {
         const bool en = layer ? t1_en : t0_en;
@@ -5521,6 +5657,7 @@ void TS_RENDER_HOT VIDEO::tsuComposeLine(uint32_t line, uint8_t* ts, const TsuSt
         const uint8_t  gpage = layer ? st.t1gpage : st.t0gpage;
         const uint8_t  tpal  = (uint8_t)(((palsel >> (layer ? 6 : 4)) & 3) << 6);
         const bool     tz    = layer ? t1z : t0z;
+        const uint8_t* bm[8]; tsuBmPages(gpage, bm);
         const uint32_t ty = (line + yoffs) & 0x1FF;
         const uint8_t* row = tm + ((ty >> 3) << 8) + (layer ? 128 : 0);
         const uint32_t tline = ty & 7;
@@ -5547,18 +5684,20 @@ void TS_RENDER_HOT VIDEO::tsuComposeLine(uint32_t line, uint8_t* ts, const TsuSt
             const uint16_t tnum = tw & 0x0FFF;
             if (!tnum && !tz) continue;
             const uint32_t bl = ((tnum >> 6) << 3) + ((tw & 0x8000) ? (tline ^ 7) : tline);
-            const uint8_t* src = bmLine(gpage, bl);
+            const uint8_t* src = bm[(bl >> 6) & 7];
             if (!src) continue;
-            src += (tnum & 63) << 2;
+            src += ((bl & 63) << 8) + ((tnum & 63) << 2);
             const uint8_t pal = (uint8_t)(tpal | ((tw >> 12) & 3) << 4);
-            if (tw & 0x4000) blit8(src, (pos + 7) & 0x1FF, -1, pal);
-            else             blit8(src, pos, 1, pal);
+            if (tw & 0x4000) tsuBlit8(ts, (pos + 7) & 0x1FF, -1, pal, src);
+            else             tsuBlit8(ts, pos, 1, pal, src);
         }
     };
 
     // Sprite descriptors are consumed in order across the three layers.
     unsigned snum = 0;
-    auto sprites = [&](int layerIdx) {
+    const uint8_t* sbm[8];
+    if (s_en) tsuBmPages(st.sgpage, sbm);
+    auto sprites = [&](int layerIdx) TS_RENDER_HOT {
         (void)layerIdx;
         if (!s_en) { return; }
         while (snum < 85) {
@@ -5573,14 +5712,15 @@ void TS_RENDER_HOT VIDEO::tsuComposeLine(uint32_t line, uint8_t* ts, const TsuSt
                     const uint32_t xsz = (((w1 >> 9) & 7) + 1) << 3;
                     const uint16_t tnum = w2 & 0x0FFF;
                     const uint32_t bline = ((tnum >> 6) << 3) + ((w0 & 0x8000) ? (ysz - 1 - sy) : sy);
-                    const uint8_t* src = bmLine(st.sgpage, bline);
+                    const uint8_t* src = sbm[(bline >> 6) & 7];
                     if (src) {
-                        src += (tnum & 63) << 2;
+                        src += ((bline & 63) << 8) + ((tnum & 63) << 2);
                         const uint8_t pal = (uint8_t)((w2 >> 12) << 4);
                         const bool xflp = w1 & 0x8000;
                         uint32_t pos = xflp ? ((w1 & 0x1FF) + xsz - 1) & 0x1FF : (w1 & 0x1FF);
+                        const int dir = xflp ? -1 : 1;
                         for (uint32_t k = 0; k < (xsz >> 3); k++, src += 4)
-                            pos = blit8(src, pos, xflp ? -1 : 1, pal);
+                            pos = tsuBlit8(ts, pos, dir, pal, src);
                     }
                 }
             }

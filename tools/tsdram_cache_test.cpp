@@ -15,11 +15,11 @@ uint8_t* g_ts_hitrow[4];
 uint8_t* g_ts_invrow[4];
 uint16_t g_ts_cache_tag[256];
 uint16_t g_ts_tagbase[4];
-uint8_t  g_ts_alias;
-uint8_t  tsdc_row[4][256];
+uint8_t  tsdc_row[TSDC_ROWS][256];
 uint8_t  tsdc_none[256];
-uint16_t tsdc_row_page[4];
-void tsdcInvCold(uint16_t addr) { tsdcInvColdImpl(addr); }
+uint16_t tsdc_row_page[TSDC_ROWS];
+uint32_t tsdc_row_use[TSDC_ROWS];
+uint8_t  tsdc_page_row[256];
 static int cold_calls = 0;
 
 // --- reference: tags only ---------------------------------------------------
@@ -62,7 +62,7 @@ static bool modelRead(uint16_t a) {
 }
 
 int main() {
-    static const uint8_t pool[] = { 0, 2, 3, 5, 7, 0x80, 0xFF, 1 };   // small pool -> frequent aliases
+    static const uint8_t pool[] = { 0, 2, 3, 5, 7, 0x80, 0xFF, 1, 9, 10, 11, 12 };   // 12 pages > TSDC_ROWS: aliases AND pool evictions
     Ref r{};
     tsdcReset();
     r.w0ram = false; r.cc = 0x0F;
@@ -97,8 +97,8 @@ int main() {
         } else {                                 // write
             uint16_t a = (rnd() & 1) ? (uint16_t)rnd() : (uint16_t)((rnd() & 0xC1FF) | ((rnd() & 3) << 9));
             const int cc0 = cold_calls;
-            if (g_ts_alias) aliasSteps++;
-            // the firmware's shape: the leaf half first, the full rule when it declines
+            { int same = 0; for (int i = 0; i < 4; i++) for (int k = i + 1; k < 4; k++) if (r.page[i] == r.page[k] && r.ram(i) && r.ram(k)) same = 1; if (same) aliasSteps++; }
+            // the firmware's shape: the leaf half first, the full rule when it hits
             if (rnd() & 1) { if (tsMemWriteHit(a)) { cold_calls++; tsMemWriteInv(a); } }   // the leaf shape
             else tsMemWriteInv(a);
             r.inv(a); writes++;
@@ -106,13 +106,21 @@ int main() {
         }
         if ((it & 0xFFF) == 0) {                 // the tags themselves must agree, and the rows with the tags
             for (int i = 0; i < 256; i++) CHECK(g_ts_cache_tag[i] == r.tag[i], "tag[%d] model=%04X ref=%04X", i, g_ts_cache_tag[i], r.tag[i]);
-            for (uint32_t w = 0; w < 4; w++) {
-                if (tsdc_row_page[w] == 0xFFFF) continue;
+            for (uint32_t rr = 0; rr < TSDC_ROWS; rr++) {
+                if (tsdc_row_page[rr] == 0xFFFF) continue;
+                CHECK(tsdc_page_row[tsdc_row_page[rr] & 0xFF] == rr, "page_row[%u] != row %u", tsdc_row_page[rr], rr);
                 for (int i = 0; i < 256; i++) {
                     const uint16_t t = g_ts_cache_tag[i];
-                    const uint8_t want = ((t & 0xFFE0u) == (0x8000u | ((uint32_t)tsdc_row_page[w] << 5))) ? (uint8_t)(t & 0x1F) : 0xFF;
-                    CHECK(tsdc_row[w][i] == want, "row[%u][%d]=%02X want %02X", w, i, tsdc_row[w][i], want);
+                    const uint8_t want = ((t & 0xFFE0u) == (0x8000u | ((uint32_t)tsdc_row_page[rr] << 5))) ? (uint8_t)(t & 0x1F) : 0xFF;
+                    CHECK(tsdc_row[rr][i] == want, "row[%u][%d]=%02X want %02X (page %u)", rr, i, tsdc_row[rr][i], want, tsdc_row_page[rr]);
                 }
+            }
+            for (int pg = 0; pg < 256; pg++) if (tsdc_page_row[pg] != 0xFF) CHECK(tsdc_row_page[tsdc_page_row[pg]] == pg, "page_row[%d] -> row %u holds %u", pg, tsdc_page_row[pg], tsdc_row_page[tsdc_page_row[pg]]);
+            for (uint32_t w = 0; w < 4; w++) {   // every RAM window points at its page's row
+                if (!r.ram(w)) { CHECK(g_ts_hitrow[w] == tsdc_none && g_ts_invrow[w] == tsdc_none, "ROM window %u has a row", w); continue; }
+                const uint8_t rw = tsdc_page_row[r.page[w]];
+                CHECK(rw != 0xFF, "window %u page %u not in the pool", w, r.page[w]);
+                if (rw != 0xFF) CHECK(g_ts_invrow[w] == tsdc_row[rw], "window %u invrow != its page's row", w);
             }
             for (int i = 0; i < 256; i++) CHECK(tsdc_none[i] == 0xFF, "tsdc_none[%d] clobbered", i);
         }

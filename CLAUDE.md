@@ -2459,8 +2459,10 @@ it) + CPU.cpp + TsConf.cpp; test builds `debug/DVp2-dram-rows-1.0.5.elf` (plain)
   from a header. `TSDC_INLINE` = `always_inline`. Check with `objdump` that the fetch
   region of `exec_nocheck` has no `bl` but `cpuMemMiss` and `tsDrawTick`.
 - **Representation**: the truth is still one tag per cache index (`g_ts_cache_tag`),
-  but the per-access test reads a per-WINDOW ROW — `tsdc_row[w][idx]` = a[13:9] of the
-  word window w's page has cached at idx, or 0xFF — through a 4-entry pointer table:
+  but the per-access test reads a ROW — `tsdc_row[r][idx]` = a[13:9] of the word the
+  row's PAGE has cached at idx, or 0xFF — through a 4-entry per-window pointer table
+  (rows are per PAGE since the demo-200 finding below; the text that follows describes
+  the first, per-window cut where it says "four rows" / `g_ts_alias`):
   `g_ts_hitrow[addr >> 14][(addr >> 1) & 0xFF] == (addr >> 9) & 0x1F`. 8 instructions
   and two scratch registers against 11 + `push {r4}`. ROM in window 0 and a disabled
   CacheConfig bit are POINTER SWAPS to `tsdc_none` (all 0xFF), not rebuilds; a ROM
@@ -2498,6 +2500,22 @@ it) + CPU.cpp + TsConf.cpp; test builds `debug/DVp2-dram-rows-1.0.5.elf` (plain)
   same core are what make 45-46 / 42-43 — no core0 work can show there. Next lever for
   it is the TSU compose on core1, a different job. No regression against 2026-09-09
   (`cpu=` 17.8 then, 17.5 now with the model off; core1 got faster, 16.2 -> 14.4).
+- **Rows are per PHYSICAL PAGE, from a pool of 8 (hw-confirmed 2026-09-13 late).** The
+  first cut had one row per WINDOW, rebuilt on every page change of that window, and
+  demo 200 does that ~640 times a FRAME (`rowRebuild=38400/60f` ≈ 2.5 ms: `cpu=` 20.7
+  where the old tag compare gave 11.8, IDL negative on those effects while the
+  pre-session build stayed positive). Now a window points at its page's row
+  (`tsdc_page_row[page]` = pool slot), so re-mapping between pages already in the pool
+  is a pointer swap and only a page NEW to the pool rebuilds one row (LRU among rows no
+  other window holds; 4 windows, 8 rows). Two windows on one page share the row, so
+  the alias cold path is gone. A fill clears the entry of the page the tag used to
+  hold (`tsdc_page_row` of the old tag). Cost +1.2 KB RAM over the window rows (total
+  ~2.8 KB). **`rowRebuild=` is the counter to watch on any new title** — hundreds per
+  frame means the pool is too small for it. Owed: `rowRebuild` on TMNT.
+- **hw 2026-09-13 late (owner), the whole session (`debug/DVp2-pool-1.0.5.elf`):**
+  480p + NeoGS IDL positive on every title tried (TMNT, Digger, Bruce Lee, Ninja Gaiden,
+  demo 200 / 0x7e1 — picture and speed); 576p + NeoGS fishbone **48.8 with V-Sync**, IDL
+  around 0, mostly positive, occasional small dips — "very acceptable".
 - **720x576 + NeoGS + TS-Conf on DVp2 is at the HEAP EDGE, and the video-mode gate is
   right to refuse it.** A PERF build (+8 KB `ts_int_ring`, or +1 KB with the new CMake
   `TS_INT_RING_N=64`) boots into 576p with 6.6 KB free at `setup: COMPLETE` and the
@@ -2510,6 +2528,63 @@ it) + CPU.cpp + TsConf.cpp; test builds `debug/DVp2-dram-rows-1.0.5.elf` (plain)
   (done once this session; two boot loops). If a 576p PERF capture is ever needed,
   free MIDI GM.DLS (7 KB) + ZiFi (12 KB) first, or take the ring to PSRAM for that
   build only.
+
+### core1: the TSU compose rewritten (2026-09-13 evening, NOT hw-tested — test ELFs `debug/DVp2-tsu-1.0.5.elf` / `-trace-`)
+
+fishbone at 480p is paced by core1 (`c1=14.4 ms` = base 3.9 / tsu 8.3 / out 2.1 for
+240 lines: 16 / 35 / 9 us a line), so this is where its 576p FPS lives. Four changes,
+all in the per-line path of `tsRenderExec` / `tsuComposeLine` (Video.cpp):
+
+- **`src/TsuBlit.h` — the 8-pixel element blit is SWAR**: the 4 source bytes expand
+  into two 32-bit words (pal folded in), the transparency mask comes from the
+  nibble-nonzero flags, and they go out as two unaligned 32-bit stores (Cortex-M33
+  allows them; the buffer is SRAM). A fully opaque element (most tiles) is two plain
+  stores, a partly transparent one (sprite edges) a masked merge, X-flip is `rev` of
+  the words, and only an element that wraps the 512-pixel line takes the old
+  per-nibble loop. `tools/tsu_blit_test.cpp` diffs it against that loop over 3 M random
+  elements (both directions, every position, the wrap) — **re-run after any change**.
+- **Bitmap page pointers are a per-line table** (`tsuBmPages`, 8 entries per tile
+  layer / sprite page) instead of a `TsConf::pagePtr` CALL per tile and per sprite
+  element (~130 a line). NOTE it is a plain always-inline function: as a lambda GCC
+  put its clone in `.text` (flash) — the CLAUDE.md lambda rule again.
+- **compose + output are one pass when GFXOVR is off** (fishbone, TMNT, Digger, Bruce
+  Lee — every known title): the base layer is rendered as CRAM indices straight into
+  the TSU line buffer, the TSU blits over it (a blit writes only where the source
+  nibble is non-zero = video_render.v's `tsu_visible`), and the output is one `map[]`
+  lookup per pixel, four per aligned store — no per-pixel "TSU or base" select and no
+  16-bit `s_gline`. The 16c base reads 8 pixels per aligned 32-bit PSRAM word and
+  expands them with the same SWAR; 256c is a memcpy with the 512 wrap; ZX decodes one
+  attribute cell per 8 pixels. **GFXOVR keeps the old per-pixel merge** in
+  `VIDEO::tsRenderExecOvr` (a `TsLineCtx` carries the prologue's locals), which lives
+  in FLASH on purpose — 3.9 KB the overlay window no longer pays for.
+- **`tsRenderExec` and `tsuComposeLine` compile at `-O2 -fno-unroll-loops`**
+  (the tsFast16 precedent): at Video.cpp's -O3 tsRenderExec alone was 10 108 B of
+  overlay; now 3164. The `sprites` lambda had been sitting in FLASH all along (no
+  section attribute) — it is `TS_RENDER_HOT` now. Video.cpp's `.tsovl` went 14 776 ->
+  6912 B, so the AUTO window term dropped 14 336 -> 10 240 (CMakeLists) = **+4 KB heap
+  in every TS-Conf session** (the linker ASSERT still guards every variant).
+- Semantics are unchanged by construction (same layer order, same transparency rule,
+  same palette composition); what the hardware run must show: fishbone's `[PERF] ts:`
+  `base/tsu/out` and `c1` (expect tsu well under 8 ms, base under 2), realFPS at 480p
+  with NeoGS (was 46.9) and the plain build at 576p (45-46 / 42-43), then TMNT, Digger,
+  Bruce Lee, Ninja Gaiden (raster split), demo 200 / 0x7e1 for the picture itself —
+  a wrong nibble order or a flip bug shows as garbled tiles at once.
+- **hw 2026-09-13 late, 480p + NeoGS, fishbone:** `c1` 14.5 -> **12.9 ms** (base 4.0 ->
+  3.1, out 2.1 -> 1.3, **tsu 8.3 -> 8.4 = unchanged**), `cpu=` 20.0 -> 19.2 with `wait`
+  0.8 -> 0.0, realFPS 46.9 -> **48.4**; 576p + NeoGS on the plain build 42-43 -> **48.2-48.5**
+  (owner: "very good"), and that build now boots 576p + NeoGS with 14-18 KB free instead
+  of 1-2 (the window shrink). **The TSU phase is XIP-BOUND, not arithmetic-bound**: ~94
+  tile source reads a line, each its own 8-byte PSRAM line fill (~250 ns), plus sprite
+  elements — the SWAR blit and the page tables bought nothing there, the merged
+  compose+output is what moved. Ideas left for the TSU phase, unmeasured: a per-line
+  memo of (src pointer -> 4 source bytes) so repeated tiles skip the PSRAM read;
+  nothing that prefetches through the DMA engine (hw-refuted while HDMI streams). After
+  this fishbone is paced by **core0 again** (19.2 ms own work, core1 has ~7 ms of slack).
+- Two CMake traps found while testing this (2026-09-13): the VS Code build task wipes
+  the cache and takes CMakeLists' DEFAULTS, so a local `option(PERF_TRACE ... ON)` edit
+  silently made the "plain" build a PERF build (IDL from it is not comparable — the
+  8 KB ring, the counters), and `FB_FORCE_CHUNKS "8"` went into commit 4d4a142 as the
+  default (a release would chunk the FB always). Check both before a release build.
 
 **Owed on hardware:** TMNT / Digger / Bruce Lee / Lode Runner / the other demos —
 14 MHz titles now execute FEWER instructions per frame (real waits) and their DMA_ACT
