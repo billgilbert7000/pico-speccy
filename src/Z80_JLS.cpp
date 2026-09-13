@@ -1226,9 +1226,14 @@ IRAM_ATTR void Z80::exec_nocheck() {
         uint8_t pg = REG_PCh >> 6;
         if (g_ts_fastmem) {                   // TsFastMem.h: TS-Conf, plain POINTER banks, counter video
             tsFastTick(4);
+            if (__builtin_expect(g_ts_memcyc != 0, 0) && !tsMemNoDram(REG_PC)) tsFastTick(TsConf::cpuMemMiss(REG_PC, true));   // DRAM model: a cache miss
             opCode = MemESP::ramCurrent[pg][REG_PC & 0x3fff];
         } else {
         VIDEO::Draw_Opcode(MemESP::ramContended[pg]);
+        if (__builtin_expect(g_ts_memcyc != 0, 0) && !tsMemNoDram(REG_PC)) {   // TS-Conf DRAM model (TsConf.cpp)
+            const uint32_t w = TsConf::cpuMemMiss(REG_PC, true);
+            if (w) VIDEO::Draw(w, false);
+        }
         if (DivMMC::enabled) {
             DivMMC::preOpcFetch(REG_PC);
             // Fetch opcode from currently mapped memory

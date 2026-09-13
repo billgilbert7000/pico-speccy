@@ -1807,9 +1807,10 @@ of `aligned(4096)` padding. Free heads: DVp2 82.7 KB, z0p2 79.1, z0p2-PIOUSB 64.
     statesInFrame`) wraps the frame-relative timestamps and clears the FRAME ack.
   - *DMA* (`TsConf::dmaStart`, port of the reference dma_init/next_burst/dma_*
     with the per-memory-cycle state machine collapsed): the whole transaction
-    runs inside the DMACtrl write; `DMA_ACT` then stays up for `words × cost <<
-    m` T-states (RAM→RAM/BLT 2 T per word, one-sided FILL/CRAM/SFILE 1 T, SPI
-    4 T — approximations of the 28 MHz DRAM controller / 14 MHz SCK) and the DMA
+    runs inside the DMACtrl write; `DMA_ACT` then stays up for the DRAM cycles the
+    transfer needs (RAM→RAM 2, BLT 3, FILL/CRAM/SFILE 1 per word, half a 3.5 MHz T
+    each, minus the video fetcher's share and plus every CPU DRAM access meanwhile —
+    see the DRAM model section, 2026-09-13; SPI stays a flat 4 T/word, SCK-bound) and the DMA
     INT fires when it drops. Instant completion is the safe direction: software
     waits on DMA_ACT or the INT, and nothing can observe a half-written block.
     Modes by `(W/R<<3)|DDEV`: 01 RAM, 09 BLT1 (transparent: a 0 nibble/byte in the
@@ -2328,7 +2329,141 @@ of `aligned(4096)` padding. Free heads: DVp2 82.7 KB, z0p2 79.1, z0p2-PIOUSB 64.
   question: does TS-BIOS Setup (SS+F12) need the ZX-Evo AVR (`slavespi`)
   keyboard path? Plain #FE should cover boot + TR-DOS.
 
-### fishbone: the hang is the demo's player missing its own interrupt-free window (root cause found 2026-09-09, NOT fixed)
+### TS-Conf DRAM model: CPU/video vs DMA contention + 14 MHz wait states (2026-09-13; hw-confirmed: Bomberman AND fishbone run on the final build)
+
+Found by **Bomberman Evolution** (`prods.tslabs.info/files/bomber_evo.zip`, .spg), which
+fell into 48K BASIC ~14 s into its intro. The mechanism is the game's own: its copy
+routine (`83C5`) brackets every DMA with `MEMCONF=04 / PAGE0=0` (TS-BIOS ROM in window 0,
+so `RST 8` reaches TS-BIOS's DWT) with interrupts ENABLED, and its IM2 handler (`835F`:
+`PAGE0:=3 / CALL #0005 / PAGE0:=(8000)`) assumes RAM there — with the ROM in, page 3 is
+48 BASIC and `#0005` is the cold start. The intro→game transition is a 65536-word
+RAM->RAM wipe (self-propagating `s -> s+2`, waited for in the game's OWN loop `84D6` with
+RAM in window 0 = safe) followed by a 38400-word screen copy (160 w x 240 blocks,
+D_ALGN 512) waited for through the ROM. The copy is 171 lines at the DRAM peak and
+must START in lines 0..149 of a frame (VSINT=0, set by the game), i.e. the wipe must
+take 312..461 lines. **At the DRAM peak it takes 292 → the copy spans L0 → fatal, on
+hardware too.** What saves the real machine is that the wipe's poll loop runs from RAM:
+its fetches take DRAM cycles from the DMA. Stash `WIP: Bomberman` (2026-09-10) instead
+set a flat `TS_DMA_COST=2` = 0.5 T/word — **twice the physical ceiling** — which merely
+moved the copy to [L154, L240]. Dropped; this model replaced it.
+
+**The RTL** (tslabs/zx-evo `fpga/current`: `common/arbiter.v`, `dram/dram.v`,
+`common/clock.v`, `common/dma.v`, `z80/zmem.v`, `z80/zclock.v`, `video/video_sync.v`,
+`video/video_mode.v`):
+- One DRAM cycle = 4 FPGA clocks @28 MHz = **half a 3.5 MHz T**, 448 per line. The CPU
+  has priority (`dev_over_cpu = 0`), then video, then TS/TM, then DMA. A RAM->RAM word
+  is read + write = **2 cycles**, a blit read src + read dst + write = **3**, FILL /
+  CRAM / SFILE 1 (`fil_hook`). So **1 T per copied word is the hard ceiling** — the old
+  flat `kDmaCostRam = 2 T` was twice too slow and the blit cost was 2, not 3.
+- ROM (window 0, `W0_RAM=0`) makes NO DRAM request (`zmem.v ramreq = !rom_n_ram && …`);
+  the ROM chip is separate. Internal `#nnAF` ports do not stall either.
+- Video: `video_go = … && vpix && !nogfx` — the fetcher takes '1 of 8' cycles in ZX
+  (over the 256-px paper = 32/line), '1 of 4' in 16c, '1 of 2' in 256c, '4 of 8' in
+  text, on visible lines only (vp_beg 80/76/56/32, height 192/200/240/288). NOGFX
+  stops it (Bomberman's wipe runs at VCONF=20).
+- **At ZCLK 14 MHz the Z80 clock is STALLED on every DRAM read** (`zclock.v: zpos <=
+  !stall && …`; `zmem.v` wait tables: M1 +3/+4/+5/+6 and data read +2/+3/+4/+5 by the
+  fclk phase `dram_beg` lands on, write 0 — "no wait at all in write cycles"). A 14 MHz
+  TS-Conf with the cache off runs at roughly HALF its nominal speed; our Z80 ran with
+  zero waits, i.e. every TS title at 14 MHz was executing ~40% more code per frame than
+  the real machine. The **cache**: 256 x 16-bit words, index `a[8:1]`, tag
+  `{page, a[13:9]}`, FILLED by every CPU DRAM read (`wren(cpu_strobe)`), USED only where
+  `CacheConfig` enables the window (`cache_hit_en = cache_hit && cache_en[win]`), a
+  CPU write to a cached word invalidates it, DMA writes do not (documented).
+  `SysConfig` bit 2 copies into all four CacheConfig bits.
+- Unreal (every mirror revision since 2014-03) is 1 T/word peak and DOES charge CPU
+  accesses (`memcyc_lcmd` from rm/wm, cache-miss only) but has no 14 MHz waits. ZEsarUX
+  completes a DMA instantly and answers DMAStatus with 0 (never busy).
+
+**The model** (`src/TsConf.cpp` "DRAM model", pure arithmetic in `src/TsDram.h`):
+- `g_ts_memcyc` — one gate byte, zero on every other machine: bit 0 = ZCLK 14 MHz (wait
+  states), bit 1 = DMA_ACT (steal). Tested predicted-not-taken in `Z80Ops::peek8/poke8/
+  peek16/poke16` (fast and generic paths — the fast ones tail-call `peek8_dram` /
+  `peek16_dram` so they stay leaves), in `Z80Ops::fetchOpcode` and in BOTH fetches of
+  `exec_nocheck` (the Timex lesson: the fetch path is two places). Recomputed by
+  `TsConf::memcycRecalc()` from `applyZclk`, `dmaStart`, the DMA_ACT drop in `tsIntPoll`,
+  `TsConf::reset` and `CPU::reset`'s non-TS branch.
+- `cpuMemRead(addr, opfetch)`: ROM → nothing; cache hit (enabled window) → nothing;
+  else fill the tag, steal one cycle from a running DMA (`s_dma_end` grows by half a
+  base T, `s_steal_half` carries the odd half at ZCLK 3.5), and at 14 MHz return the
+  wait (+4 M1, +3 data — the two phases `zneg` can land on). `cpuMemWrite`: invalidate,
+  steal, no wait. `Z80Ops::addressOnBus` (internal cycles) is untouched.
+- `dmaStart`: DMA_ACT = `tsdram::dmaEnd(t0, words x cycles, m, vconf, 320)` — the DRAM
+  cycles integrated line by line with the video fetcher's share removed on visible
+  lines; SPI modes keep the flat 4 T/word (SCK-bound). CPU steals are added live.
+- **The DMAStatus poll fast-forward** (`dmaStatus`) measures the previous iteration's
+  steal (`s_dma_steal_t` delta over `dt`) and stretches the remaining window by
+  `dt / (dt - steal)` before jumping; a partial jump (an INT event first) accrues the
+  proportional share. A poll loop in ROM steals nothing and behaves as before.
+- **`FileSPG::load` keeps CACHE ON** (`sysconf = 0x04 | zclk`, `cacheconf = 0x0F`): on
+  hardware an .spg is launched from a TS-BIOS that booted with Setup's "CPU Cache [ON]"
+  (`RESET2: SYSCONFIG = cfrq | cach << 2`), and Unreal's `readSPG` sets only `zclk`.
+  It used to write `clk & 3`, i.e. cache off — invisible while there were no waits.
+- CMake `TSCONF_DRAM_MODEL` (default ON) → `TS_DRAM_MODEL`; OFF = flat cost + wait-free
+  14 MHz, for A/B on hardware. Cost: +960 B RAM (512 B tags + RAM-resident code).
+- PERF (`-DPERF_TRACE=ON`): `[PERF] dram: cpuWait=<kT>/60f dma=<kcyc> stolen: cpu=<kcyc>
+  vid=<kcyc>`; the `[TSVT] DMA ctrl=…` line (TS_VIDEO_TRACE) gained `dur=<lines>`.
+- Host test `tools/tsdram_test.cpp` (`g++ -O2 -Wall -Wextra -Isrc -o /tmp/tsdram_test
+  tools/tsdram_test.cpp && /tmp/tsdram_test`) pins the Bomberman numbers (wipe 292.57,
+  copy 171.43 lines at the peak), the 256c/16c/ZX video shares, the frame wrap and the
+  clock scaling. **Re-run after any change to TsDram.h.**
+
+**What the model predicts for Bomberman** (owner reports the game works on hardware):
+poll loop `IN (C) / JP M` at 14 MHz, cache off (the game writes SysConfig=2) = 22 T +
+18 T of waits = 40 T per iteration with 5 DRAM accesses → the DMA keeps 30/40 of the
+bandwidth → wipe ≈ 390 lines → copy starts ≈ L78 of the next frame and ends ≈ L250:
+the frame INT lands in the SAFE wait, the copy never sees one. Without the wait states
+the loop steals 45% → wipe 536 lines → copy [L225, L75'] → still fatal; the two halves
+of the model are needed TOGETHER. Hardware itself sits in the middle of the safe range
+(312..461), not on its edge.
+
+**hw 2026-09-13 (owner): Bomberman Evolution starts and runs with this model** — the
+first hardware confirmation of the mechanism itself. Same run: **fishbone dropped from
+47-48 to 42-43 FPS** — host cost, not guest speed: with the cache ON every RAM access
+at 14 MHz went through an out-of-line `cpuMemRead` (call + tag arithmetic) and nearly
+all of them are HITS, where there is nothing to do. Now the hit test is INLINE in the
+accessors (`tsMemNoDram`, TsConf.h) against a per-window `g_ts_tagbase[4]` (0 = ROM,
+else `0x8000 | page << 5`, with 0x4000 folded in while the window's cache is disabled
+so the compare misses without a second test — stored tags never carry 0x4000);
+only a miss calls `cpuMemMiss`. Writes inline the invalidate (`tsMemWriteInv`) and
+take the cold path only while a DMA is active (bit 1). The table is rebuilt in
+`setBanks`, the SysConfig/CacheConfig writes and `reset`. RAM +544 B over the first
+cut. **Second hw round: still 44-45 FPS** — the inline test itself (~11 instructions
++ a `push {r4}` the register pressure forced, per access, ~3 per instruction) is what
+dense 14 MHz code pays. A "waits only while a DMA is in flight" variant (zero cost
+without a DMA, Bomberman unchanged because its poll loop sits inside the wipe's
+window) was built as a menu option and **REJECTED on hardware the same day: with it
+fishbone HANGS; with the waits always on fishbone RUNS** (44-45 FPS) — so the demo
+needs the real machine's slower 14 MHz, and the "player overruns its own
+interrupt-free gap" hang documented below was our wait-free Z80, not the demo. The
+option was removed again: **the waits are unconditional at ZCLK 14** (`memcycRecalc`),
+there is no setting, and the remaining host cost (fishbone 47-48 → 44-45 at 640x480,
+more at 720x576) is the subject of a separate optimisation session — candidates: one
+hit test per instruction on the fetch path instead of per opcode byte, a cheaper
+tag representation, avoiding the `push` in the leaf.
+
+**hw 2026-09-13, final build (waits unconditional, inline hit test): Bomberman starts
+and fishbone runs** — owner's verdict on `debug/DVp2-dram-1.0.5.elf`.
+
+**Owed on hardware:** TMNT / Digger / Bruce Lee / Lode Runner / the other demos —
+14 MHz titles now execute FEWER instructions per frame (real waits) and their DMA_ACT
+windows are longer where the picture is visible (256c: x1.56 on visible lines), so
+`cpu=`, `poll=`/`ff=` and any DMA-INT-paced effect are the things to compare; a title
+that was tuned on Unreal's wait-free 14 MHz may now run visibly slower — that is the
+hardware's speed, not a regression, but confirm it against a real ZX-Evo before
+believing either side. Not modelled: TSU tile/sprite fetches stealing from the DMA,
+the per-phase (+3/+5) spread of the waits, the CPU being denied a slot by a
+`video_only` block (bw_full), waits on external I/O at 14 MHz (`io_stall`).
+
+### fishbone: the hang is the demo's player missing its own interrupt-free window (root cause found 2026-09-09; GONE with the 14 MHz wait states, hw 2026-09-13)
+
+**Resolution (hw 2026-09-13, owner):** with the DRAM model's 14 MHz wait states
+always on (section above) fishbone runs; with them off (the wait-free Z80 this
+analysis was made on, and the "during DMA only" variant) it hangs as described. So
+the phase walk below is real but the frame work that overran the 32-line gap was
+ours: a wait-free 14 MHz executes ~40% more code per frame than a ZX-Evo, and the
+demo's own timing budget was written against the real machine. Everything below is
+kept as the record of how the mechanism was read out of the dump.
 
 Symptom: after 1-3 minutes the scroll freezes while the background keeps moving
 and the sound distorts. **Deterministic** — three dumps agreed down to the T-state

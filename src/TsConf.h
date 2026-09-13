@@ -34,6 +34,33 @@ the Free Software Foundation, either version 3 of the License, or
 
 #include <stdint.h>
 
+// TS-Conf DRAM model, hot-path half (the rest is in TsConf.cpp). Zero on every
+// other machine. g_ts_memcyc: bit 0 = ZCLK 14 MHz (wait states), bit 1 = DMA_ACT
+// (CPU accesses steal DRAM cycles). g_ts_tagbase[win]: 0 = window makes no DRAM
+// request (ROM in window 0); else 0x8000 | page << 5, plus 0x4000 while the
+// window's cache is DISABLED (CacheConfig) — stored tags never carry 0x4000, so
+// the inline compare misses there without a second test. The cache itself:
+// 256 x 16-bit words, index a[8:1], tag {page, a[13:9]} (zmem.v).
+extern uint8_t  g_ts_memcyc;
+extern uint16_t g_ts_tagbase[4];
+extern uint16_t g_ts_cache_tag[256];
+// True when the access costs no DRAM cycle: ROM, or a hit in an enabled cache
+// window. Inline so a hit in the CPU accessors costs no call (fishbone, 14 MHz,
+// cache on: -5 FPS with the call, 2026-09-13).
+static inline bool tsMemNoDram(uint16_t addr) {
+    const uint16_t tb = g_ts_tagbase[addr >> 14];
+    if (!tb) return true;
+    return g_ts_cache_tag[(addr >> 1) & 0xFF] == (uint16_t)(tb | ((addr >> 9) & 0x1F));
+}
+// A CPU write invalidates the cached word (cache_inv) — no wait, and the DMA
+// steal is the caller's business (poke8's cold path / TsConf::cpuMemWrite).
+static inline void tsMemWriteInv(uint16_t addr) {
+    const uint16_t tb = g_ts_tagbase[addr >> 14];
+    if (!tb) return;
+    const uint32_t idx = (addr >> 1) & 0xFF;
+    if (g_ts_cache_tag[idx] == (uint16_t)((tb & ~0x4000u) | ((addr >> 9) & 0x1F))) g_ts_cache_tag[idx] = 0;
+}
+
 class TsConf {
 public:
     // #nnAF register numbers (write side unless TSR_*) — ports.inc / tsconf.h
@@ -176,6 +203,22 @@ public:
     // the DMA interrupt is raised when it drops.
     static void dmaStart(uint8_t ctrl);
     static uint8_t dmaStatus();  // DMAStatus register image (b7 = DMA_ACT)
+
+    // DRAM model (arbiter.v / dram.v / zmem.v): one DRAM cycle = 4 FPGA clocks
+    // at 28 MHz = half a 3.5 MHz T-state, shared by CPU (priority), video and
+    // DMA. Entered from the CPU accessors only while g_ts_memcyc != 0:
+    //  - cpuMemRead: a CPU read of RAM that misses the 512-byte cache takes one
+    //    DRAM cycle away from a running DMA (DMA_ACT lasts longer) and, at ZCLK
+    //    14 MHz, stalls the CPU (returns the wait T-states to add: opfetch +4,
+    //    data read +3 — the zmem.v wait table's reachable phases; cache hit 0).
+    //  - cpuMemWrite: one DRAM cycle stolen from the DMA, no CPU wait
+    //    ("memory write: no wait"), the cached word invalidated.
+    // ROM (window 0 with W0_RAM = 0) makes no DRAM request at all.
+    static uint32_t cpuMemMiss(uint16_t addr, bool opfetch);   // the miss: fill the tag, steal, wait
+    static void     dmaStealCpu();                            // one DRAM cycle taken from a running DMA
+    static inline uint32_t cpuMemRead(uint16_t addr, bool opfetch) { return tsMemNoDram(addr) ? 0 : cpuMemMiss(addr, opfetch); }
+    static inline void     cpuMemWrite(uint16_t addr) { tsMemWriteInv(addr); if (g_ts_memcyc & 2) dmaStealCpu(); }
+    static void     memcycRecalc();   // recompute g_ts_memcyc (clock / DMA_ACT / machine)
     // Memory movement of one bulk transaction (RAM/BLT1/BLT2/FILL), register
     // file untouched — runs on core1 from the render queue (Video.cpp) or on
     // core0 when the queue is off.
@@ -202,5 +245,6 @@ extern uint8_t g_tsconf_wr;
 // may still read; g_ts_bank_watch has one bit per bank. A guest write into such
 // a bank waits for the queued lines that read it (VIDEO::tsRenderDrainOverlap).
 extern uint8_t g_ts_bank_watch;
+
 
 #endif // TSCONF_H

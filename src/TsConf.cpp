@@ -15,6 +15,7 @@ the Free Software Foundation, either version 3 of the License, or
 */
 
 #include "TsConf.h"
+#include "TsDram.h"
 #include "CodeOverlay.h"
 #include <string.h>
 #include "pico/time.h"
@@ -118,6 +119,107 @@ static uint32_t s_lin_next;     // T of the next line start that raises LINE
 static bool     s_dma_busy;     // DMA_ACT: transaction "in flight"
 static uint32_t s_dma_end;      // T at which it completes
 static bool     s_dma_pending;  // int_dma latch
+
+// ------------------------------------------------------- DRAM model ----
+// arbiter.v / dram.v / clock.v / dma.v: one DRAM cycle is 4 FPGA clocks at
+// 28 MHz = HALF a 3.5 MHz T-state, i.e. 448 cycles per 224-T line. The CPU has
+// priority (dev_over_cpu = 0), the video fetcher takes its share inside the
+// visible window (video_go = hvpix && !nogfx; 1 of 8 cycles in ZX, 1 of 4 in
+// 16c, 1 of 2 in 256c, 4 of 8 in text), the DMA gets what is left. A RAM->RAM
+// word is read + write = 2 cycles, a blit read src + read dst + write = 3, FILL
+// / CRAM / SFILE 1 — so 1 T per copied word is the hard ceiling, and it is
+// only reached while the CPU runs from ROM or the cache: every CPU RAM access
+// that misses the 512-byte cache (256 x 16-bit words, index a[8:1], tag
+// {page, a[13:9]}, filled by every DRAM read, used only where CacheConfig
+// enables the window, a write invalidates) costs the DMA one cycle. That
+// contention is what decides Bomberman Evolution's intro (2026-09-13): its
+// 65536-word wipe is waited out from a RAM loop, whose fetches slow the DMA
+// enough that the following 171-line screen copy — waited for with the ROM in
+// window 0 and interrupts ENABLED (TS-BIOS DWT via RST 8) — no longer spans
+// the frame interrupt. A flat per-word cost cannot express that; the stashed
+// TS_DMA_COST=2 (0.5 T/word, twice what the silicon can do) merely moved the
+// phase. At ZCLK 14 MHz the Z80 clock is also STALLED on every DRAM read
+// (zmem.v wait tables: M1 +3..+6, data read +2..+5 by phase, write 0, cache
+// hit 0) — modelled as +4 / +3, the phases zneg can land on. Without the
+// stalls the poll loop steals ~45% of the DRAM and the copy still dies; with
+// them ~24%, which is what real hardware sees.
+#ifndef TS_DRAM_MODEL
+#define TS_DRAM_MODEL 1
+#endif
+uint8_t  g_ts_memcyc = 0;
+uint16_t g_ts_tagbase[4];           // per CPU window, see TsConf.h
+uint16_t g_ts_cache_tag[256];       // 0 = invalid, else 0x8000 | page << 5 | a[13:9]
+
+// g_ts_tagbase follows the bank map and CacheConfig (setBanks, the SysConfig /
+// CacheConfig writes, reset).
+static void tsTagBaseRecalc() {
+    for (uint32_t w = 0; w < 4; w++) {
+        if (w == 0 && !TsConf::r.w0_ram()) { g_ts_tagbase[0] = 0; continue; }
+        g_ts_tagbase[w] = (uint16_t)(0x8000u | ((uint32_t)s_bank_phys[w] << 5) | (((TsConf::r.cacheconf >> w) & 1) ? 0 : 0x4000u));
+    }
+}
+static uint32_t s_steal_half;       // half-T-state remainder of the stolen cycles (ZCLK 3.5)
+static uint32_t s_dma_steal_t;      // T-states added to s_dma_end by CPU accesses (poll fast-forward)
+#if PERF_TRACE
+volatile uint32_t ts_cpu_wait_t = 0;     // CPU wait T-states inserted per PERF window
+volatile uint32_t ts_dma_steal_cyc = 0;  // DRAM cycles CPU accesses took from running DMAs
+volatile uint32_t ts_dma_vid_cyc = 0;    // DRAM cycles the video fetcher took from DMAs (at launch)
+volatile uint32_t ts_dma_cyc = 0;        // DRAM cycles the DMAs themselves needed
+#endif
+
+void TsConf::memcycRecalc() {
+    uint8_t g = 0;
+#if TS_DRAM_MODEL
+    if (Z80Ops::isTsconf) {
+        // 14 MHz wait states, ALWAYS at ZCLK 14 (owner, hw 2026-09-13): a "during DMA
+        // only" variant was tried for the host cost and it HANGS fishbone — the demo
+        // needs the real machine's slower 14 MHz, and with the waits in it runs.
+        if (ESPectrum::multiplicator >= 2) g |= 1;
+        if (s_dma_busy) g |= 2;                       // DMA_ACT: CPU accesses steal cycles
+    }
+#endif
+    g_ts_memcyc = g;
+}
+
+// A DRAM cycle the CPU took from a running DMA: DMA_ACT lasts that much longer.
+TS_HOT static inline void tsDmaSteal() {
+    const uint32_t h = (1u << ESPectrum::multiplicator) + s_steal_half;   // half-T-states
+    s_steal_half = h & 1;
+    s_dma_end += h >> 1;
+    s_dma_steal_t += h >> 1;
+#if PERF_TRACE
+    ts_dma_steal_cyc++;
+#endif
+}
+
+// Reached only when tsMemNoDram(addr) was false: a RAM read that goes to DRAM.
+TS_HOT uint32_t TsConf::cpuMemMiss(uint16_t addr, bool opfetch) {
+    const uint16_t tb = g_ts_tagbase[addr >> 14];
+    g_ts_cache_tag[(addr >> 1) & 0xFF] = (uint16_t)((tb & ~0x4000u) | ((addr >> 9) & 0x1F));   // cpu_strobe fills the cache
+    if (g_ts_memcyc & 2) tsDmaSteal();
+    if (!(g_ts_memcyc & 1)) return 0;
+    const uint32_t w = opfetch ? 4 : 3;
+#if PERF_TRACE
+    ts_cpu_wait_t += w;
+#endif
+    return w;
+}
+
+TS_HOT void TsConf::dmaStealCpu() { tsDmaSteal(); }
+
+// DMA_ACT duration with the video fetcher's share taken out — the arithmetic
+// lives in TsDram.h so tools/tsdram_test.cpp builds against it.
+static inline uint32_t tsDmaEndWithVideo(uint32_t t0, uint32_t cycles) {
+    const uint8_t m = ESPectrum::multiplicator;
+    const uint32_t frameLines = (CPU::statesInFrame >> m) / TSTATES_PER_LINE_PENTAGON;
+#if PERF_TRACE
+    const uint32_t end = tsdram::dmaEnd(t0, cycles, m, TsConf::r.vconf, frameLines);
+    ts_dma_vid_cyc += (((end - t0) >> m) << 1) - cycles;   // slots elapsed minus the DMA's own cycles
+    return end;
+#else
+    return tsdram::dmaEnd(t0, cycles, m, TsConf::r.vconf, frameLines);
+#endif
+}
 #if PERF_TRACE
 volatile uint32_t ts_int_frm = 0;   // FRAME INT acks per PERF window (a raster-split title acks 2 per frame)
 #if PERF_TRACE
@@ -283,6 +385,7 @@ void TsConf::setBanks() {
     MemESP::ramContended[2] = MemESP::ramContended[3] = false;
 
     tsUpdateWrGate();   // W0_RAM / W0_WE live in memconf
+    tsTagBaseRecalc();  // DRAM model: window pages / ROM in window 0
     refreshGrmem();
 }
 
@@ -367,10 +470,12 @@ TS_HOT void TsConf::portWrite(uint8_t reg, uint8_t val) {
             // Writing CACHE copies it into all four CacheConfig bits
             // (datasheet); the cache itself is timing-only and not modelled.
             r.cacheconf = (val & 0x04) ? 0x0F : 0x00;
+            tsTagBaseRecalc();
             applyZclk(true);
             break;
         case TSW_CACHECONF:
             r.cacheconf = val & 0x0F;
+            tsTagBaseRecalc();
             break;
         case TSW_FDDVIRT:
             r.fddvirt = val & 0x8F;  // stored; VDOS is a later phase
@@ -604,6 +709,7 @@ TS_HOT static void tsIntPoll() {
     }
     if (s_dma_busy && t >= s_dma_end) {
         s_dma_busy = false;
+        TsConf::memcycRecalc();
         VIDEO::tsRenderDrainDma();   // the guest may read the result from here on
         if (TsConf::r.intmask & 0x04) s_dma_pending = true;
     }
@@ -820,13 +926,14 @@ struct DmaRam {
 };
 }
 
-// Per-word cost in 3.5 MHz T-states, before the CPU-clock scaling: the DRAM
-// controller serves one access per ~4 clocks at 28 MHz, so RAM→RAM (read +
-// write) is ~2 T per word, one-sided transfers ~1 T, SPI is bound by the
-// card's clock (~4 T per word at 14 MHz SCK).
-static const uint8_t kDmaCostRam  = 2;
-static const uint8_t kDmaCostOne  = 1;
-static const uint8_t kDmaCostSpi  = 4;
+// DRAM cycles per word (dma.v phases; see the DRAM model above): RAM->RAM read
+// + write, blit read src + read dst + write, FILL / CRAM / SFILE one access.
+// SPI is bound by the card's clock instead (~4 T per word at 14 MHz SCK) and
+// keeps a flat T cost.
+static const uint8_t kDmaCycRam  = 2;
+static const uint8_t kDmaCycBlt  = 3;
+static const uint8_t kDmaCycOne  = 1;
+static const uint8_t kDmaCostSpi = 4;
 
 // Bulk DMA through the core1 render queue: hw-REFUTED 2026-09-07 (TMNT ship
 // scene: ~170 sprite blits per frame, each followed by a DMAStatus poll — every
@@ -867,7 +974,8 @@ TS_HOT void TsConf::dmaStart(uint8_t ctrl) {
     uint32_t len = (uint32_t)r.dmalen + 1;
     uint32_t num = r.dmanum;
     uint32_t words = 0;
-    uint8_t cost = kDmaCostRam;
+    uint8_t cyc = kDmaCycRam;      // DRAM cycles per word
+    bool spi = false;
     DmaRam src, dst;
 
     auto ss_inc = [&]() { ss = salgn ? ((ss & m1) | ((ss + 2) & m2)) : ((ss + 2) & 0x3FFFFF); };
@@ -898,7 +1006,7 @@ TS_HOT void TsConf::dmaStart(uint8_t ctrl) {
         // follows the running address; FILL reads ONE source word (ss + 2).
         const uint32_t blocks = num + 1;
         words = len * blocks;
-        cost = (mode == M_FILL) ? kDmaCostOne : kDmaCostRam;
+        cyc = (mode == M_FILL) ? kDmaCycOne : ((mode == M_RAM) ? kDmaCycRam : kDmaCycBlt);
         if (mode == M_FILL) r.saddr = salgn ? ((r.saddr + asize * blocks) & 0x3FFFFF) : ((ss + 2) & 0x3FFFFF);
         else                r.saddr = salgn ? ((r.saddr + asize * blocks) & 0x3FFFFF) : ((ss + 2 * len * blocks) & 0x3FFFFF);
         r.daddr = dalgn ? ((r.daddr + asize * blocks) & 0x3FFFFF) : ((dd + 2 * len * blocks) & 0x3FFFFF);
@@ -921,9 +1029,9 @@ TS_HOT void TsConf::dmaStart(uint8_t ctrl) {
     VIDEO::tsRenderDrainDma();
     if (mode == M_SPIRAM && VIDEO::tsRenderOverlaps(dd, 2 * len * (num + 1) + asize * (num + 1))) VIDEO::tsRenderDrain();
     if (mode == M_CRAM || mode == M_SFILE) {
-        cost = kDmaCostOne;
+        cyc = kDmaCycOne;
     } else if (mode == M_SPIRAM || mode == M_RAMSPI) {
-        cost = kDmaCostSpi;
+        spi = true;
         LED::touchR(LED::ZCTRL);
     }
 
@@ -977,6 +1085,13 @@ TS_HOT void TsConf::dmaStart(uint8_t ctrl) {
     // DMA_ACT for the hardware's duration; the DMA interrupt is raised when it
     // drops (tsIntPoll). A transaction started while a previous one is still
     // "busy" simply supersedes it — the data is long written either way.
+    s_dma_busy = true;
+    s_steal_half = 0;
+    if (spi) s_dma_end = CPU::tstates + ((words * kDmaCostSpi) << ESPectrum::multiplicator);
+    else     s_dma_end = tsDmaEndWithVideo(CPU::tstates, words * cyc);   // + CPU steals, live (tsDmaSteal)
+#if PERF_TRACE
+    if (!spi) ts_dma_cyc += words * cyc;
+#endif
 #if TS_VIDEO_TRACE
     // Tile-animation element copies (RAM->RAM, both aligns, 2 words x 8 blocks)
     // come ~50 a frame and drowned the UART — whole lines were dropped, the
@@ -991,13 +1106,13 @@ TS_HOT void TsConf::dmaStart(uint8_t ctrl) {
         if (key[0] == last_key[0] && key[1] == last_key[1] && key[2] == last_key[2]) rep++;
         else {
             if (rep) TSVT("  (previous DMA x%u)", (unsigned)(rep + 1));
-            TSVT("DMA ctrl=%02X s=%06X d=%06X len=%u num=%u (end regs)", ctrl, (unsigned)r.saddr, (unsigned)r.daddr, (unsigned)r.dmalen, (unsigned)r.dmanum);
+            TSVT("DMA ctrl=%02X s=%06X d=%06X len=%u num=%u (end regs) dur=%u lines", ctrl, (unsigned)r.saddr, (unsigned)r.daddr, (unsigned)r.dmalen, (unsigned)r.dmanum,
+                 (unsigned)((s_dma_end - CPU::tstates) / tsLineT()));
             last_key[0] = key[0]; last_key[1] = key[1]; last_key[2] = key[2]; rep = 0;
         }
     }
 #endif
-    s_dma_busy = true;
-    s_dma_end = CPU::tstates + ((words * cost) << ESPectrum::multiplicator);
+    TsConf::memcycRecalc();
     if (needsCheckedFrame()) tsWakeLoop();
 #if PERF_TRACE
     ts_dma_us += (uint32_t)(time_us_64() - dma_t0) - (ts_c1_wait_us - dma_w0);
@@ -1154,6 +1269,7 @@ TS_HOT void TsConf::dmaLineTick() {
 // tight and never triggers it.
 static uint16_t s_poll_pc = 0xFFFF;
 static uint32_t s_poll_t  = 0;
+static uint32_t s_poll_steal = 0;   // s_dma_steal_t at the previous poll
 #if PERF_TRACE
 volatile uint32_t ts_poll_ff = 0, ts_poll_ff_t = 0, ts_poll_reads = 0;   // fast-forwards, T skipped, DMAStatus reads
 #endif
@@ -1170,9 +1286,21 @@ TS_HOT uint8_t TsConf::dmaStatus() {
 #endif
     if (TS_POLL_FF && pc == s_poll_pc && (uint32_t)(t - s_poll_t) < 64u) {
         uint32_t end = s_dma_end;
+        // The skipped iterations keep stealing DRAM cycles from the transfer
+        // (a poll loop in RAM: its fetches; one in ROM: nothing), so the window
+        // stretches by dt / (dt - steal) — what the last iteration measured.
+        const uint32_t dt = t - s_poll_t;
+        uint32_t sd = s_dma_steal_t - s_poll_steal;
+        if (sd >= dt) sd = dt ? dt - 1 : 0;
+        if (sd && end > t) end = t + (uint32_t)(((uint64_t)(end - t) * dt) / (dt - sd));
+        const uint32_t dma_end = end;
         if (Z80::isIFF1()) { const uint32_t e = nextIntEvent(); if (e < end) end = e; }
         if (end > CPU::statesInFrame) end = CPU::statesInFrame;
         if (end > t) {
+            if (sd) {
+                if (end == dma_end) { s_dma_steal_t += dma_end - s_dma_end; s_dma_end = dma_end; }
+                else { const uint32_t extra = (uint32_t)(((uint64_t)(end - t) * sd) / dt); s_dma_end += extra; s_dma_steal_t += extra; }
+            }
 #if PERF_TRACE
             ts_poll_ff++; ts_poll_ff_t += end - t;
 #endif
@@ -1191,6 +1319,7 @@ TS_HOT uint8_t TsConf::dmaStatus() {
     }
     s_poll_pc = pc;
     s_poll_t  = CPU::tstates;
+    s_poll_steal = s_dma_steal_t;
     return s_dma_busy ? 0x80 : 0x00;
 }
 
@@ -1209,7 +1338,7 @@ void TsConf::applyZclk(bool fromGuest) {
     if (zclk > Config::tsconf_clk_cap) zclk = Config::tsconf_clk_cap;
     if (zclk != ESPectrum::multiplicator) {
         ESPectrum::multiplicator = zclk;
-        CPU::updateStatesInFrame();  // calls frameIntRecalc() for TS-Conf
+        CPU::updateStatesInFrame();  // calls frameIntRecalc() + memcycRecalc() for TS-Conf
         static bool warned14 = false;
         if (zclk == 2 && !warned14) {
             warned14 = true;
@@ -1271,6 +1400,10 @@ void TsConf::reset(bool cold) {
     s_frm_acked = false;
     s_frm_vsint = s_frm_hsint = 0xFFFF;
     s_lin_pending = s_dma_pending = s_dma_busy = false;
+    memset(g_ts_cache_tag, 0, sizeof g_ts_cache_tag);   // the cache comes up invalid
+    tsTagBaseRecalc();
+    s_steal_half = s_dma_steal_t = s_poll_steal = 0;
+    memcycRecalc();
 #if PERF_TRACE
     ts_int_frozen = 0; ts_int_ring_w = 0;                      // re-arm the INT-accept trigger per load
     s_int_prev_pc = 0; s_int_prev_t = 0; s_int_run = 0;

@@ -171,6 +171,7 @@ void CPU::updateStatesInFrame() {
     // TS-Conf: the FRAME INT window is programmable (HSINT/VSINT) — override
     // the Pentagon IntStart/IntEnd just set above with the guest's position.
     if (Z80Ops::isTsconf) TsConf::frameIntRecalc();
+    TsConf::memcycRecalc();   // the 14 MHz wait-state gate follows EVERY clock change (Alt+F2 too), 0 off TS-Conf
 }
 
 void CPU::reset() {
@@ -389,7 +390,7 @@ void CPU::reset() {
     // BIOS see a power-up at all (hw 2026-09-06).
     static bool s_tsconf_live = false;
     if (Z80Ops::isTsconf) { TsConf::reset(!s_tsconf_live); s_tsconf_live = true; }
-    else s_tsconf_live = false;
+    else s_tsconf_live = false;   // g_ts_memcyc was zeroed by updateStatesInFrame above
 
     tstates = 0;
     global_tstates = 0;
@@ -799,10 +800,18 @@ static IRAM_ATTR __attribute__((noinline)) uint8_t peek8_tick(uint16_t address) 
     VIDEO::tsDrawTick();
     return MemESP::ramCurrent[address >> 14][address & 0x3FFF];
 }
+// TS-Conf DRAM model live (g_ts_memcyc: 14 MHz wait states and/or a running DMA
+// the access steals a cycle from) — a tail call, so peek8 itself stays a leaf.
+static IRAM_ATTR __attribute__((noinline)) uint8_t peek8_dram(uint16_t address) {   // a cache MISS (tsMemNoDram was false)
+    CPU::tstates += TsConf::cpuMemMiss(address, false);
+    if (CPU::tstates >= VIDEO::ts_line_t) VIDEO::tsDrawTick();
+    return MemESP::ramCurrent[address >> 14][address & 0x3FFF];
+}
 IRAM_ATTR uint8_t Z80Ops::peek8(uint16_t address) {
     TS_PAGE_HIT(address);
     if (g_ts_fastmem) {
         CPU::tstates += 3;
+        if (__builtin_expect(g_ts_memcyc != 0, 0) && !tsMemNoDram(address)) return peek8_dram(address);
         if (__builtin_expect(CPU::tstates >= VIDEO::ts_line_t, 0)) return peek8_tick(address);
         return MemESP::ramCurrent[address >> 14][address & 0x3FFF];
     }
@@ -810,6 +819,10 @@ IRAM_ATTR uint8_t Z80Ops::peek8(uint16_t address) {
 }
 static IRAM_ATTR __attribute__((noinline)) uint8_t peek8_generic(uint16_t address) {
     VIDEO::Draw(3, MemESP::ramContended[address >> 14]);
+    if (__builtin_expect(g_ts_memcyc != 0, 0)) {              // TS-Conf DRAM model (TsConf.cpp)
+        const uint32_t w = TsConf::cpuMemRead(address, false);
+        if (w) VIDEO::Draw(w, false);
+    }
     // ProfROM plane switch — and on this firmware the switch IS a DATA read, so
     // this hook is the load-bearing one (hw 2026-09-04: without it ProfROM ran
     // its RAM test and then fell back into plane 0's 128 ROM = "black screen,
@@ -850,6 +863,10 @@ IRAM_ATTR uint8_t Z80Ops::fetchOpcode() {
     if (g_gmx_tap && (pc & 0xFFF0) == 0x0100)
         Ports::gmxProfRomTap(pc);
     VIDEO::Draw_Opcode(MemESP::ramContended[pg]);
+    if (__builtin_expect(g_ts_memcyc != 0, 0) && !tsMemNoDram(pc)) {   // TS-Conf DRAM model (TsConf.cpp)
+        const uint32_t w = TsConf::cpuMemMiss(pc, true);
+        if (w) VIDEO::Draw(w, false);
+    }
     if (DivMMC::enabled) {
         DivMMC::preOpcFetch(pc);
         pg = pc >> 14; // re-read in case instant map changed it
@@ -952,8 +969,9 @@ static inline void tsPoke8Store(uint16_t address, uint8_t value) {
 }
 static IRAM_ATTR __attribute__((noinline)) void poke8_generic(uint16_t address, uint8_t value);
 static IRAM_ATTR __attribute__((noinline)) void poke8_cold(uint16_t address, uint8_t value) {
-    // line boundary and/or the FMAddr / W0_WE write gate
+    // line boundary, the FMAddr / W0_WE write gate and/or the DRAM model
     if (CPU::tstates >= VIDEO::ts_line_t) VIDEO::tsDrawTick();
+    if (g_ts_memcyc) TsConf::cpuMemWrite(address);
     if (g_tsconf_wr && TsConf::cpuWriteGate(address, value)) return;
     tsPoke8Store(address, value);
 }
@@ -961,7 +979,8 @@ IRAM_ATTR void Z80Ops::poke8(uint16_t address, uint8_t value) {
     TS_PAGE_HIT(address);
     if (g_ts_fastmem) {
         CPU::tstates += 3;
-        if (__builtin_expect((CPU::tstates >= VIDEO::ts_line_t) | g_tsconf_wr, 0)) return poke8_cold(address, value);
+        if (__builtin_expect((CPU::tstates >= VIDEO::ts_line_t) | g_tsconf_wr | (g_ts_memcyc & 2), 0)) return poke8_cold(address, value);
+        if (__builtin_expect(g_ts_memcyc != 0, 0)) tsMemWriteInv(address);   // 14 MHz, no DMA: only the cache line
         tsPoke8Store(address, value);
         return;
     }
@@ -969,6 +988,7 @@ IRAM_ATTR void Z80Ops::poke8(uint16_t address, uint8_t value) {
 }
 static IRAM_ATTR __attribute__((noinline)) void poke8_generic(uint16_t address, uint8_t value) {
     VIDEO::Draw(3, MemESP::ramContended[address >> 14]);
+    if (__builtin_expect(g_ts_memcyc != 0, 0)) TsConf::cpuMemWrite(address);   // TS-Conf DRAM model
     gsDmaPoke8(address, value);
 }
 
@@ -984,10 +1004,17 @@ static IRAM_ATTR __attribute__((noinline)) uint16_t peek16_tick(uint16_t address
     VIDEO::tsDrawTick();
     return tsPeek16Load(address);
 }
+static IRAM_ATTR __attribute__((noinline)) uint16_t peek16_dram(uint16_t address) {   // at least one half misses
+    CPU::tstates += TsConf::cpuMemRead(address, false);
+    CPU::tstates += TsConf::cpuMemRead((uint16_t)(address + 1), false);
+    if (CPU::tstates >= VIDEO::ts_line_t) VIDEO::tsDrawTick();
+    return tsPeek16Load(address);
+}
 IRAM_ATTR uint16_t Z80Ops::peek16(uint16_t address) {
     TS_PAGE_HIT(address);
     if (g_ts_fastmem) {
         CPU::tstates += 6;
+        if (__builtin_expect(g_ts_memcyc != 0, 0) && (!tsMemNoDram(address) || !tsMemNoDram((uint16_t)(address + 1)))) return peek16_dram(address);
         if (__builtin_expect(CPU::tstates >= VIDEO::ts_line_t, 0)) return peek16_tick(address);
         return tsPeek16Load(address);
     }
@@ -1004,6 +1031,10 @@ static IRAM_ATTR __attribute__((noinline)) uint16_t peek16_generic(uint16_t addr
             VIDEO::Draw(3, true);
         } else
             VIDEO::Draw(6, false);
+        if (__builtin_expect(g_ts_memcyc != 0, 0)) {          // TS-Conf DRAM model (TsConf.cpp)
+            const uint32_t w = TsConf::cpuMemRead(address, false) + TsConf::cpuMemRead(address + 1, false);
+            if (w) VIDEO::Draw(w, false);
+        }
         // Order matters here for the same reason it does in the cross-page
         // branch below, and the old one-expression form got it backwards AND
         // left it to the compiler (the evaluation order of `|`'s operands is
@@ -1044,8 +1075,9 @@ static IRAM_ATTR __attribute__((noinline)) void poke16_tick(uint16_t address, Re
 }
 IRAM_ATTR void Z80Ops::poke16(uint16_t address, RegisterPair word) {
     TS_PAGE_HIT(address);
-    if (g_ts_fastmem && !g_tsconf_wr) {       // the write gate takes the generic (per-byte) path
+    if (g_ts_fastmem && !(g_tsconf_wr | (g_ts_memcyc & 2))) {   // the write gate / a running DMA take the generic path
         CPU::tstates += 6;
+        if (__builtin_expect(g_ts_memcyc != 0, 0)) { tsMemWriteInv(address); tsMemWriteInv((uint16_t)(address + 1)); }
         if (__builtin_expect(CPU::tstates >= VIDEO::ts_line_t, 0)) return poke16_tick(address, word);
         tsPoke16Store(address, word);
         return;
@@ -1062,6 +1094,10 @@ static IRAM_ATTR __attribute__((noinline)) void poke16_generic(uint16_t address,
             VIDEO::Draw(3, true);
         } else
             VIDEO::Draw(6, false);
+        if (__builtin_expect(g_ts_memcyc != 0, 0)) {          // TS-Conf DRAM model (TsConf.cpp)
+            TsConf::cpuMemWrite(address);
+            TsConf::cpuMemWrite(address + 1);
+        }
         gsDmaPoke8(address, word.byte8.lo);
         gsDmaPoke8(address + 1, word.byte8.hi);
 

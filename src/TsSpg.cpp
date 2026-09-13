@@ -140,7 +140,14 @@ bool FileSPG::load(const string& fn) {
     TsConf::r.memconf = 0;
     TsConf::r.page[0] = 0; TsConf::r.page[1] = 5; TsConf::r.page[2] = 2; TsConf::r.page[3] = page3;
     TsConf::r.vpage = TsConf::r.vpage_d = 5;
-    TsConf::r.sysconf = (uint8_t)(clk & 0x03);
+    // ZCLK from the header; CACHE stays ON — on hardware an .spg is launched
+    // from a TS-BIOS that booted with its Setup's "CPU Cache [ON]" (RESET2 writes
+    // SysConfig = cfrq | cach<<2), and Unreal's readSPG sets only zclk, leaving
+    // cacheconf as TS-BIOS left it. The DRAM model (TsConf.cpp) charges 14 MHz
+    // wait states per cache MISS, so a cold cache here would run every .spg
+    // slower than the real machine does.
+    TsConf::r.sysconf = (uint8_t)(0x04 | (clk & 0x03));
+    TsConf::r.cacheconf = 0x0F;
     MemESP::pagingLock = 0;
     TsConf::setBanks();
     TsConf::applyZclk(true);   // the header's clock byte is the program's choice — show it
