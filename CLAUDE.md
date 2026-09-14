@@ -4892,6 +4892,52 @@ menu session (+ a cursor memo), Buffer `g_spi`/`g_swapAlloc` regions 1 560 on bu
 512, hdmi CRT/snap/gigs LUTs 1 280, `TsConf::cram/sfile` 1 024 (fix the memdump.gdb probe
 first).
 
+### .bss batch 2: session-scoped UI state, sized pool tables, dead libc (2026-09-14; hw: owner, "works", committed — after the memset leak below was fixed)
+
+`.bss` 57 060 -> **48 552 B (-8 508)**, `.data` +20, every board; test ELF
+`debug/DVp2-bss2-1.0.5.elf`. Cumulative since the morning's 68 144: **-19.6 KB of static
+SRAM**. Five changes:
+
+- **`nm::State::dyn` is a pointer** (UiNav.h) — **and `runInternal`'s `memset(&S, 0,
+  sizeof(S))` had to learn that** (hw 2026-09-14: every F3/Esc lost exactly 3 256 B = one
+  DynRows chunk; the per-step probes showed `free(S.dyn)` returning nothing because the
+  whole-struct reset had already zeroed the pointer, so it freed NULL). The reset now
+  keeps `S.dyn` across. Lesson for any struct that grows a heap member: grep it for
+  `memset`/`= {}` first. Details: the `DynRows` pool (40 rows x 48-char label
+  + 22-char value + tag/dim/badge = 3 246 B) was 90 % of `nm::S` and lived in .bss with
+  the menu closed. `runInternal` claims it with `tryCalloc` after `gfxBegin()` and frees it
+  on every exit path; a nested run (hot key inside a session) reuses the outer one
+  (`ownDyn`). No heap for it = the menu does not open (`gfxEnd(); return;`), which at
+  3 KB free is the honest answer. `nm::S` 3 580 -> 332 B. All `S.dyn.` became `S.dyn->`,
+  the two `build(S.dyn)` calls `build(*S.dyn)`.
+- **`Buffer::Region` block tables are heap, sized per tier** (`init(total, cap)`): five
+  `Block[64]` = 3 900 B of .bss became 768 (butter, 64) + 192 (swap, 16) + 96 (flash pool,
+  8 — the GM.DLS bank is one or two blocks) on the heap, the SPI region costing nothing on
+  a butter board and the lent-arena region (32) only while lent. A region whose table
+  cannot be allocated stays not-ready.
+- **The Buffer SD-swap FIL is lazy** (`swapFileEnsure()`): `initPools` used to unlink +
+  create `/tmp` swap on every boot through a 608 B static FIL; the tier is the last resort
+  behind heap and butter and a butter board never reaches it. Now the file is opened on
+  the first swap-tier allocation, `g_swap_ready` just says an SD card is there.
+- **`__register_exitproc` / `__call_exitprocs` stubs** (cxx_shims.cpp): every global with a
+  destructor registers an exit handler through `__aeabi_atexit` at boot into newlib's 400 B
+  `__atexit0` table, for an exit() this firmware never calls. `libc_a-__atexit.o` is out of
+  the map. If a static destructor ever has to run at reboot, this is why it does not.
+- `PICO_TIME_DEFAULT_ALARM_POOL_MAX_TIMERS=8` (was 16: 384 -> 192 B; users are the two
+  repeating audio timers + `sleep_ms`; the TV drivers make their own pool) and the
+  `flash_qe_fix` boot2 copy (256 B) is heap for its one-shot, claimed while XIP is up.
+
+**Hw check owed**: open the menu (Machine/Storage dynamic lists — disk slots, snapshots,
+profiles — are the `DynRows` users), a nested hot-key flow (F3/F4/F5 while the menu is up),
+MIDI with a GM.DLS bank (flash pool, 8 blocks), Gigascreen on + a network session (lent
+arena region), boot on a Puya-flash board (`flash_qe_fix` path), and a swapping board for
+`swapFileEnsure`. Left in `.bss` above 200 B and NOT taken: AY `chip0` 1.6 K, audio buffers
+3.8 K, FatFs 3.4 K, TinyUSB 4.4 K, HDMI blobs/palette/scanline 2.9 K, Z80 flag tables 1 K,
+`offAtt/offBmp` 1.1 K, `hid_snap` 864 / `_xinputh_dev` 924 (USB), `PS2Controller` 480,
+`Debug::fault_log bufs` 384 (crash path), `fileTypes` 480, `pressed_key` 256, `RTC::regs`
+256, the UiStage `g_val/g_base` staging 808 (menu edits), `zifiPinOpts` labels 480 — plus
+batch 3 (feature-gated, ~5 KB).
+
 **TurboSound FM SRAM, measured the same day (owner's question):** static **11 B**
 (`opnfm[2]` pointers + `TsfmSubsys` flags; `s_sin_tab`/`s_tl_base` pointers 8 B), code all
 in FLASH (no `.time_critical` from OpnFm.cpp in the map). Heap ONLY while Audio →

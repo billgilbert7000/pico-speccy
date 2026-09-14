@@ -24,6 +24,7 @@
 #include "UiBrowser.h"
 #include "Subsystem.h"
 #include "OSDMain.h"
+#include "TryAlloc.h"
 #include "ESPectrum.h"
 #include "Video.h"
 #include "Config.h"
@@ -31,6 +32,11 @@
 #include "fabutils.h"
 #include "Debug.h"
 #include <pico/stdlib.h>
+
+// Heap probes (OSDMain.cpp) — declared OUTSIDE namespace nm, or the names resolve
+// to nm::getFreeHeap and the link fails.
+size_t getFreeHeap(void);
+extern "C" size_t getLargestAllocatable(void);
 
 namespace nm {
 
@@ -64,7 +70,7 @@ void buildVisible(Level& L) {
     if (L.dyn) {
         // The pool is already exactly what should be shown; dimmed rows stay in the list
         // (they carry information) and are refused at activation instead.
-        for (uint8_t i = 0; i < S.dyn.n && L.nvis < NM_MAX_ROWS; i++) L.vis[L.nvis++] = i;
+        for (uint8_t i = 0; i < S.dyn->n && L.nvis < NM_MAX_ROWS; i++) L.vis[L.nvis++] = i;
     } else {
         for (uint8_t i = 0; i < L.count && L.nvis < NM_MAX_ROWS; i++)
             if (!L.nodes[i].visible || L.nodes[i].visible())
@@ -271,21 +277,21 @@ static void enterLevel(const Node* n) {
     } else if (n->kind == K_DYNAMIC && n->build) {
         // Built ONCE, on entry — never per keypress, or holding Down would hammer the SD
         // card. Rows are re-built explicitly after an action that changes them.
-        S.dyn.clear();
-        n->build(S.dyn);
+        S.dyn->clear();
+        n->build(*S.dyn);
         L.nodes = nullptr;
-        L.count = S.dyn.n;
+        L.count = S.dyn->n;
         L.dyn   = true;
     } else {
         S.depth--;
         return;
     }
     buildVisible(L);
-    if (L.dyn && S.dyn.focus_set) {
+    if (L.dyn && S.dyn->focus_set) {
         // The builder asked to land on a specific row (persist picker: the last
         // used slot).
         for (uint8_t i = 0; i < L.nvis; i++)
-            if (S.dyn.tag[L.vis[i]] == S.dyn.focus_tag) { L.sel = i; break; }
+            if (S.dyn->tag[L.vis[i]] == S.dyn->focus_tag) { L.sel = i; break; }
         if (L.sel >= L.top + LY.body_rows) L.top = L.sel - LY.body_rows + 1;
     }
     S.focus = FOCUS_LEFT;
@@ -342,9 +348,9 @@ static void storageChanged() {
     if (L.dyn) {
         const Node* owner = L.parent;
         if (owner && owner->build) {
-            S.dyn.clear();
-            owner->build(S.dyn);
-            L.count = S.dyn.n;
+            S.dyn->clear();
+            owner->build(*S.dyn);
+            L.count = S.dyn->n;
         }
     }
     buildVisible(L);
@@ -361,16 +367,16 @@ static void dynInvoke(uint8_t key) {
     const Node* owner = L.parent;
     if (!L.dyn || !owner || !owner->rowkey || !L.nvis) return;
     const uint8_t r = L.vis[L.sel];
-    if (S.dyn.dim[r]) return;                    // informational row
-    const int32_t tag = S.dyn.tag[r];
+    if (S.dyn->dim[r]) return;                    // informational row
+    const int32_t tag = S.dyn->tag[r];
     Debug::log("dynInvoke: tag=%ld key=%u sp=%08x\n", (long)tag, (unsigned)key, debug_sp());
 
     gfxSuspendPalette();
     owner->rowkey(tag, key);
     gfxResumePalette();
 
-    if (owner->build) { S.dyn.clear(); owner->build(S.dyn); }
-    L.count = S.dyn.n;
+    if (owner->build) { S.dyn->clear(); owner->build(*S.dyn); }
+    L.count = S.dyn->n;
     buildVisible(L);
     drawFrameOnce();
     markDirty(D_ALL);
@@ -500,7 +506,7 @@ static char firstAlnum(const char* s) {
 static const char* leftRowLabel(const Level& L, int i) {
     if (i < 0 || i >= L.nvis) return nullptr;
     const uint8_t r = L.vis[i];
-    return L.dyn ? S.dyn.label[r] : L.nodes[r].label;
+    return L.dyn ? S.dyn->label[r] : L.nodes[r].label;
 }
 
 static bool jumpToLetter(char c) {
@@ -639,10 +645,18 @@ static void openPath(const Node* target) {
 // hot key sets it — every other way in is a "load" (or a list where it means
 // nothing), so it must be re-stated on every open rather than left standing.
 static void runInternal(const Node* openAt, bool enterSaves = false) {
-    Debug::log("runInternal: sp=%08x\n", debug_sp());
+    const size_t heapIn = getFreeHeap();
+    Debug::log("runInternal: sp=%08x heap=%u largest=%u\n", debug_sp(), (unsigned)heapIn, (unsigned)getLargestAllocatable());
     gfxBegin();               // installs the UI palette (own 16 colours)
+    // The dynamic-row pool lives for this session only (UiNav.h). A nested run
+    // (a hot key opening a level while another session is up) reuses the outer one.
+    const bool ownDyn = (S.dyn == nullptr);
+    if (ownDyn) {
+        S.dyn = (DynRows*)tryCalloc(sizeof(DynRows));
+        if (!S.dyn) { gfxEnd(); return; }        // no 3 KB for the menu: not our day
+    }
     computeLayout();
-    if (!layoutFits()) { gfxEnd(); return; }
+    if (!layoutFits()) { if (ownDyn) { free(S.dyn); S.dyn = nullptr; } gfxEnd(); return; }
 
     // Classic text pages (ChipInfo, ...) render in the new style while we are up,
     // and long operations (Speed test, ZIP extract, DLS convert) report in the
@@ -654,7 +668,10 @@ static void runInternal(const Node* openAt, bool enterSaves = false) {
     // open). The emulated frame is repainted by ESPectrum::processKeyboard on close.
     VIDEO::SaveRect.clear();
 
-    memset(&S, 0, sizeof(S));
+    // Fresh navigation state — but S.dyn is a heap pointer now (UiNav.h), so a
+    // whole-struct memset would drop the block: 3 256 B leaked per menu open (hw
+    // 2026-09-14, F3/Esc x3 read heap 26152 -> 22896 -> 19640). Keep it across.
+    { DynRows* keep = S.dyn; memset(&S, 0, sizeof(S)); S.dyn = keep; }
     Stage::begin();
     netStatusInvalidate();      // WiFi state may have changed since the last session
     profilesSessionBegin();     // ...and so may the profiles on the card
@@ -797,7 +814,10 @@ resume:
     profilesSessionEnd();       // hand the row tables back
     snapSessionEnd();
     OSD::osdInfoRelease();      // ...and the info pages' text buffer
+    if (ownDyn) { free(S.dyn); S.dyn = nullptr; }
     gfxEnd();
+    // A session must hand back every byte it took: this pair is the leak detector.
+    Debug::log("runInternal: done heap=%u (in %u) largest=%u", (unsigned)getFreeHeap(), (unsigned)heapIn, (unsigned)getLargestAllocatable());
 }
 
 void run() { runInternal(nullptr); }

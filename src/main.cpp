@@ -45,6 +45,7 @@
 #include "psram_spi.h"
 #include "Debug.h"
 #include "Buffer.h"
+#include "TryAlloc.h"
 #if defined(KBD_ALT_CLOCK_PIN) && defined(PCM5122_I2C_SDA)
     #include "pcm5122_init.h"
 #endif
@@ -1583,8 +1584,11 @@ uint8_t flash_qe_diag[6];
 static void __no_inline_not_in_flash_func(flash_qe_fix)() {
     if (rx[1] != 0x85)                       // Puya only; Winbond is factory-set,
         return;                              // other vendors have different SR layouts
-    // boot2 copy to re-enter fast XIP afterwards (on RP2350 crt0 parks boot2 in BOOTRAM)
-    static uint32_t boot2_copy[64];
+    // boot2 copy to re-enter fast XIP afterwards (on RP2350 crt0 parks boot2 in BOOTRAM).
+    // Heap for the duration of this one-shot (claimed here, while XIP is still up;
+    // freed after boot2 has brought it back) — it was 256 B of .bss for life.
+    uint32_t* boot2_copy = (uint32_t*)tryMalloc(64 * sizeof(uint32_t));
+    if (!boot2_copy) return;
     const volatile uint32_t *b2 = (const volatile uint32_t *)BOOTRAM_BASE;
     for (int i = 0; i < 64; ++i)
         boot2_copy[i] = b2[i];
@@ -1677,6 +1681,7 @@ static void __no_inline_not_in_flash_func(flash_qe_fix)() {
     for (size_t i = 0; i < count_of(pads_qspi_hw->io); ++i)
         pads_qspi_hw->io[i] = pads_save[i];
     restore_interrupts(ints);
+    free(boot2_copy);
 }
 
 // Try to switch sys clock with PLL lock timeout.

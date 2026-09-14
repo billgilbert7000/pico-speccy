@@ -36,7 +36,10 @@ struct State {
     uint8_t focus;              // FOCUS_LEFT / FOCUS_RIGHT
     uint8_t rsel, rtop, rcount; // right pane selection / scroll / row count
     bool    quit;
-    DynRows dyn;                // the single dynamic-row pool (levels do not nest)
+    // The single dynamic-row pool (levels do not nest). ~3.2 KB, so it is heap for
+    // the menu SESSION (runInternal claims and frees it) instead of .bss forever —
+    // it was 90% of nm::S, which every session paid with the menu closed.
+    DynRows* dyn;
 };
 extern State S;
 

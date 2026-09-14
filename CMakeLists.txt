@@ -264,6 +264,7 @@ project(${PROJECT_NAME} C CXX ASM)
 # turns any future overflow into an immediate fault AT the boundary — the
 # overflowing core traps with stackOvf=1 instead of corrupting its neighbour.
 add_compile_definitions(PICO_STACK_SIZE=0x2000 PICO_CORE1_STACK_SIZE=0x800
+                        PICO_TIME_DEFAULT_ALARM_POOL_MAX_TIMERS=8   # 2 repeating audio timers + sleep_ms; was 16 (384 B of .bss)
                         PICO_USE_STACK_GUARDS=1)
 
 # ZiFi network client (FTP/SFTP/SSH) uses the SDK-vendored mbedTLS as a crypto

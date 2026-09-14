@@ -53,3 +53,10 @@ extern "C" void _tzset_unlocked_r(struct _reent*) {}
 // nothrow deletes need no replacement: libstdc++'s forward to operator delete.
 void* operator new(std::size_t n, const std::nothrow_t&) noexcept   { return tryMalloc(n); }
 void* operator new[](std::size_t n, const std::nothrow_t&) noexcept { return tryMalloc(n); }
+
+// newlib's atexit machinery: __register_exitproc keeps a 400 B table (__atexit0)
+// for exit handlers that this firmware — which never exits — can never run, and
+// every global with a destructor registers one through __aeabi_atexit at boot.
+// Accept and forget; the table and its mutex go with it.
+extern "C" int  __register_exitproc(int, void (*)(void), void*, void*) { return 0; }
+extern "C" void __call_exitprocs(int, void*) {}

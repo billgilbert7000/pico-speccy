@@ -1,4 +1,5 @@
 #include "Buffer.h"
+#include "TryAlloc.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -7,6 +8,7 @@
 #include "Config.h"        // Config::gs_enabled
 #include "Debug.h"
 #include "ff.h"
+#include "FileUtils.h"     // fsMount
 #include "psram_spi.h"     // psram_size, read8psram/write8psram, psram_read/write_range
 
 #include "DivMMC.h"        // DivMMC::use_psram + bank constants
@@ -56,11 +58,24 @@ struct Block { uint32_t off; uint32_t size; bool used; };
 
 class Region {
 public:
-    void init(uint32_t total) {
+    // cap = block-table entries for THIS region. The table used to be a fixed
+    // Block[64] inside every Region object — 5 x 780 B of .bss whether the tier
+    // existed on the board or not (SPI PSRAM on a butter board never does, the
+    // flash pool holds one bank). Now heap, sized to the tier, only once it is
+    // initialised. A region that cannot get its table stays not-ready.
+    void init(uint32_t total, int cap) {
         _nblocks = 0;
-        _ready = total > 0;
+        _ready = false;
         _total = total;
-        if (_ready) { _blocks[0] = { 0, total, false }; _nblocks = 1; }
+        if (total == 0) return;
+        if (!_blocks || cap > _cap) {
+            ::free(_blocks);
+            _blocks = (Block*)tryCalloc((size_t)cap * sizeof(Block));
+            _cap = _blocks ? cap : 0;
+        }
+        if (!_blocks) return;
+        _ready = true;
+        _blocks[0] = { 0, total, false }; _nblocks = 1;
     }
     bool ready() const { return _ready; }
 
@@ -78,7 +93,7 @@ public:
         for (int i = 0; i < _nblocks; i++) {
             if (_blocks[i].used || _blocks[i].size < want) continue;
             uint32_t off = _blocks[i].off;
-            if (_blocks[i].size > want && _nblocks < MAX_BLOCKS) {
+            if (_blocks[i].size > want && _nblocks < _cap) {
                 for (int j = _nblocks; j > i + 1; j--) _blocks[j] = _blocks[j - 1];
                 _blocks[i + 1] = { off + want, _blocks[i].size - want, false };
                 _nblocks++;
@@ -115,9 +130,9 @@ private:
             } else i++;
         }
     }
-    static const int MAX_BLOCKS = 64;
-    Block _blocks[MAX_BLOCKS];
-    int   _nblocks = 0;
+    Block* _blocks = nullptr;
+    int    _cap    = 0;
+    int    _nblocks = 0;
     bool  _ready   = false;
     uint32_t _total = 0;
 };
@@ -127,8 +142,20 @@ uint32_t g_butter_base = 0;
 Region   g_spi;               // absolute base = g_spi_base (SPI PSRAM, accessor)
 uint32_t g_spi_base = 0;
 Region   g_swapAlloc;         // file offset base 0 (SD swap, accessor)
-FIL      g_bufswap;
+// The SD swap tier's FIL, opened on the FIRST swap allocation (see swapFileEnsure):
+// the tier is the last resort behind heap + butter, and a butter board never reaches
+// it — it used to cost 608 B of .bss and a file created on every boot regardless.
+FIL*     g_bufswap = nullptr;
 bool     g_swap_ready = false;
+static bool swapFileEnsure() {
+    if (g_bufswap) return true;
+    FIL* f = (FIL*)tryCalloc(sizeof(FIL));
+    if (!f) return false;
+    f_unlink(BUFSWAP_PATH);
+    if (f_open(f, BUFSWAP_PATH, FA_READ | FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) { ::free(f); return false; }
+    g_bufswap = f;
+    return true;
+}
 
 // TIER_ARENA (lent SRAM, e.g. Gigascreen prevFB) and TIER_FLASH (GM.DLS bank
 // partition) are RP2350-only in practice: the only lendArena() caller needs
@@ -232,7 +259,7 @@ void Buffer::initPools() {
         if (top > bottom) {
             g_butter_base = (uint32_t)bottom;
             butter_arena  = top - bottom;
-            g_butter.init((uint32_t)butter_arena);
+            g_butter.init((uint32_t)butter_arena, 64);
         }
     }
 
@@ -247,15 +274,14 @@ void Buffer::initPools() {
         if (high > low) {
             g_spi_base = (uint32_t)low;
             spi_arena  = high - low;
-            g_spi.init((uint32_t)spi_arena);
+            g_spi.init((uint32_t)spi_arena, 64);
         }
     }
 
     // SD swap arena.
-    f_unlink(BUFSWAP_PATH);
-    if (f_open(&g_bufswap, BUFSWAP_PATH, FA_READ | FA_WRITE | FA_CREATE_ALWAYS) == FR_OK) {
-        g_swapAlloc.init(BUFSWAP_CAP);
-        g_swap_ready = true;
+    if (FileUtils::fsMount) {
+        g_swapAlloc.init(BUFSWAP_CAP, 16);
+        g_swap_ready = g_swapAlloc.ready();
     }
 
     Debug::log("Buffer::initPools butter=%uKB@+%uKB spi=%uKB@+%uKB swap=%d",
@@ -271,7 +297,7 @@ void Buffer::initFlashPool(void* xipBase, size_t size) {
     if (g_flash_xip == (uint8_t*)xipBase && g_flash_total == size) return;  // idempotent
     g_flash_xip   = (uint8_t*)xipBase;
     g_flash_total = (uint32_t)size;
-    g_flash.init(g_flash_total);
+    g_flash.init(g_flash_total, 8);      // the GM.DLS bank: one or two blocks
     Debug::log("Buffer::initFlashPool %uKB @ %p", (unsigned)(size >> 10), xipBase);
 }
 
@@ -482,7 +508,7 @@ bool Buffer::lendArena(void* base, size_t size) {
     if (g_arena_on || !base || !size) return false;
     g_arena_base = (uint8_t*)base;
     g_arena_size = (uint32_t)size;
-    g_arena.init((uint32_t)size);
+    g_arena.init((uint32_t)size, 32);
     g_arena_on = true;
     Debug::log("Buffer: lent arena %uKB @ %p", (unsigned)(size >> 10), base);
     return true;
@@ -553,7 +579,7 @@ bool Buffer::alloc(size_t bytes, uint32_t flags) {
         uint32_t off = g_spi.alloc((uint32_t)bytes);
         if (off != UINT32_MAX) { _tier = TIER_SPI; _off = off; _size = bytes; return true; }
     }
-    if (g_swap_ready) {
+    if (g_swap_ready && swapFileEnsure()) {
         uint32_t off = g_swapAlloc.alloc((uint32_t)bytes);
         if (off != UINT32_MAX) { _tier = TIER_SWAP; _off = off; _size = bytes; return true; }
     }
@@ -626,8 +652,8 @@ uint8_t Buffer::read(size_t off) {
         case TIER_SPI:    return read8psram(g_spi_base + _off + (uint32_t)off);
         case TIER_SWAP: {
             uint8_t v = 0; UINT br = 0;
-            f_lseek(&g_bufswap, _off + off);
-            f_read(&g_bufswap, &v, 1, &br);
+            f_lseek(g_bufswap, _off + off);
+            f_read(g_bufswap, &v, 1, &br);
             return v;
         }
         default: return 0;
@@ -644,8 +670,8 @@ void Buffer::write(size_t off, uint8_t v) {
         case TIER_SPI:    write8psram(g_spi_base + _off + (uint32_t)off, v); break;
         case TIER_SWAP: {
             UINT bw = 0;
-            f_lseek(&g_bufswap, _off + off);
-            f_write(&g_bufswap, &v, 1, &bw);
+            f_lseek(g_bufswap, _off + off);
+            f_write(g_bufswap, &v, 1, &bw);
             break;
         }
         default: break;
@@ -663,8 +689,8 @@ void Buffer::readBlock(void* dst, size_t off, size_t n) {
         case TIER_SPI:    psram_read_range(g_spi_base + _off + (uint32_t)off, (uint8_t*)dst, n); break;
         case TIER_SWAP: {
             UINT br = 0;
-            f_lseek(&g_bufswap, _off + off);
-            f_read(&g_bufswap, dst, n, &br);
+            f_lseek(g_bufswap, _off + off);
+            f_read(g_bufswap, dst, n, &br);
             break;
         }
         default: break;
@@ -682,8 +708,8 @@ void Buffer::writeBlock(const void* src, size_t off, size_t n) {
         case TIER_SPI:    psram_write_range(g_spi_base + _off + (uint32_t)off, (const uint8_t*)src, n); break;
         case TIER_SWAP: {
             UINT bw = 0;
-            f_lseek(&g_bufswap, _off + off);
-            f_write(&g_bufswap, src, n, &bw);
+            f_lseek(g_bufswap, _off + off);
+            f_write(g_bufswap, src, n, &bw);
             break;
         }
         default: break;
