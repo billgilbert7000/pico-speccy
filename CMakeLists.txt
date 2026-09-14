@@ -607,9 +607,11 @@ if (TSOVL_WIN_SIZE STREQUAL "AUTO")
     if (PERF_TRACE)
         math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 3072")
     endif()
-    # TS_OVL_BSS data (Video.cpp's ts256 palette-bank tables, 2328 B measured
-    # 2026-09-14) lives in the window too — see .tsovl_bss below.
-    math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 2560")
+    # TS-Conf-only DATA rides in the window too (.tsovl_data loaded, .tsovl_bss
+    # NOLOAD): the ts256 palette-bank tables, the DRAM-cache rows/tags and the
+    # TSU line buffers — 7016 B measured 2026-09-14 (`arm-none-eabi-size -A
+    # <elf> | grep tsovl`), 8 KB here for headroom.
+    math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 8192")
     set(TSOVL_WIN_SIZE_EFFECTIVE ${_TSOVL_BYTES})
 else()
     set(TSOVL_WIN_SIZE_EFFECTIVE ${TSOVL_WIN_SIZE})
@@ -661,6 +663,8 @@ if (TSCONF_CODE_OVERLAY)
         *(.tsovl .tsovl.*)\n\
         . = ALIGN(4);\n\
         *(.tsovl_ro .tsovl_ro.*)\n\
+        . = ALIGN(4);\n\
+        *(.tsovl_data .tsovl_data.*)\n\
         . = ALIGN(4);\n\
         __tsovl_end = .;\n\
     } AT > FLASH\n\

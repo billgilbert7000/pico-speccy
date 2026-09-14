@@ -4670,6 +4670,76 @@ After this there are 162 bytes of alignment fill left in `.bss`+`.data` combined
 — nothing more to reclaim there. SCRATCH_Y is now full; SCRATCH_X has ~760 B.
 NOT hw-tested.
 
+## What belongs in a machine overlay: the audit (2026-09-14, NOT hw-tested)
+
+The question was whether the three heavy, mutually exclusive machines — TS-Conf,
+Profi/Karabas and Scorpion GMX — could each hand their SRAM back to the others
+through `CodeOverlay`. Answered from the linked ELF (`arm-none-eabi-nm -S`, every
+symbol in `.data`/`.bss` outside the existing windows), not from impressions:
+
+| machine | RAM-resident and identifiable | verdict |
+|---|---|---|
+| TS-Conf | **6.6 KB** outside `.tsovl` | moved, see below |
+| Profi/Karabas | 1.4 KB (`Update_Border_DS80` 612, `profi_pair_lookup` 256, `ds80_unpair` 256, palettes 128) | not worth it |
+| Scorpion GMX | **316 B** (`getFloatBusDataScorp` 92, two menu option tables 132) | nothing to take |
+
+- **Profi is small AND entangled.** Its DS80 branches live inside `MainScreen`
+  (5336 B) and `MiddleBorder` (904 B), which every machine executes — splitting
+  the beam renderer per machine is the opposite of what its hot path wants. And
+  the pair-slot path is NOT Profi's alone: GMX 640x200 and Timex hi-res use the
+  same `profi_pair_lookup` + driver tables, and Timex is a card-like option on any
+  48K/128K, so a "Profi window" would have to be claimed by three unrelated
+  features. Its genuinely big buffers (the 16 KB DS80 colour SRAM, the ~5 KB HDMI
+  palette snapshot) are already allocated on demand from the heap.
+- **GMX has nothing**: its renderer and port handlers are in FLASH by design and
+  its cold halves were deliberately never made RAM-resident.
+- **A shared OVERLAY of all three** (ld `OVERLAY`, one window, mutually exclusive
+  occupants) saves `max` instead of `sum`, and Profi+GMX together are ~1.7 KB
+  against TS-Conf's 14 KB of code — the window would be TS-Conf-sized either way.
+- Worth knowing for later, and NOT a machine: **Gigascreen** is 1.2 KB of RAM code
+  (`Update_Border_Span_XOR_Gig` 744 + `_Pair_Gig` 484) paid by every session that
+  has it off. That is bigger than Profi's or GMX's whole share and it already has
+  a claim point (`GsSubsys`), so it is the better next candidate.
+
+**Done: the remaining TS-Conf data moved into `.tsovl` (−4960 B of static RAM on
+every board; with the ts256 tables from the same day, −6912 B against the tree at
+the start of 2026-09-14).** Two new placements beside `TS_OVL_CODE`/`TS_OVL_RO`:
+`TS_OVL_BSS` (NOLOAD tail `.tsovl_bss`, zeroed by `CodeOverlay::loadWindow` on
+every claim) and `TS_OVL_DATA` (inside the LOADED part, so a claim restores its
+initialisers from flash — that is what the 0xFF fills and the row pointers need).
+What moved: the whole DRAM-cache state (`tsdc_row` 2048, `g_ts_cache_tag` 512,
+`tsdc_none` + `tsdc_page_row` 512, the row/tag tables and the hit/inv pointers)
+and the TSU line buffers (`s_gline` 1024, `s_tsline` 512, `s_nibmap` + its lazy
+flag 257). Window AUTO term is now +8192 B for data (19 152 of 22 272 B used).
+
+- **The gate, re-verified symbol by symbol before moving anything** (the header's
+  own rule): every per-access read is behind `g_ts_memcyc != 0`, which
+  `memcycRecalc` pins to 0 on every other machine and which the accessors in
+  CPU.cpp and `exec_nocheck` test FIRST; every write is on a TS-only cold path
+  (`tsdcFill` from `cpuMemMiss`, `tsTagBaseRecalc` from `setBanks` / the SysConfig
+  + CacheConfig writes / `TsConf::reset`, and `TsConf::reset` itself is called
+  only under `Z80Ops::isTsconf`). The line buffers are touched only by
+  `tsRenderExec` / `tsuComposeLine` / `tsRenderExecOvr`.
+- **`s_nibmap_ok` had to move WITH `s_nibmap`**: a mid-session claim zeroes the
+  map, and a flag left outside would stay true — the lazy init would not re-run
+  and every pixel would map to slot 0 (a black picture). Any lazy-init flag whose
+  table is in a window belongs in the window.
+- **`TsConf::r` / `cram` / `sfile` (1080 B) deliberately stayed out**: every
+  firmware reader is TS-gated, but `tools/memdump.gdb` prints that block
+  unconditionally, and on another machine it would decode heap bytes as a
+  register file. Moving them means teaching the dump script to skip the block —
+  and a wrong symbol there HANGS Ctrl+Alt+D (see the fishbone trap list), so it
+  is not a change to make in passing.
+- Host tests re-run green: `tools/tsdram_cache_test.cpp` (fails=0) and
+  `tools/tsdram_test.cpp` (OK). A `-DTSCONF_CODE_OVERLAY=OFF` build still links
+  (RAM 205 536 B — everything back in `.data`/`.bss`), which is the escape hatch.
+- **hw 2026-09-14, owner on `debug/DVp2-tsovl-1.0.5.elf`: "работает"** — not
+  itemised, so read it as the no-regression half (a TS-Conf session comes up with
+  its state in the window). What it does not establish and is still owed: the
+  NON-TS side of the trade, i.e. a Pentagon/48K boot showing `[OVL] TS-Conf
+  window to the heap: ... (+data tail)` and the bigger `freeHeap` at
+  `VIDEO::Init` that is the entire point of the move.
+
 ## TS-Conf SRAM audit + GS idle throttle + core1 sharing (2026-09-07, hw-confirmed)
 
 Map diff DVp2 1.0.2 (2026-09-03, pre-TS-Conf) → HEAD: static SRAM +34.4 KB, of

@@ -5693,8 +5693,11 @@ void VIDEO::tsRenderLine(uint32_t curline) {
 // base pixels in s_tsline; GFXOVR path: base in s_gline (bit 8 = pixv), TSU in
 // s_tsline, merged per pixel. Static on purpose (the 2026-09-07 palloc attempt
 // lost FPS — see CLAUDE.md).
-static uint16_t s_gline[512];
-static uint8_t  s_tsline[512];
+// Read and written only by tsRenderExec / tsuComposeLine / tsRenderExecOvr, all
+// of which are TS-only entry points (the first two live in the same overlay
+// window), so they ride in it as well — see TS_OVL_BSS.
+static uint16_t TS_OVL_BSS s_gline[512];
+static uint8_t  TS_OVL_BSS s_tsline[512];
 
 // What the GFXOVR path needs from tsRenderExec's prologue.
 struct TsLineCtx {
@@ -5943,8 +5946,10 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
     const bool gfxovr = j.l.vconf & 0x08;
 
     // Output map (fb byte = palette slot; ts256 remap while it is live).
-    static uint8_t s_nibmap[256];
-    static bool s_nibmap_ok = false;
+    // Both in the window: a mid-session claim zeroes the map, so the flag has to
+    // be zeroed with it or the lazy init below would not re-run.
+    static uint8_t TS_OVL_BSS s_nibmap[256];
+    static bool    TS_OVL_BSS s_nibmap_ok = false;
     if (!s_nibmap_ok) { for (int i = 0; i < 256; i++) s_nibmap[i] = (uint8_t)(i & 0x0F); s_nibmap_ok = true; }
     const uint8_t* map = ts_pal256_live ? ts256_map_b[bank] : s_nibmap;
     const int xa = x0 < 0 ? -x0 : 0;

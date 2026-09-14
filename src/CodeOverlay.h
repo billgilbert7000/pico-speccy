@@ -65,10 +65,16 @@
 // and CodeOverlay zeroes it whenever the window is claimed. Same rule as the
 // code — every access must sit behind a TS-only gate (ts_pal256_live).
 #define TS_OVL_BSS  __attribute__((section(".tsovl_bss")))
+// Initialised mutable data (the DRAM-cache rows' 0xFF fill, the row->page maps,
+// the hit/inv row pointers): rides in the LOADED part of the window, so a claim
+// re-initialises it from flash instead of needing an init function. Costs its
+// own size in flash, unlike TS_OVL_BSS.
+#define TS_OVL_DATA __attribute__((section(".tsovl_data")))
 #else
 #define TS_OVL_CODE __not_in_flash("tsconf")
 #define TS_OVL_RO   __not_in_flash("tsconf_ro")
 #define TS_OVL_BSS
+#define TS_OVL_DATA
 #endif
 
 // The GS family needs NO source annotation: its whole directory (src/GS/) is
