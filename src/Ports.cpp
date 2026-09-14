@@ -1795,12 +1795,28 @@ IRAM_ATTR uint8_t Ports::input(uint16_t address) {
         // No mouse ever attached → keep the bus-float 0xFF so presence
         // detection (buttons==0xFF) still reads "absent".
         if (!ESPectrum::mouseSeen) return 0xff;
-        // Manual p.25: bit0=R, bit1=L, bit2=M (active low), bit3=1,
-        // bits4-7 = wheel notch counter.
-        return (uint8_t)(((ESPectrum::mouseWheel & 0x0F) << 4) | 0x08 |
-                         (ESPectrum::mouseButtonM ? 0 : 0x04) |
-                         (ESPectrum::mouseButtonL ? 0 : 0x02) |
-                         (ESPectrum::mouseButtonR ? 0 : 0x01));
+        if (Z80Ops::isProfi) {
+          // Karabas-Pro manual p.25: bit0=R, bit1=L, bit2=M (active low),
+          // bit3=1, bits4-7 = wheel notch counter.
+          return (uint8_t)(((ESPectrum::mouseWheel & 0x0F) << 4) | 0x08 |
+                           (ESPectrum::mouseButtonM ? 0 : 0x04) |
+                           (ESPectrum::mouseButtonL ? 0 : 0x02) |
+                           (ESPectrum::mouseButtonR ? 0 : 0x01));
+        }
+        // A CLASSIC Kempston mouse drives only bit0 (right) and bit1 (left),
+        // both active low; bits 2-7 are "not used" and float HIGH, so the idle
+        // byte is 0xFF — and software tests for exactly that. Workbench +3e
+        // does `IN A,(#FADF) / CP #FF / JR NZ` per frame (its pointer routine
+        // at RAM #EBC6) and treats anything else as "a button is down", so the
+        // Karabas wheel layout above — 0x0F when idle, because the wheel
+        // counter sits in bits 4-7 — left the whole GUI with a permanently
+        // pressed button and nothing in it would respond (hw 2026-09-14).
+        // ZEsarUX agrees (operaciones.c: buttons = 255, masked to 0x0F only on
+        // the ZX Next, where the wheel really is in the high nibble).
+        uint8_t kmb = 0xFF;
+        if (ESPectrum::mouseButtonL) kmb &= (uint8_t)~0x02;
+        if (ESPectrum::mouseButtonR) kmb &= (uint8_t)~0x01;
+        return kmb;
       }
     }
 

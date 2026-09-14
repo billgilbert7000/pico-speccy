@@ -1440,6 +1440,77 @@ diffed against the image byte for byte — 132 of 132 matched on the first check
 turned every one of these into a data question instead of a firmware one. Do that
 first.
 
+### The Kempston mouse buttons byte idles at 0xFF — the wheel layout is Karabas-only (hw-confirmed 2026-09-14)
+
+`#FADF` used to answer the **Karabas-Pro wheel mouse** on EVERY machine —
+`(wheel & 0x0F) << 4 | 0x08 | M | L | R`, i.e. **0x0F when nothing is pressed**.
+A classic Kempston mouse drives only **bit 0 (right)** and **bit 1 (left)**, both
+active low; bits 2-7 are "not used" and float HIGH, so the idle byte is **0xFF**
+and software tests for exactly that. Found with **Workbench +3e**: its pointer
+routine (RAM `#EB57`) reads `#FBDF`/`#FFDF` for X/Y and then does
+`LD BC,#FADF / IN A,(C) / CP #FF / JR NZ` at `#EBC6` — anything but 0xFF means "a
+button is down", so the whole GUI sat with a permanently pressed button and
+nothing in it responded. X/Y were fine the whole time (the dump had
+`(#ED9E)=27`, `(#ED9D)=79` and a live pointer at `(#ED9B/#ED9C)`), which is why it
+read as "the mouse does not work" rather than "the pointer does not move".
+`Ports.cpp` now keeps the wheel/middle-button layout for `Z80Ops::isProfi` only.
+ZEsarUX agrees (`operaciones.c`: `acumulado = 255`, only bits 0/1 cleared, high
+nibble masked to the wheel **on TBBLUE alone**; its comment spells out
+"D2-D7 - not used"). The decode itself was never wrong — non-Profi matches
+`address & 0x05FF` against 0x01DF/0x05DF/0x00DF, which is `#FBDF`/`#FFDF`/`#FADF`.
+Consequence to know: on a +3e the wheel is gone, as it should be.
+
+- **`ESPectrum::mouseSeen` is the only presence gate and there is no `Config::mouse`
+  and no keyboard fallback** — without a real USB mouse `#FADF` answers 0xFF
+  ("absent") and X/Y stay 0. The `LED::KEMPMOUSE` indicator is ALWAYS visible
+  (`isVisible()` returns true), so it blinks whenever a guest polls those ports:
+  that is the one-glance check for "is the program even asking".
+- **Workbench +3e is mouse-or-joystick only, never the keyboard** (its own
+  REQUIREMENTS). The shipped HDF images boot configured for the mouse; `SETUP` in
+  the `sistema` partition switches to a **Sinclair** joystick and the language.
+
+### IDEDOS disks ship in 8-bit and 16-bit editions, and only the 8-bit one fits our ROM
+
+HDF **flags bit 0 ("half sectors") is the interface width**, and it has to match
+the ROM: our +3e is the `sm8` build, whose sector read passes `DE = 0x0100` to the
+loop at ROM2 `0x25B9` — exactly **256 `INI`** from `#CEEF`, because D8-D15 are not
+wired. A 16-bit image (flags 0x00, full 512-byte sectors) therefore hands the guest
+the low byte of every word and cannot work; that is faithful, not a bug. The
+partition geometry says the same thing twice: a 16 MB +3DOS partition spans
+128 cyl x 2 x 128 x **512 B** on a 16-bit disk and 65 cyl x 16 x 63 x **256 B** on
+an 8-bit one.
+
+- **Our `src/roms/plus3e/src/rom{0,1,2}.bin` are byte-identical to v1.43
+  `sm8en3e{0,1,2}` AND to FUSE's stock `plus3e-{0,1,2}.rom`** (md5 `bc123f62…`,
+  `61736426…`, `c363e95d…`). So "works in FUSE" proves nothing by itself — stock
+  FUSE +3e is our machine exactly. The Workbench author's FUSE guide does NOT use
+  it: it says to replace the machine ROMs with `dives3e0..3.rom` and tick
+  **DivIDE interface**, and divIDE is 16-bit. (The source comments still say
+  "v1.4"; the banks are v1.43's.)
+- **`p3eroms` naming** (Readme.txt of `ROMS_original.rar`): `sm8` 8-bit simple,
+  `pe8` 8-bit simple Pera Putnik, `p16` **16-bit** Pera Putnik, `pcf` CF Pera
+  Putnik, `div` divIDE/MB02+, `dvm` DivMMC, `mmc` ZX-MMC, `zxa` ZXATASP,
+  `zxc`/`zc2` ZXCF, `usb` ZXUSB, `bad` Badaloc, `yam` YAMOD8255; letters 4-5 are
+  the language, the last character the bank (0-3 / A-B / E).
+- **Cost of a second interface, measured against `sm8en`** (bank 0 and 3 are the
+  same in every build): `pe8` **479 bytes in one bank**, `p16` 6795 in banks 1+2,
+  `div` 6794, `pcf` 6794, `zxc` 6891, `zxa` 7798, `dvm`/`mmc` 9504. The
+  TAP-loading `-mod` build of sm8 differs by ~13.7 KB across all four banks.
+- **If a 16-bit disk is ever wanted, `div` is the cheap route, not `p16`.** We
+  already emulate divIDE — `Ports.cpp` decodes its ATA registers as
+  `(lo & 0xE3) == 0xA3` plus control at `0xE3`, and `DivMMC.cpp`'s `divide_mode`
+  opens .hdf and reads **full 512-byte sectors**. Missing: the `div` ROM banks and
+  letting divIDE be enabled on a +3. `p16` would additionally need a whole new
+  decode — it abandons the `#xxEF` family for `#69`/`#6B`/`#6F`/`#79`/`#7F`.
+- `Workbench2.3_4Gb_8Bits.hdf` (octocom.speccy.org, 1 998 581 888 B, 7745/16/63,
+  62 partitions) **boots and runs on the shipped sm8 ROM** (hw 2026-09-14). Its
+  "4 GB" is the nominal drive: the file stores only the low halves, so it fits
+  FAT32 and our 32-bit arithmetic with `C*H*S*512` = 3 997 163 520 — the 8 GB
+  16-bit edition would overflow `uint32`.
+- **`tools/idedos_audit.py` reads the partition table from ONE sector**, which is
+  4 entries on a half-sector image — it showed 3 partitions of Workbench's 62.
+  Unfixed.
+
 ### The three uPD765 behaviours that are hangs, not wrong bytes
 
 Each has a named assertion in `tools/upd765_test.cpp`; if one regresses the machine
