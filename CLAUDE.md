@@ -3887,6 +3887,70 @@ worse than loading it and saying so, which is what the "TS2068 snapshot: running
 Real material: `debug/Timex/GVD42048.z80` (mch 14) and `GVD4NTSC.z80` (mch 128) are
 the same program flagged for the two machines.
 
+## Z80 DMA attribute multicolour (MB-02+/DATA-GEAR): NaPICu (2026-09-14; owner on `DVp2-napicu-dma2`: "работает" — letters and title both clean)
+
+NaPICu (K3L, 2001; `napicu-demo.tap`, a three-stage packed image — `tools/z80dma_sim/`
+runs it from the TAP or from a memory dump) is 8x1 attribute art: the bitmap is a
+static `0xF0` fill (left half ink, right half paper) and the demo DMAs one 32-byte
+row of a 64x128-cell attribute image into the attribute file per scanline — phase 1
+writes row 0 of all 24 charrows in the top border, phase 2 walks the charrows with 7
+DMAs each (`OUT (C),D/L/H/B` + `OUT (#0B),A` = 69 T of CPU + 32 x 4 T of DMA per row,
+generated code at 0x8F9E/0x920E). Its "DMA DEZIGN" title is the OTHER screen: the main
+loop writes `#7FFD = 0x58` (page 7 displayed) before the raster pass and `0x51` after
+it, so on hardware page 7 shows for lines up to ~147 (Pentagon) and page 5 for the
+frame's tail, while the pass keeps writing black rows into page 5. Two defects in
+`captureAttrAfterTransfer` (Z80DMA.cpp), found one after the other:
+
+- **Blue copies of each letter's top edge one scanline below the charrow boundary.**
+  The shadow armed only once a row CHANGED against the first write, so N >= 3
+  identical leading rows (black art above a letter, or a 32-cell window of vertical
+  strokes) left scanlines 1..N-2 unshadowed; the renderer drew them LIVE, and live
+  memory already held the charrow's LAST row — our DMA runs 10-20 lines ahead of the
+  beam on Pentagon (no contention, INT-to-paper 17983 T against the ZX128's 14361 the
+  demo is timed for). The compare is gone: from the second DMA into a charrow every
+  write shadows. Reproduced in the simulator only in frames whose letter window held
+  identical rows (148/253/404 of a 3000-frame run — 68 frames showed nothing).
+- **...and that exposed the second one: the shadow was read through `VIDEO::grmem`,
+  the DISPLAYED page, not the page the DMA wrote.** During the title the pass writes
+  black rows into page 5 while grmem is page 7, so the shadow took the title's white
+  `0x07` rows, and when the display returned to page 5 for the frame's tail those
+  lines rendered page 5's `0xF0` fill in white — a comb under "DEZIGN" from line 147
+  (= (50850 - 17983) / 224, the demo's own `OUT` time) to 191 on Pentagon, one dashed
+  line on a 128K. The old compare rule had hidden it (white == white, never armed).
+  Now the shadow is taken from `MemESP::ramCurrent[dest >> 14]` (the page written),
+  `dma_attr_page[charrow]` records it, and `MainScreen_Blank` applies the override
+  only while `grmem` IS that page — a screen the DMA did not write shows its own
+  attributes. `tools/z80dma_sim/analyse_pages.py` models the four rules (hw / old /
+  grmem-read / fixed) over a title frame: hw = old = fixed, grmem-read = the comb.
+- **DMA memory cycles stay UNCONTENDED** (`Draw(cycles, false)`). A contention model
+  was tried for a day and pulled: a 2+2-cycle DMA into contended RAM phase-locks onto
+  the 48K/128K wait pattern at 8 T/byte, and whether real silicon does that is not
+  established. The write-order shadow is what keeps in-order per-scanline writers
+  right whatever the DMA speed. The arithmetic of the demo's own budget (69 T + 128 T
+  per row against a 228 T line; 197 x 7 + 154 = 1533 per charrow against 1824) says
+  it was tuned on something slower than 4 T/byte, so if a hardware MB-02 timing is
+  ever measured, revisit — but do not model contention without one.
+- **`tools/z80dma_sim/`**: `dump2bins.py` splits a Ctrl+Alt+D dump into pages +
+  registers, `z80dma_sim.c` runs the guest on redcode with a mirror of Z80DMA.cpp's
+  register decode (P lines = every #7FFD write, D lines = every transfer with its
+  frame-relative T and data, optional page dumps at a frame), `analyse.py` replays the
+  renderer's rules for the single-page case, `analyse_pages.py` for the two-page one.
+  It runs the TAP from its entry point too (build a snapshot with the code at 25000
+  and the BASIC loader's pokes) — that is how the title mechanism was found: the
+  demo needs ~125 frames of depacking before the effect, and `0x58` first appears at
+  frame 206. Recipe in the .c header. Two traps: the dump's hex lines have a DOUBLE
+  space after byte 8 (a 'byte + optional space' regex captures 8 bytes per line and
+  disassembles as a NOP sled), and `dma.log` lands in the CURRENT directory.
+- **`tools/screenshot.gdb` / `screenshot_profi.gdb` dump the framebuffer ROW BY ROW**
+  through `VIDEO::vga.frameBuffer[y]` now: since the main FB may be 2-8 whole-row
+  chunks (2026-09-10) a `fb0..fb0+w*h` dump is garbage past the first chunk — the
+  owner's 720x576 capture came out as a clean band over noise, which is how this was
+  noticed. `dump` creates the file, `append` extends it, fb2png.py is unchanged.
+- Test ELF `debug/DVp2-napicu-dma2-1.0.5.elf` — **hw 2026-09-14, owner: "работает"**
+  (the effect without blue edges and the title without the comb; not itemised per
+  machine). Still unexercised: another MB-02 title that DMAs attributes while showing
+  its other screen, and the per-row screenshot on a 576p chunked framebuffer.
+
 ## Pentagon 1024SL #EFF7 D4 turbo + TheLink (2026-08-14, all hw-confirmed)
 
 TheLink (pouet 53778, Pentagon 1024SL + NeoGS + TSFM, REQUIRES 7 MHz turbo)

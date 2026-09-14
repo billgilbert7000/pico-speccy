@@ -26,6 +26,7 @@ public:
     // (see ensureAttrShadow) — the feature costs ZERO SRAM when disabled.
     static uint8_t* dma_attr_shadow;
     static bool*    dma_attr_valid;
+    static const uint8_t** dma_attr_page;   // per charrow: the page the shadow describes
     static bool*    dma_charrow_active;
     static void     resetAttrShadow();
     static bool     ensureAttrShadow();

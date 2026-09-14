@@ -4357,7 +4357,11 @@ IRAM_ATTR void VIDEO::MainScreen_Blank(unsigned int statestoadd, bool contended)
 
         // DMA per-scanline attr shadow: use snapshot if DMA wrote attrs for this scanline
         // (dma_attr_valid/shadow are null unless the DMA attr buffer is allocated)
-        if (Config::dma_mode && Z80DMA::dma_attr_valid && Z80DMA::dma_attr_valid[curline])
+        // ...and only while the page the DMA wrote is the page on display: a
+        // demo showing its other screen while it DMAs this one (NaPICu's title)
+        // must see that screen's own attributes, not the shadow (Z80DMA.cpp).
+        if (Config::dma_mode && Z80DMA::dma_attr_valid && Z80DMA::dma_attr_valid[curline]
+            && Z80DMA::dma_attr_page[curline >> 3] == grmem)
             dma_attr_override = &Z80DMA::dma_attr_shadow[curline * 32];
         else
             dma_attr_override = nullptr;

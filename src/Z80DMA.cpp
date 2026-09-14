@@ -75,6 +75,7 @@ bool     Z80DMA::mb02_deferred = false;
 struct DmaAttrBuf {
     uint8_t shadow[Z80DMA::DMA_ATTR_SHADOW_SZ];  // 6144 — per-scanline attr snapshot
     bool    valid[192];
+    const uint8_t* page[24];   // the RAM page each charrow's shadow was taken from
     bool    charrow_active[24];
     uint8_t charrow_write_cnt[24];
     uint8_t prev_attrs[24][32];
@@ -84,6 +85,7 @@ static DmaAttrBuf* g_dma_buf = nullptr;
 
 uint8_t* Z80DMA::dma_attr_shadow    = nullptr;
 bool*    Z80DMA::dma_attr_valid     = nullptr;
+const uint8_t** Z80DMA::dma_attr_page = nullptr;
 bool*    Z80DMA::dma_charrow_active = nullptr;
 
 // Decode WR1/WR2 address increment from bits 4:3
@@ -168,6 +170,7 @@ bool Z80DMA::ensureAttrShadow() {
         }
         dma_attr_shadow    = g_dma_buf->shadow;
         dma_attr_valid     = g_dma_buf->valid;
+        dma_attr_page      = g_dma_buf->page;
         dma_charrow_active = g_dma_buf->charrow_active;
     }
     return true;
@@ -180,6 +183,7 @@ void Z80DMA::freeAttrShadow() {
     }
     dma_attr_shadow    = nullptr;
     dma_attr_valid     = nullptr;
+    dma_attr_page      = nullptr;
     dma_charrow_active = nullptr;
 }
 
@@ -483,15 +487,42 @@ void Z80DMA::doDisable() {
 IRAM_ATTR void Z80DMA::handleDMA() {
 }
 
-// Shadow previous attrs before DMA overwrites them.
-// First write per charrow: save as reference, no shadow.
-// Second write: compare — if different, charrow is "per-scanline active",
-// then all subsequent writes skip compare and always shadow.
+// Per-scanline attribute shadow for 8x1 "DMA multicolour" (one 32-byte DMA into an
+// attribute row per scanline, rows written in display order). The k-th DMA into a
+// character row within a frame is taken as that row's attributes for scanline k.
+// First write per charrow: save as reference, no shadow. From the SECOND write on
+// every write shadows both the previous scanline (the row's state before this
+// write) and its own — UNCONDITIONALLY. It used to shadow only once the content
+// had CHANGED against the reference ("is this really a per-scanline effect?"),
+// and that left a hole: with N >= 3 identical leading rows (e.g. black art above a
+// letter, or a window showing only vertical strokes) scanlines 1..N-2 were never
+// marked valid and the renderer drew them LIVE — and because our DMA runs ahead of
+// the beam (no ULA contention on Pentagon, a 16-line-longer top border than the
+// ZX128 the software was timed for) live memory already held the LAST row of the
+// charrow. NaPICu (K3L, 2001): a solid blue copy of each letter's top edge one
+// scanline below the charrow boundary, above the letter (hw 2026-09-14, reproduced
+// in a host simulation of the demo's generated raster code). Identical rows cost
+// nothing to shadow, so there is no reason to skip them.
+//
+// The shadow is taken from the PAGE THE DMA WROTE, never from VIDEO::grmem, and
+// the renderer applies it only while that page is the one displayed (hw
+// 2026-09-14, NaPICu's "DMA DEZIGN" title): the demo shows page 7 for most of
+// the frame (#7FFD = 0x58 before its raster pass, 0x51 after it) while the pass
+// keeps writing black attribute rows into page 5. Reading grmem here copied the
+// TITLE's white 0x07 attributes into the shadow, and when the display returned
+// to page 5 for the frame's tail (line ~147 on Pentagon) those lines rendered
+// page 5's 0xF0 bitmap fill in white — a comb under the title. On hardware page
+// 5's attributes there are 0x00 and the tail is black. The shadow only says
+// what the written page holds at each scanline, so a display of another page
+// must ignore it.
 static IRAM_ATTR void captureAttrAfterTransfer(uint16_t dest_start) {
     if (!Z80DMA::dma_attr_shadow) return; // alloc failed or DMA mode off
-    if (dest_start < 0x5800 || dest_start > 0x5AFF) return;
+    uint16_t off = dest_start & 0x3FFF;
+    if (off < 0x1800 || off > 0x1AFF) return;
+    const uint8_t* page = MemESP::ramCurrent[dest_start >> 14];
+    if (!page) return;
 
-    uint8_t charrow = (dest_start - 0x5800) >> 5;
+    uint8_t charrow = (off - 0x1800) >> 5;
     if (charrow >= 24) return;
 
     uint8_t sub = g_dma_buf->charrow_write_cnt[charrow];
@@ -502,29 +533,21 @@ static IRAM_ATTR void captureAttrAfterTransfer(uint16_t dest_start) {
     if (scanline >= 192) return;
 
     uint16_t attr_base = 0x1800 + (charrow << 5);
+    g_dma_buf->page[charrow] = page;
 
     if (sub == 0) {
         // First write: save as reference
-        memcpy(g_dma_buf->prev_attrs[charrow], &VIDEO::grmem[attr_base], 32);
+        memcpy(g_dma_buf->prev_attrs[charrow], &page[attr_base], 32);
         g_dma_buf->prev_attrs_saved[charrow] = true;
         return;
     }
 
     if (!g_dma_buf->prev_attrs_saved[charrow]) return;
 
-    // Once confirmed active, skip compare for remaining writes
-    if (!Z80DMA::dma_charrow_active[charrow]) {
-        // Check if attrs changed
-        if (memcmp(&VIDEO::grmem[attr_base], g_dma_buf->prev_attrs[charrow], 32) == 0) {
-            memcpy(g_dma_buf->prev_attrs[charrow], &VIDEO::grmem[attr_base], 32);
-            return;
-        }
-        // Confirmed per-scanline effect — mark active
-        Z80DMA::dma_charrow_active[charrow] = true;
-        // Shadow sub=0 retroactively
-        memcpy(&Z80DMA::dma_attr_shadow[charrow * 8 * 32], g_dma_buf->prev_attrs[charrow], 32);
-        Z80DMA::dma_attr_valid[charrow * 8] = true;
-    }
+    // Second DMA into this charrow this frame: it is a per-scanline effect. No
+    // content compare here (see the comment above) — the sub==1 case below shadows
+    // scanline charrow*8 with the reference anyway.
+    Z80DMA::dma_charrow_active[charrow] = true;
 
     // Shadow previous scanline with prev_attrs (before DMA overwrote)
     int prev_scanline = charrow * 8 + sub - 1;
@@ -532,11 +555,11 @@ static IRAM_ATTR void captureAttrAfterTransfer(uint16_t dest_start) {
         memcpy(&Z80DMA::dma_attr_shadow[prev_scanline * 32], g_dma_buf->prev_attrs[charrow], 32);
         Z80DMA::dma_attr_valid[prev_scanline] = true;
     }
-    // Also shadow current scanline with current grmem (may be overwritten by next DMA)
-    memcpy(&Z80DMA::dma_attr_shadow[scanline * 32], &VIDEO::grmem[attr_base], 32);
+    // Also shadow the current scanline with the row as written (may be overwritten by the next DMA)
+    memcpy(&Z80DMA::dma_attr_shadow[scanline * 32], &page[attr_base], 32);
     Z80DMA::dma_attr_valid[scanline] = true;
 
-    memcpy(g_dma_buf->prev_attrs[charrow], &VIDEO::grmem[attr_base], 32);
+    memcpy(g_dma_buf->prev_attrs[charrow], &page[attr_base], 32);
 }
 
 IRAM_ATTR void Z80DMA::executeTransfer() {
@@ -572,6 +595,12 @@ IRAM_ATTR void Z80DMA::executeTransfer() {
         transfer_started = true;
 
         uint8_t val;
+        // Memory cycles deliberately take NO ULA contention (`false`): a 2+2-cycle
+        // DMA writing contended RAM would phase-lock onto the 48K/128K wait pattern
+        // at 8 T/byte, and modelling that made NaPICu's per-scanline attribute pass
+        // fall behind the beam on a 128K ("stripes at the bottom", hw 2026-09-14).
+        // Whether real silicon does the same is not established; the write-order
+        // shadow below is what keeps in-order per-scanline writers right.
         if (transfer_dir) {
             // A → B: read A, write B
             VIDEO::Draw(port_a_cycles, false);
