@@ -4844,6 +4844,54 @@ console's 4 KB ring is the price of the console (the boot burst is ~3.6 KB of li
 (PIO palette), aligning the window bases (the base tail dlmalloc cannot use would just
 become window slack).
 
+### .bss batch 1: the "static so it stays off the stack" locals (2026-09-14; hw: owner ran the menu pages, "works, no problems")
+
+`.bss` 68 144 -> **57 060 B (-11 084)** on DVp2, `.data` unchanged, every board. The
+whole `.bss` (68 KB) was itemised first: 102 sections >= 200 B = 55 KB, 1 711 smaller
+ones = 12.8 KB (flags, pointers, counters — untouchable). A quarter of the big half was
+ONE pattern: `static FIL f; static char buf[512];` INSIDE functions, parked there years
+ago to keep 600-800 B off the (then 2-4 KB) core0 stack — and paid by every session for a
+file that is open for milliseconds. `ScopedHeap` (TryAlloc.h: `tryMalloc` on entry,
+`free` on exit, a NULL fails the operation the way an `f_open` failure already did)
+replaced them in: FileInfo (`s_infoFile`, `viewVHD ft[512]`, `showInfoBox` line tables
+1 KB), Video (`s_saveRectFile` — one FIL per SaveRect call, 4 methods), wd1793
+(`CreateEmptyTRD` FIL+buf), IDE (`createImage` FIL), OSDMain (`benchFsSpeed` FIL+io_buf),
+Config (`saveRemotes buf`), FileUtils (`deleteFilesWithExtension` DIR+FILINFO+path 0.8 KB),
+ZipExtract (`s_zip_fnBuf`, per call in extract/viewInfo/extractAll), UiActions (`act_wifi
+nets[24]` -> `std::vector`), OSDMain `archSessionRun site_ids/names` -> vectors. Plus:
+
+- **`osd_info_buf` (1 536 B) is heap for the MENU SESSION**: `osdInfoBuf()` claims it on
+  first use, `OSD::osdInfoRelease()` runs beside `profilesSessionEnd()` in UiNav.cpp.
+  Every `char (&buf)[OSD_INFO_BUF_SZ] = osd_info_buf;` binding became `char* const buf =
+  osdInfoBuf(); if (!buf) return ...;` and the `sizeof(buf)` inside those functions
+  became `OSD_INFO_BUF_SZ` (function-ranged, asserted no local `char buf[]` shadows it).
+  `hwInfoText()`/`hidInfoText()`/`hotkeysText()` return "" without the buffer; SpeedTestRun
+  claims it once at the top.
+- **The SD swap file's FIL is lazy** (MemESP.cpp `swapF()`, `s_swapFresh`): `mem_desc_t::reset()`
+  used to unlink+create `/tmp/pico-speccy.swap` on EVERY boot through a static 608 B FIL;
+  now reset() only marks it stale and the first swap access creates it. A butter board with
+  every page in PSRAM never opens it. **Untested on a board that swaps** (MURM1 without
+  PSRAM, Murmuzavr past the chip): the first `to_vram`/accessor access must create the file
+  — check `/tmp/pico-speccy.swap` appears and `mem_swap_reopen` after an SD remount.
+- The classic-menu leftovers `struct dlgObject` / `dlg_Objects[5]` / `dlg_Objects2[3]` /
+  `BankCombo[9]` (792 B of std::string objects, referenced by nothing since the cascade
+  menu went) are deleted.
+
+Test ELF `debug/DVp2-bss1-1.0.5.elf`. **One round-trip bug**: `hwInfoText()` had the
+NULL guard BEFORE `buildHWInfoText()` — the call that claims the buffer — so Alt+F1 came
+up empty (hw 2026-09-14); the guard now follows the build. Rule for lazily claimed
+buffers: test the pointer AFTER the call that allocates it. **Hw 2026-09-14 (owner):
+"works, no more problems"** — not itemised; the list below is what that run would have
+had to cover, and the swap-board case is still untested: F1 Info on a .tap/.trd/.vhd, the
+info pages (Hardware/Chip/Board/Memory/Emulator/Hot keys) and Speed Test from the menu, a
+.zip launch + zip Info, "New TRD" and IDE "create image", Web catalog site list, WiFi scan,
+SaveRect (any dialog over the picture). Batch 2 (owner decision, ~5 KB): `nm::S` 3 580 per
+menu session (+ a cursor memo), Buffer `g_spi`/`g_swapAlloc` regions 1 560 on butter boards,
+`__cxa_atexit` stub 400, alarm pool 16 -> 4 timers 288, second boot2 copy 256. Batch 3
+(feature-gated, ~5 KB): GS statics 2 304 -> `.gsovl_bss`, midi_wt 832, ZiFi `g_out_buf`
+512, hdmi CRT/snap/gigs LUTs 1 280, `TsConf::cram/sfile` 1 024 (fix the memdump.gdb probe
+first).
+
 **TurboSound FM SRAM, measured the same day (owner's question):** static **11 B**
 (`opnfm[2]` pointers + `TsfmSubsys` flags; `s_sin_tab`/`s_tl_base` pointers 8 B), code all
 in FLASH (no `.time_critical` from OpnFm.cpp in the map). Heap ONLY while Audio →

@@ -110,6 +110,7 @@ public:
     static void errorPanel(const string& errormsg);
     static void errorHalt(const string& errormsg);
     static void osdCenteredMsg(const string& msg, uint8_t warn_level);
+    static void osdInfoRelease();   // hand the info pages' text buffer back (menu session end)
     static void osdCenteredMsg(const string& msg, uint8_t warn_level, uint16_t millispause);
 
     // Non-blocking status banner, centred in the TOP border with the F8 stats look

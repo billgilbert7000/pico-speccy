@@ -47,6 +47,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "TsFastMem.h"
 #include "Subsystem.h"
 #include "Buffer.h"
+#include "TryAlloc.h"
 #include "GS/GS.h"   // GS::enabled / hostActive — renderer placement policy (tsC1PlacementPoll)
 #include <hardware/sync.h>   // __dmb (core1 render queue)
 #include "Tape.h"
@@ -7505,10 +7506,10 @@ static inline size_t saveRectShift() {
 // Reserve up to this much SaveRect space; abort save if offset exceeds it.
 #define SAVE_RECT_PSRAM_MAX (256ul << 10)
 
-// Shared by save()/restore_last()/store_ram()/restore_ram(): each opens, uses
-// and closes it within a single synchronous call, on the same file, never
-// overlapping — so one static FIL (~600 B) replaces four (was one per method).
-static FIL s_saveRectFile;
+// save()/restore_last()/store_ram()/restore_ram() each open, use and close the
+// rect file within one synchronous call. The FIL (~600 B) is a ScopedHeap per
+// call: it must not sit on the core0 stack (deep menu chains — see the notes in
+// each method) and it used to be a permanent static that every session paid.
 
 void SaveRectT::save(int16_t x, int16_t y, int16_t w, int16_t h) {
     if (offsets.empty()) {
@@ -7553,24 +7554,24 @@ void SaveRectT::save(int16_t x, int16_t y, int16_t w, int16_t h) {
         // overflows it and corrupts neighbouring memory (timer callbacks etc),
         // crashing later in alarm_pool_irq_handler. save() is synchronous
         // (open/write/close within one call) so a static FIL is safe even nested.
-        FIL &f = s_saveRectFile;
-        if (f_open(&f, "/tmp/save_rect.tmp", FA_WRITE | FA_OPEN_ALWAYS) != FR_OK) {
+        ScopedHeap fsh(sizeof(FIL)); FIL* fp = fsh.as<FIL>();
+        if (!fp || f_open(fp, "/tmp/save_rect.tmp", FA_WRITE | FA_OPEN_ALWAYS) != FR_OK) {
             offsets.push_back(off); // open failed — dummy
             return;
         }
-        f_lseek(&f, off);
+        f_lseek(fp, off);
         UINT bw;
-        f_write(&f, &x, 2, &bw);
-        f_write(&f, &y, 2, &bw);
-        f_write(&f, &w, 2, &bw);
-        f_write(&f, &h, 2, &bw);
+        f_write(fp, &x, 2, &bw);
+        f_write(fp, &y, 2, &bw);
+        f_write(fp, &w, 2, &bw);
+        f_write(fp, &h, 2, &bw);
         off += 8;
         for (size_t line = y; line < y + h; ++line) {
             uint8_t *backbuffer = VIDEO::vga.frameBuffer[line];
-            f_write(&f, backbuffer + x, w, &bw);
+            f_write(fp, backbuffer + x, w, &bw);
             off += w;
         }
-        f_close(&f);
+        f_close(fp);
         offsets.push_back(off);
     } else {
         // RAM fallback when no SD card — skip if not enough contiguous heap.
@@ -7646,27 +7647,27 @@ void SaveRectT::restore_last() {
         // Static FIL: sizeof(FIL) ~= 580 B would overflow the tight ~2 KB OSD
         // stack from deep call chains (same fix as save()). restore is
         // synchronous (open/read/close in one call) so a static FIL is safe.
-        FIL &f = s_saveRectFile;
-        if (f_open(&f, "/tmp/save_rect.tmp", FA_READ) != FR_OK) {
+        ScopedHeap fsh(sizeof(FIL)); FIL* fp = fsh.as<FIL>();
+        if (!fp || f_open(fp, "/tmp/save_rect.tmp", FA_READ) != FR_OK) {
             if (offsets.empty()) offsets.push_back(0);
             return;
         }
-        f_lseek(&f, off);
+        f_lseek(fp, off);
         UINT br;
-        f_read(&f, &x, 2, &br);
-        f_read(&f, &y, 2, &br);
-        f_read(&f, &w, 2, &br);
-        f_read(&f, &h, 2, &br);
+        f_read(fp, &x, 2, &br);
+        f_read(fp, &y, 2, &br);
+        f_read(fp, &w, 2, &br);
+        f_read(fp, &h, 2, &br);
         if (!w || !h || y >= (uint16_t)VIDEO::vga.yres) {
-            f_close(&f);
+            f_close(fp);
             return;
         }
         size_t line_end = (size_t)y + h;
         if (line_end > (size_t)VIDEO::vga.yres) line_end = VIDEO::vga.yres;
         for (size_t line = y; line < line_end; ++line) {
-            f_read(&f, VIDEO::vga.frameBuffer[line] + x, w, &br);
+            f_read(fp, VIDEO::vga.frameBuffer[line] + x, w, &br);
         }
-        f_close(&f);
+        f_close(fp);
     } else if (off < ram_buf.size()) {
         // RAM fallback when no SD card
         uint8_t *p = ram_buf.data() + off;
@@ -7698,15 +7699,15 @@ void SaveRectT::store_ram(const void* p, size_t sz) {
         return;
     }
     // Static FIL: same 580-byte stack-overflow guard as save() / restore_last().
-    FIL &f = s_saveRectFile;
-    if (f_open(&f, "/tmp/save_rect.tmp", FA_WRITE | FA_OPEN_ALWAYS) != FR_OK) {
+    ScopedHeap fsh(sizeof(FIL)); FIL* fp = fsh.as<FIL>();
+    if (!fp || f_open(fp, "/tmp/save_rect.tmp", FA_WRITE | FA_OPEN_ALWAYS) != FR_OK) {
         offsets.push_back((size_t)-1);
         return;
     }
     UINT bw;
-    f_lseek(&f, off);
-    f_write(&f, p, sz, &bw);
-    f_close(&f);
+    f_lseek(fp, off);
+    f_write(fp, p, sz, &bw);
+    f_close(fp);
     offsets.push_back(off + sz);
 }
 
@@ -7720,10 +7721,10 @@ void SaveRectT::restore_ram(void* p, size_t sz) {
     if (top == (size_t)-1) return; // store_ram skipped the write — nothing to restore
     size_t off = offsets.back();   // position where store_ram wrote the data
     if (getContiguousHeap() < FF_OPEN_HEAP_FLOOR) return;
-    FIL &f = s_saveRectFile;
-    if (f_open(&f, "/tmp/save_rect.tmp", FA_READ) != FR_OK) return;
-    f_lseek(&f, off);
+    ScopedHeap fsh(sizeof(FIL)); FIL* fp = fsh.as<FIL>();
+    if (!fp || f_open(fp, "/tmp/save_rect.tmp", FA_READ) != FR_OK) return;
+    f_lseek(fp, off);
     UINT br;
-    f_read(&f, p, sz, &br);
-    f_close(&f);
+    f_read(fp, p, sz, &br);
+    f_close(fp);
 }

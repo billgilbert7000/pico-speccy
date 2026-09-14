@@ -24,5 +24,20 @@ void* tryMalloc(size_t n);
 void* tryCalloc(size_t n);          // zeroed, like calloc(n, 1)
 #ifdef __cplusplus
 }
+#include <stdlib.h>
+// A scratch block that lives for ONE call: taken from the heap on entry, freed on
+// exit. The replacement for the `static FIL f; static char buf[512];` locals that
+// were parked in .bss to stay off the core0 stack — they cost every session ~600 B
+// each for a file that is open for milliseconds. Test it: a NULL means "no heap",
+// and the caller fails the operation the way an f_open() failure already does.
+struct ScopedHeap {
+    void* p;
+    explicit ScopedHeap(size_t n) : p(tryMalloc(n)) {}
+    ~ScopedHeap() { free(p); }
+    ScopedHeap(const ScopedHeap&) = delete;
+    ScopedHeap& operator=(const ScopedHeap&) = delete;
+    template <class T> T* as() const { return (T*)p; }
+    explicit operator bool() const { return p != nullptr; }
+};
 #endif
 #endif

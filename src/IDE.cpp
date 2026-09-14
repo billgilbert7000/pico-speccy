@@ -6,6 +6,7 @@
 #include "Config.h"
 #include "Debug.h"
 #include "Buffer.h"
+#include "TryAlloc.h"
 #include "FileUtils.h"
 
 // IDE_PORT_TRACE is a LEVEL, not a flag — the diagnostic being too loud has cost this
@@ -463,8 +464,11 @@ bool IDE::createImage(const char* path, uint32_t megabytes,
     // Static, not stack: invoked deep in the OSD file-browser/text-edit chain on
     // core0's 2 KB stack — a ~560 B FIL local risks overflow (see CreateEmptyTRD).
     // One-shot, non-reentrant.
-    static FIL f;
-    FRESULT fr = f_open(&f, path, FA_CREATE_ALWAYS | FA_WRITE);
+    // ...and off .bss too: a ScopedHeap FIL for this call.
+    ScopedHeap fsh(sizeof(FIL));
+    if (!fsh) return false;
+    FIL* fp = fsh.as<FIL>();
+    FRESULT fr = f_open(fp, path, FA_CREATE_ALWAYS | FA_WRITE);
     if (fr != FR_OK) {
         Debug::log("IDE: createImage open %s failed (err=%d)", path, fr);
         return false;
@@ -473,7 +477,7 @@ bool IDE::createImage(const char* path, uint32_t megabytes,
     // Zero-fill 512 bytes at a time using the existing sector buffer (already
     // allocated). Avoids a 16 KB heap allocation that fails on tight-RAM boards.
     if (!buffer) buffer = (uint8_t*)calloc(512, 1);
-    if (!buffer) { f_close(&f); f_unlink(path); return false; }
+    if (!buffer) { f_close(fp); f_unlink(path); return false; }
     memset(buffer, 0, 512);
 
     uint64_t total    = (uint64_t)megabytes * 1024u * 1024u;
@@ -481,10 +485,10 @@ bool IDE::createImage(const char* path, uint32_t megabytes,
     bool ok = true;
     for (uint32_t sec = 0; sec < totalSec; sec++) {
         UINT bw;
-        if (f_write(&f, buffer, 512, &bw) != FR_OK || bw != 512) { ok = false; break; }
+        if (f_write(fp, buffer, 512, &bw) != FR_OK || bw != 512) { ok = false; break; }
         if (progress) progress(sec + 1, totalSec);
     }
-    f_close(&f);
+    f_close(fp);
     // If IDE is not active, the scratch buffer was allocated solely for this
     // one-shot create — release it so a disabled IDE keeps its ZERO-SRAM contract.
     if (scheme == OFF) { free(buffer); buffer = nullptr; }

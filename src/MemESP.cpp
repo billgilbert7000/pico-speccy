@@ -36,6 +36,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "MemESP.h"
 #include "Debug.h"
 #include "Buffer.h"
+#include "TryAlloc.h"
 #include "Plus3Paging.h"
 #include "Timex.h"   // g_timex_mmu + Timex::rd/read8: the SCLD window the debugger must see
 #include <stddef.h>
@@ -187,17 +188,35 @@ __attribute__((noinline)) void MemESP::checkMemWriteBP(uint16_t addr) {
         CPU::portBasedBP = true;
 }
 
-static FIL f;
 static const char PAGEFILE[] = "/tmp/pico-speccy.swap";
+// The SD swap file's FIL, made on the FIRST swap access. A board where every page
+// is SRAM- or butter-backed never touches the swap tier, and used to pay a 608 B
+// static FIL (plus a file created on every boot) for it anyway. reset() only marks
+// the file stale; the unlink + create runs when a swap page first needs it.
+static FIL* s_swapFil = nullptr;
+static bool s_swapFresh = true;
+static FIL* swapF() {
+    if (!s_swapFil) s_swapFil = new FIL();     // zero-initialised; heap, panics on OOM like the old static never could
+    if (s_swapFresh) {
+        s_swapFresh = false;
+        f_close(s_swapFil);
+        f_unlink(PAGEFILE); // ensure it is new file
+        f_open(s_swapFil, PAGEFILE, FA_WRITE | FA_CREATE_ALWAYS);
+        f_close(s_swapFil);
+        f_open(s_swapFil, PAGEFILE, FA_READ | FA_WRITE);
+    }
+    return s_swapFil;
+}
 
 // Called by FileUtils::remountSD() to reopen swap file after SD remount
 extern "C" void mem_swap_reopen(void) {
-    FSIZE_t sz = f_size(&f);
-    f_close(&f);
+    if (!s_swapFil || s_swapFresh) return;      // swap never used this session: nothing to reopen
+    FSIZE_t sz = f_size(s_swapFil);
+    f_close(s_swapFil);
     if (sz > 0) {
-        f_open(&f, PAGEFILE, FA_READ | FA_WRITE);
+        f_open(s_swapFil, PAGEFILE, FA_READ | FA_WRITE);
     } else {
-        f_open(&f, PAGEFILE, FA_READ | FA_WRITE | FA_CREATE_ALWAYS);
+        f_open(s_swapFil, PAGEFILE, FA_READ | FA_WRITE | FA_CREATE_ALWAYS);
     }
 }
 
@@ -249,11 +268,7 @@ void mem_desc_t::reset(void) {
     for (int i = 0; i < 4; ++i) bank_access[i] = &access_sink;
 #endif
     pages.clear();
-    f_close(&f);
-    f_unlink(PAGEFILE); // ensure it is new file
-    f_open(&f, PAGEFILE, FA_WRITE | FA_CREATE_ALWAYS);
-    f_close(&f);
-    f_open(&f, PAGEFILE, FA_READ | FA_WRITE);
+    s_swapFresh = true;     // recreate the swap file on its first use (see swapF)
 }
 
 uint8_t* mem_desc_t::to_vram(void) {
@@ -278,8 +293,8 @@ uint8_t* mem_desc_t::to_vram(void) {
         #endif
         UINT bw;
         FSIZE_t lba = ba;
-        f_lseek(&f, lba);
-        f_write(&f, res, MEM_PG_SZ, &bw);
+        f_lseek(swapF(), lba);
+        f_write(swapF(), res, MEM_PG_SZ, &bw);
         #if defined(PICO_DEFAULT_LED_PIN) && PICO_DEFAULT_LED_PIN != 255
         gpio_put(PICO_DEFAULT_LED_PIN, false);
         #endif
@@ -317,8 +332,8 @@ void mem_desc_t::from_vram(uint8_t* p) {
     } else {
         UINT br;
         FSIZE_t lba = ba;
-        f_lseek(&f, lba);
-        f_read(&f, p, 0x4000, &br);
+        f_lseek(swapF(), lba);
+        f_read(swapF(), p, 0x4000, &br);
     }
 }
 uint8_t mem_desc_t::_read(uint16_t addr) {
@@ -331,9 +346,9 @@ uint8_t mem_desc_t::_read(uint16_t addr) {
     }
     UINT br;
     FSIZE_t lba = ba;
-    f_lseek(&f, lba + addr);
+    f_lseek(swapF(), lba + addr);
     uint8_t r;
-    f_read(&f, &r, 1, &br);
+    f_read(swapF(), &r, 1, &br);
     return r;
 }
 void mem_desc_t::_write(uint16_t addr, uint8_t v) {
@@ -354,8 +369,8 @@ void mem_desc_t::_write(uint16_t addr, uint8_t v) {
     #endif
     UINT br;
     FSIZE_t lba = ba;
-    f_lseek(&f, lba + addr);
-    f_write(&f, &v, 1, &br);
+    f_lseek(swapF(), lba + addr);
+    f_write(swapF(), &v, 1, &br);
     #if defined(PICO_DEFAULT_LED_PIN) && PICO_DEFAULT_LED_PIN != 255
     gpio_put(PICO_DEFAULT_LED_PIN, false);
     #endif
@@ -466,7 +481,7 @@ void mem_desc_t::from_file(FIL* f_in, size_t sz) {
         #if defined(PICO_DEFAULT_LED_PIN) && PICO_DEFAULT_LED_PIN != 255
         gpio_put(PICO_DEFAULT_LED_PIN, true);
         #endif
-        f_lseek(&f, ba);
+        f_lseek(swapF(), ba);
     }
     size_t bsz = 0;
     uint8_t* buf = mem_bounce_acquire(&bsz);
@@ -484,7 +499,7 @@ void mem_desc_t::from_file(FIL* f_in, size_t sz) {
                 psram_write_range(ba + off, buf, n);
             } else {
                 UINT bw;
-                f_write(&f, buf, n, &bw);
+                f_write(swapF(), buf, n, &bw);
             }
         }
         free(buf);
@@ -495,7 +510,7 @@ void mem_desc_t::from_file(FIL* f_in, size_t sz) {
             if (btr) butter_nc(ba)[addr] = v;
             else
             if (spi) write8psram(ba + addr, v);
-            else     f_write(&f, &v, 1, &br);
+            else     f_write(swapF(), &v, 1, &br);
         }
     }
     vram_pg_set_valid(ba);
@@ -520,7 +535,7 @@ void mem_desc_t::to_file(FIL* f_out, size_t sz) {
     // check would read a high page (evicted to SD swap) from wrapped PSRAM addresses.
     bool btr = vram_butter(ba);
     bool spi = !btr && psram_size() >= ba + MEM_PG_SZ;
-    if (!spi && !btr) f_lseek(&f, ba);
+    if (!spi && !btr) f_lseek(swapF(), ba);
     size_t bsz = 0;
     uint8_t* buf = mem_bounce_acquire(&bsz);
     if (buf) {
@@ -529,7 +544,7 @@ void mem_desc_t::to_file(FIL* f_out, size_t sz) {
             if (btr)      memcpy(buf, butter_nc(ba + off), n);
             else
             if (spi) psram_read_range(ba + off, buf, n);
-            else     f_read(&f, buf, n, &br);
+            else     f_read(swapF(), buf, n, &br);
             f_write(f_out, buf, n, &br);
         }
         free(buf);
@@ -539,7 +554,7 @@ void mem_desc_t::to_file(FIL* f_out, size_t sz) {
             if (btr)      v = butter_nc(ba)[addr];
             else
             if (spi) v = read8psram(ba + addr);
-            else     f_read(&f, &v, 1, &br);
+            else     f_read(swapF(), &v, 1, &br);
             f_write(f_out, &v, 1, &br);
         }
     }
@@ -567,14 +582,14 @@ void mem_desc_t::from_mem(mem_desc_t& ram, size_t sz) {
         if (sbtr) memcpy(direct(), butter_nc(sba), sz);
         else
         if (sspi) psram_read_range(sba, direct(), sz);
-        else { f_lseek(&f, sba); f_read(&f, direct(), sz, &brw); }
+        else { f_lseek(swapF(), sba); f_read(swapF(), direct(), sz, &brw); }
         return;
     }
     if (srcPtr) {          // SRAM → vram/swap: one block transfer, no bounce
         if (dbtr) memcpy(butter_nc(dba), ram.direct(), sz);
         else
         if (dspi) psram_write_range(dba, ram.direct(), sz);
-        else { f_lseek(&f, dba); f_write(&f, ram.direct(), sz, &brw); }
+        else { f_lseek(swapF(), dba); f_write(swapF(), ram.direct(), sz, &brw); }
         vram_pg_set_valid(dba);
         return;
     }
@@ -587,11 +602,11 @@ void mem_desc_t::from_mem(mem_desc_t& ram, size_t sz) {
             if (sbtr) memcpy(buf, butter_nc(sba + off), n);
             else
             if (sspi) psram_read_range(sba + off, buf, n);
-            else { f_lseek(&f, sba + off); f_read(&f, buf, n, &brw); }
+            else { f_lseek(swapF(), sba + off); f_read(swapF(), buf, n, &brw); }
             if (dbtr) memcpy(butter_nc(dba + off), buf, n);
             else
             if (dspi) psram_write_range(dba + off, buf, n);
-            else { f_lseek(&f, dba + off); f_write(&f, buf, n, &brw); }
+            else { f_lseek(swapF(), dba + off); f_write(swapF(), buf, n, &brw); }
         }
         free(buf);
         vram_pg_set_valid(dba);
@@ -616,10 +631,10 @@ void mem_desc_t::cleanup() {
         uint8_t* buf = mem_bounce_acquire(&bsz);
         if (buf) {
             memset(buf, 0, bsz);
-            if (!spi) f_lseek(&f, ba);
+            if (!spi) f_lseek(swapF(), ba);
             for (size_t off = 0; off < MEM_PG_SZ; off += bsz) {
                 if (spi) psram_write_range(ba + off, buf, bsz);
-                else { UINT bw; f_write(&f, buf, bsz, &bw); }
+                else { UINT bw; f_write(swapF(), buf, bsz, &bw); }
             }
             free(buf);
             vram_pg_set_valid(ba);

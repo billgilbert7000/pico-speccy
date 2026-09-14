@@ -796,6 +796,7 @@ resume:
     OSD::progressOverride = nullptr;
     profilesSessionEnd();       // hand the row tables back
     snapSessionEnd();
+    OSD::osdInfoRelease();      // ...and the info pages' text buffer
     gfxEnd();
 }
 

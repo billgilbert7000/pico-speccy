@@ -1,6 +1,7 @@
 // pico-speccy — action leaves of the new fullscreen menu (see UiActions.h).
 
 #include "OSDNewMenu.h"
+#include <vector>
 
 
 #include "UiActions.h"
@@ -1695,10 +1696,10 @@ void act_wifi() {
 
     ZiFiAT::setLog(wlogCb);            // the AT exchange, passwords masked at the source
     wlogAdd("Scanning for networks...", C_WHITE);
-    // static, not on the 4 KB core stack: 24 std::strings under do_OSD overflowed
-    // the stack in the classic flow — same hazard here. Single-use, non-reentrant.
-    static string nets[24];
-    const int n = ZiFiAT::scan(nets, 24);
+    // Heap, not the core stack (24 std::strings under do_OSD overflowed it in the
+    // classic flow) and not a static (576 B of .bss for every session).
+    std::vector<string> nets(24);
+    const int n = ZiFiAT::scan(nets.data(), 24);
     char m[72];
     if (n <= 0) {
         ZiFiAT::setLog(nullptr);

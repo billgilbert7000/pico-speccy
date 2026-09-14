@@ -180,6 +180,8 @@ extern "C" const uint32_t profi_default_palette16[16];
 #include "PinSerialData_595.h"
 
 #include <string>
+#include <vector>
+#include "TryAlloc.h"
 #include <cstdio>
 #include <cstdarg>   // infoAppend's vsnprintf
 #include "ScanLite.h"
@@ -210,7 +212,16 @@ extern int ram_pages, butter_pages, psram_pages, swap_pages;
 // a butter-less board misses by ~0.5 KB). It borrows a transient heap buffer
 // instead — see emu_buf below.
 #define OSD_INFO_BUF_SZ 1536
-static char osd_info_buf[OSD_INFO_BUF_SZ] __attribute__((aligned(4)));
+// The info pages' 1.5 KB text buffer is heap for the MENU SESSION, not a static:
+// osdInfoBuf() claims it on first use, the nm:: UI hands it back at session end
+// (OSD::osdInfoRelease, UiNav.cpp). A NULL from a thin heap makes a page empty
+// instead of every session paying 1.5 KB for pages it never opens.
+static char* osd_info_buf = nullptr;
+static char* osdInfoBuf() {
+    if (!osd_info_buf) osd_info_buf = (char*)tryMalloc(OSD_INFO_BUF_SZ);
+    return osd_info_buf;
+}
+void OSD::osdInfoRelease() { free(osd_info_buf); osd_info_buf = nullptr; }
 
 bool OSD::net_launch_close = false;
 
@@ -1094,9 +1105,8 @@ static void archSessionRun(void* p) {
         if (OSD::net_launch_close || OSD::net_close_all) return; // launched or Esc → unwind
     }
     OSD::progressDialog(MSG_NET_CONNECTING, "", 0, 0); // no URL (built-in catalog)
-    static string site_ids[12];
-    static string site_names[12];
-    int n = HttpCatalogFs::fetchSites(site_ids, site_names, 12);
+    std::vector<string> site_ids(12), site_names(12);   // heap for the session, not .bss
+    int n = HttpCatalogFs::fetchSites(site_ids.data(), site_names.data(), 12);
     OSD::progressDialog("", "", 0, 2);
     if (n <= 0) { OSD::osdCenteredMsg(MSG_ARCH_SITES_ERR, LEVEL_WARN, 2200); return; }
 
@@ -5370,7 +5380,8 @@ int chipTempX10() {
 }
 
 static void buildHWInfoText() {
-    char (&hwtext)[OSD_INFO_BUF_SZ] = osd_info_buf;
+    char* const hwtext = osdInfoBuf();
+    if (!hwtext) return;
     int pos = 0;
 
     uint32_t cpu_hz = clock_get_hz(clk_sys) / MHZ;
@@ -5389,12 +5400,12 @@ static void buildHWInfoText() {
 #ifdef VGA_HDMI
     {
         extern bool SELECT_VGA;   // vga.c
-        pos += snprintf(hwtext + pos, sizeof(hwtext) - pos,
+        pos += snprintf(hwtext + pos, OSD_INFO_BUF_SZ - pos,
             " Firmware       : %s / %s%s [v%s]\n", CONFIG_BOARD_TAG,
             SELECT_VGA ? "VGA" : "HDMI", PICO_BUILD_VARIANT_TAG, PORT_VERSION);
     }
 #else
-    pos += snprintf(hwtext + pos, sizeof(hwtext) - pos,
+    pos += snprintf(hwtext + pos, OSD_INFO_BUF_SZ - pos,
         " Firmware       : %s\n", PICO_BUILD_NAME_SHORT);
 #endif
 
@@ -5408,7 +5419,7 @@ static void buildHWInfoText() {
         int vi = vreg_get_voltage();
         int mv = (vi >= 0 && vi < 32) ? vreg_mv[vi] : 0;
         int t_x10 = chipTempX10();
-        pos += snprintf(hwtext + pos, sizeof(hwtext) - pos,
+        pos += snprintf(hwtext + pos, OSD_INFO_BUF_SZ - pos,
             " Chip model     : RP2350%s %d MHz\n"
             " Chip cores     : 2\n"
             " Chip VREG/TEMP : %d.%02d V / %d.%d C\n"
@@ -5422,15 +5433,15 @@ static void buildHWInfoText() {
 
     {
         uint32_t flash_size = (1 << rx[3]);
-        pos += snprintf(hwtext + pos, sizeof(hwtext) - pos,
+        pos += snprintf(hwtext + pos, OSD_INFO_BUF_SZ - pos,
             " Flash size     : %d MB\n"
             " Flash JEDEC ID : %02X-%02X-%02X-%02X\n",
             (int)(flash_size >> 20), rx[0], rx[1], rx[2], rx[3]);
         if (flash_qe) {
-            pos += snprintf(hwtext + pos, sizeof(hwtext) - pos,
+            pos += snprintf(hwtext + pos, OSD_INFO_BUF_SZ - pos,
                 " Flash QE bit   : %s\n", flash_qe_text());
             if (flash_qe >= 4)
-                pos += snprintf(hwtext + pos, sizeof(hwtext) - pos,
+                pos += snprintf(hwtext + pos, OSD_INFO_BUF_SZ - pos,
                     " Flash QE diag  : %02X %02X %02X %02X %02X %02X\n",
                     flash_qe_diag[0], flash_qe_diag[1], flash_qe_diag[2],
                     flash_qe_diag[3], flash_qe_diag[4], flash_qe_diag[5]);
@@ -5446,7 +5457,7 @@ static void buildHWInfoText() {
             static uint8_t rx8[8];
             static bool rx8_valid = false;
             if (!rx8_valid) { psram_id(rx8); rx8_valid = true; }
-            pos += snprintf(hwtext + pos, sizeof(hwtext) - pos,
+            pos += snprintf(hwtext + pos, OSD_INFO_BUF_SZ - pos,
                 " PSRAM size     : %d MB\n"
                 " PSRAM MF ID/KGD: %02X/%02X\n"
                 " PSRAM EID      : %02X%02X-%02X%02X-%02X%02X\n",
@@ -5458,44 +5469,44 @@ static void buildHWInfoText() {
     if (butter_psram_size()) {
         uint32_t psram32 = butter_psram_size();
         if (psram32)
-            pos += snprintf(hwtext + pos, sizeof(hwtext) - pos,
+            pos += snprintf(hwtext + pos, OSD_INFO_BUF_SZ - pos,
                 "+PSRAM on GP%02d  : %d MB (QSPI)\n", psram_pin, (int)(psram32 >> 20));
         else
-            pos += snprintf(hwtext + pos, sizeof(hwtext) - pos,
+            pos += snprintf(hwtext + pos, OSD_INFO_BUF_SZ - pos,
                 " PSRAM on GP%02d  : Not found\n", psram_pin);
     }
 #endif
 
     if (Config::audio_driver == 4)
-        pos += snprintf(hwtext + pos, sizeof(hwtext) - pos, " Audio mode     : HDMI\n");
+        pos += snprintf(hwtext + pos, OSD_INFO_BUF_SZ - pos, " Audio mode     : HDMI\n");
     else if (Config::audio_driver == 3)
-        pos += snprintf(hwtext + pos, sizeof(hwtext) - pos, " Audio mode     : AY-3-8910\n");
+        pos += snprintf(hwtext + pos, OSD_INFO_BUF_SZ - pos, " Audio mode     : AY-3-8910\n");
     else
-        pos += snprintf(hwtext + pos, sizeof(hwtext) - pos, " Audio mode     : %s [%02Xh] %s\n",
+        pos += snprintf(hwtext + pos, OSD_INFO_BUF_SZ - pos, " Audio mode     : %s [%02Xh] %s\n",
             (is_i2s_enabled ? "i2s" : "PWM"), link_i2s_code,
             (Config::audio_driver == 0 ? " (auto)" : "(overriden)"));
 
 #ifdef VGA_HDMI
-    pos += snprintf(hwtext + pos, sizeof(hwtext) - pos, " VGA/HDMI detect: %02Xh\n", linkVGA01);
+    pos += snprintf(hwtext + pos, OSD_INFO_BUF_SZ - pos, " VGA/HDMI detect: %02Xh\n", linkVGA01);
 #endif
 
     if (!psram_pages)
-        pos += snprintf(hwtext + pos, sizeof(hwtext) - pos, " 16K RAM pages  : %d[s%d:b%d:v%d]\n",
+        pos += snprintf(hwtext + pos, OSD_INFO_BUF_SZ - pos, " 16K RAM pages  : %d[s%d:b%d:v%d]\n",
             ram_pages + butter_pages + swap_pages, ram_pages, butter_pages, swap_pages);
     else if (!butter_pages)
-        pos += snprintf(hwtext + pos, sizeof(hwtext) - pos, " 16K RAM pages  : %d[s%d:p%d:v%d]\n",
+        pos += snprintf(hwtext + pos, OSD_INFO_BUF_SZ - pos, " 16K RAM pages  : %d[s%d:p%d:v%d]\n",
             ram_pages + psram_pages + swap_pages, ram_pages, psram_pages, swap_pages);
     else if (!swap_pages)
-        pos += snprintf(hwtext + pos, sizeof(hwtext) - pos, " 16K RAM pages  : %d[s%d:b%d:p%d]\n",
+        pos += snprintf(hwtext + pos, OSD_INFO_BUF_SZ - pos, " 16K RAM pages  : %d[s%d:b%d:p%d]\n",
             ram_pages + butter_pages + psram_pages, ram_pages, butter_pages, psram_pages);
     else
-        pos += snprintf(hwtext + pos, sizeof(hwtext) - pos, " 16K RAM pages  : %d[s%d:b%d:p%d:v%d]\n",
+        pos += snprintf(hwtext + pos, OSD_INFO_BUF_SZ - pos, " 16K RAM pages  : %d[s%d:b%d:p%d:v%d]\n",
             ram_pages + butter_pages + psram_pages + swap_pages, ram_pages, butter_pages, psram_pages, swap_pages);
 
     if (DivMMC::enabled) {
         const char* mode_names[] = { "OFF", "DivMMC", "DivIDE", "DivSD" };
         const char* mem_type = DivMMC::use_psram ? "PSRAM" : "swap";
-        pos += snprintf(hwtext + pos, sizeof(hwtext) - pos, " %-15s: 128K+8K [%s]\n",
+        pos += snprintf(hwtext + pos, OSD_INFO_BUF_SZ - pos, " %-15s: 128K+8K [%s]\n",
             mode_names[Config::esxdos], mem_type);
     }
 
@@ -5503,11 +5514,11 @@ static void buildHWInfoText() {
         int ln = 0;
         for (int i = 0; i < pos; i++) if (hwtext[i] == '\n') ln++;
         s_hwinfo_uptime_line = ln;
-        pos += formatUptimeLine(hwtext + pos, sizeof(hwtext) - pos);
-        if (pos < (int)sizeof(hwtext) - 1) { hwtext[pos++] = '\n'; hwtext[pos] = '\0'; }
+        pos += formatUptimeLine(hwtext + pos, OSD_INFO_BUF_SZ - pos);
+        if (pos < (int)OSD_INFO_BUF_SZ - 1) { hwtext[pos++] = '\n'; hwtext[pos] = '\0'; }
     }
 
-    pos += snprintf(hwtext + pos, sizeof(hwtext) - pos,
+    pos += snprintf(hwtext + pos, OSD_INFO_BUF_SZ - pos,
         "\n"
         " Built at %s %s\n"
         " branch '%s' commit [%s]\n"
@@ -5518,8 +5529,8 @@ static void buildHWInfoText() {
 
 // Snapshot for the new UI's live page (Help > System status, also Alt+F1).
 const char* hwInfoText() {
-    buildHWInfoText();
-    return osd_info_buf;
+    buildHWInfoText();                     // claims the buffer (osdInfoBuf) and fills it
+    return osd_info_buf ? osd_info_buf : "";
 }
 
 void OSD::HWInfo() {
@@ -5545,7 +5556,8 @@ void OSD::HWInfo() {
 }
 
 void OSD::ChipInfo() {
-    char (&buf)[OSD_INFO_BUF_SZ] = osd_info_buf;
+    char* const buf = osdInfoBuf();
+    if (!buf) return;
     int pos = 0;
     uint32_t cpu_hz = clock_get_hz(clk_sys) / MHZ;
     uint32_t free_heap = getFreeHeap();
@@ -5559,7 +5571,7 @@ void OSD::ChipInfo() {
         };
         int vi = vreg_get_voltage();
         int mv = (vi >= 0 && vi < 32) ? vreg_mv[vi] : 0;
-        pos += snprintf(buf + pos, sizeof(buf) - pos,
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
             " Chip model     : RP2350%s\n"
             " Chip cores     : 2\n"
             " CPU frequency  : %d MHz\n"
@@ -5574,15 +5586,15 @@ void OSD::ChipInfo() {
 
     {
         uint32_t flash_size = (1 << rx[3]);
-        pos += snprintf(buf + pos, sizeof(buf) - pos,
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
             " Flash size     : %d MB\n"
             " Flash JEDEC ID : %02X-%02X-%02X-%02X\n",
             (int)(flash_size >> 20), rx[0], rx[1], rx[2], rx[3]);
         if (flash_qe) {
-            pos += snprintf(buf + pos, sizeof(buf) - pos,
+            pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
                 " Flash QE bit   : %s\n", flash_qe_text());
             if (flash_qe >= 4)
-                pos += snprintf(buf + pos, sizeof(buf) - pos,
+                pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
                     " Flash QE diag  : %02X %02X %02X %02X %02X %02X\n",
                     flash_qe_diag[0], flash_qe_diag[1], flash_qe_diag[2],
                     flash_qe_diag[3], flash_qe_diag[4], flash_qe_diag[5]);
@@ -5597,7 +5609,7 @@ void OSD::ChipInfo() {
             psram_id(rx8);
             size_t psram_used = (size_t)psram_pages * MEM_PG_SZ;
             size_t psram_free = psram32 > psram_used ? psram32 - psram_used : 0;
-            pos += snprintf(buf + pos, sizeof(buf) - pos,
+            pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
                 " PSRAM size     : %d MB\n"
                 " PSRAM MF ID/KGD: %02X/%02X\n"
                 " PSRAM EID      : %02X%02X-%02X%02X-%02X%02X\n"
@@ -5613,7 +5625,7 @@ void OSD::ChipInfo() {
         if (psram32) {
             size_t butter_used = (size_t)butter_pages * MEM_PG_SZ;
             size_t butter_free = psram32 > butter_used ? psram32 - butter_used : 0;
-            pos += snprintf(buf + pos, sizeof(buf) - pos,
+            pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
                 "+PSRAM on GP%02d  : %d MB (QSPI)\n"
                 " Free PSRAM     : %d KB\n", psram_pin, (int)(psram32 >> 20), (int)(butter_free / 1024));
         }
@@ -5625,7 +5637,7 @@ void OSD::ChipInfo() {
     // ~27-29 C no matter the real die temperature)
     {
         int temp_x10 = chipTempX10();
-        pos += snprintf(buf + pos, sizeof(buf) - pos,
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
             " Temperature    : %d.%d C\n",
             temp_x10 / 10, (temp_x10 < 0 ? -temp_x10 : temp_x10) % 10);
     }
@@ -5634,7 +5646,8 @@ void OSD::ChipInfo() {
 }
 
 void OSD::BoardInfo() {
-    char (&buf)[OSD_INFO_BUF_SZ] = osd_info_buf;
+    char* const buf = osdInfoBuf();
+    if (!buf) return;
     int pos = 0;
 
     // SD Card
@@ -5644,7 +5657,7 @@ void OSD::BoardInfo() {
         if (f_getfree("", &fre_clust, &fsp) == FR_OK) {
             uint32_t tot_mb = (uint32_t)((fsp->n_fatent - 2) * fsp->csize / 2048);
             uint32_t fre_mb = (uint32_t)(fre_clust * fsp->csize / 2048);
-            pos += snprintf(buf + pos, sizeof(buf) - pos,
+            pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
                 " SD Card        : %d/%d MB free\n", (int)fre_mb, (int)tot_mb);
 
             const char* fs_name = "?";
@@ -5655,20 +5668,20 @@ void OSD::BoardInfo() {
                 case FS_EXFAT: fs_name = "exFAT"; break;
             }
             uint32_t cluster_kb = (uint32_t)fsp->csize / 2;
-            pos += snprintf(buf + pos, sizeof(buf) - pos,
+            pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
                 "  FS / cluster  : %s / %u KB\n", fs_name, (unsigned)cluster_kb);
 
             char label[34] = {0};
             DWORD vsn = 0;
             if (f_getlabel("", label, &vsn) == FR_OK) {
-                pos += snprintf(buf + pos, sizeof(buf) - pos,
+                pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
                     "  Label / VSN   : '%s' / %04lX-%04lX\n",
                     label[0] ? label : "(none)",
                     (unsigned long)((vsn >> 16) & 0xFFFF),
                     (unsigned long)(vsn & 0xFFFF));
             }
         } else {
-            pos += snprintf(buf + pos, sizeof(buf) - pos, " SD Card        : mounted\n");
+            pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " SD Card        : mounted\n");
         }
 
         // Card type via MMC_GET_TYPE (CT_SD1=0x02, CT_SD2=0x04, CT_MMC=0x01, CT_BLOCK=0x08)
@@ -5678,7 +5691,7 @@ void OSD::BoardInfo() {
             if (ct & 0x01) ct_name = "MMCv3";
             else if (ct & 0x02) ct_name = "SDv1";
             else if (ct & 0x04) ct_name = (ct & 0x08) ? "SDHC/SDXC" : "SDv2";
-            pos += snprintf(buf + pos, sizeof(buf) - pos,
+            pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
                 "  Card type     : %s\n", ct_name);
         }
 
@@ -5693,51 +5706,51 @@ void OSD::BoardInfo() {
             pname[5] = 0;
             uint32_t serial = ((uint32_t)cid[9] << 24) | ((uint32_t)cid[10] << 16)
                             | ((uint32_t)cid[11] << 8) | (uint32_t)cid[12];
-            pos += snprintf(buf + pos, sizeof(buf) - pos,
+            pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
                 "  CID name/sn   : '%s' / %08lX\n", pname, (unsigned long)serial);
         }
     } else {
-        pos += snprintf(buf + pos, sizeof(buf) - pos, " SD Card        : not mounted\n");
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " SD Card        : not mounted\n");
     }
 
     // Audio
     if (Config::audio_driver == 4)
-        pos += snprintf(buf + pos, sizeof(buf) - pos, " Audio          : HDMI\n");
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " Audio          : HDMI\n");
     else if (Config::audio_driver == 3)
-        pos += snprintf(buf + pos, sizeof(buf) - pos, " Audio          : AY-3-8910\n");
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " Audio          : AY-3-8910\n");
     else
-        pos += snprintf(buf + pos, sizeof(buf) - pos, " Audio          : %s [%02Xh]%s\n",
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " Audio          : %s [%02Xh]%s\n",
             (is_i2s_enabled ? "i2s" : "PWM"), link_i2s_code,
             (Config::audio_driver == 0 ? " auto" : ""));
 
 #ifdef VGA_HDMI
-    pos += snprintf(buf + pos, sizeof(buf) - pos, " VGA/HDMI detect: %02Xh\n", linkVGA01);
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " VGA/HDMI detect: %02Xh\n", linkVGA01);
 #endif
 
     // RAM pages
     if (!psram_pages)
-        pos += snprintf(buf + pos, sizeof(buf) - pos, " 16K RAM pages  : %d[s%d:b%d:v%d]\n",
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " 16K RAM pages  : %d[s%d:b%d:v%d]\n",
             ram_pages + butter_pages + swap_pages, ram_pages, butter_pages, swap_pages);
     else if (!butter_pages)
-        pos += snprintf(buf + pos, sizeof(buf) - pos, " 16K RAM pages  : %d[s%d:p%d:v%d]\n",
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " 16K RAM pages  : %d[s%d:p%d:v%d]\n",
             ram_pages + psram_pages + swap_pages, ram_pages, psram_pages, swap_pages);
     else if (!swap_pages)
-        pos += snprintf(buf + pos, sizeof(buf) - pos, " 16K RAM pages  : %d[s%d:b%d:p%d]\n",
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " 16K RAM pages  : %d[s%d:b%d:p%d]\n",
             ram_pages + butter_pages + psram_pages, ram_pages, butter_pages, psram_pages);
     else
-        pos += snprintf(buf + pos, sizeof(buf) - pos, " 16K RAM pages  : %d[s%d:b%d:p%d:v%d]\n",
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " 16K RAM pages  : %d[s%d:b%d:p%d:v%d]\n",
             ram_pages + butter_pages + psram_pages + swap_pages, ram_pages, butter_pages, psram_pages, swap_pages);
 
     if (DivMMC::enabled) {
         const char* mode_names[] = { "OFF", "DivMMC", "DivIDE", "DivSD" };
         const char* mem_type = DivMMC::use_psram ? "PSRAM" : "swap";
-        pos += snprintf(buf + pos, sizeof(buf) - pos, " %-15s: 128K+8K [%s]\n",
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " %-15s: 128K+8K [%s]\n",
             mode_names[Config::esxdos], mem_type);
     }
 
     // GPIO pins (all labels 16 chars after "  " prefix, colon at col 18)
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "\n GPIO pins:\n");
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "\n GPIO pins:\n");
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
         // live pair — on ZERO2 it moves to KBD_ALT_* when the PCM5122 takes GP2/3
         "  Kbd CLK/DATA  : %d/%d\n", (int)board_kbd_clock_pin(),
         (int)board_kbd_clock_pin() + 1);
@@ -5749,7 +5762,7 @@ void OSD::BoardInfo() {
         unsigned uinst = 0xFF, uflags = 0, ufix = 0, uunpr = 0, ustale = 0;
         usb_kbd_resync_stats(&uinst, &uflags, &ufix, &uunpr, &ustale);
         if (uinst != 0xFF)
-            pos += snprintf(buf + pos, sizeof(buf) - pos,
+            pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
                 "  USB kbd rsync : i%u ver=%u live=%u off=%u fix=%u unpr=%u st=%u\n",
                 uinst, (uflags & 1) ? 1 : 0, (uflags & 2) ? 1 : 0,
                 (uflags & 4) ? 1 : 0, ufix, uunpr, ustale);
@@ -5757,69 +5770,69 @@ void OSD::BoardInfo() {
 #endif
     // Debug > UART console: live TX pin, or why it is not up.
     if (Debug::uartActive())
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "  Dbg UART TX   : %u\n", Debug::uartTxPin());
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  Dbg UART TX   : %u\n", Debug::uartTxPin());
     else if (Config::dbg_uart)
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "  Dbg UART TX   : off (%s)\n",
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  Dbg UART TX   : off (%s)\n",
                         BoardPins::dbgUartBlockedByZifi() ? "ZiFi" : "no RAM");
 #ifdef VGA_BASE_PIN
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
         "  VGA base      : %d\n", VGA_BASE_PIN);
 #endif
 #ifdef HDMI_BASE_PIN
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
         "  HDMI base     : %d\n", HDMI_BASE_PIN);
 #endif
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
         "  PWM L/R       : %d/%d\n", PWM_PIN0, PWM_PIN1);
 #ifdef BEEPER_PIN
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
         "  Beeper        : %d\n", BEEPER_PIN);
 #endif
 #if defined(I2S_DATA_PIO) && defined(I2S_BCK_PIO) && defined(I2S_LCK_PIO)
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
         "  I2S D/BCK/LCK : %d/%d/%d\n", I2S_DATA_PIO, I2S_BCK_PIO, I2S_LCK_PIO);
 #endif
 #ifdef PCM5122_I2S_DATA
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
         "  PCM5122 I2S   : %d/%d/%d\n", PCM5122_I2S_DATA, PCM5122_I2S_BCK, PCM5122_I2S_LCK);
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
         "  PCM5122 I2C   : %d/%d\n", PCM5122_I2C_SDA, PCM5122_I2C_SCL);
 #endif
 #ifdef LATCH_595_PIN
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
         "  AY 595 L/C/D  : %d/%d/%d\n", LATCH_595_PIN, CLK_595_PIN, DATA_595_PIN);
 #endif
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
         "  SD MI/MO/CK/CS: %d/%d/%d/%d\n",
         SDCARD_PIN_SPI0_MISO, SDCARD_PIN_SPI0_MOSI, SDCARD_PIN_SPI0_SCK, SDCARD_PIN_SPI0_CS);
 #ifdef PSRAM_PIN_CS
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
         "  PSRAM CS/CK/IO: %d/%d/%d/%d\n",
         PSRAM_PIN_CS, PSRAM_PIN_SCK, PSRAM_PIN_MOSI, PSRAM_PIN_MISO);
 #endif
 #ifdef BUTTER_PSRAM_GPIO
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
         "  Butter PSRAM  : %d\n", BUTTER_PSRAM_GPIO);
 #endif
 #ifdef MIDI_TX_PIN
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
         "  MIDI TX       : %d\n", MIDI_TX_PIN);
 #endif
 #ifdef LOAD_WAV_PIO
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
         "  LOAD WAV      : %d\n", LOAD_WAV_PIO);
 #endif
 #ifdef USE_NESPAD
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
         "  NES CLK/LAT/D : %d/%d/%d\n", NES_GPIO_CLK, NES_GPIO_LAT, NES_GPIO_DATA);
 #endif
 #if defined(PICO_DEFAULT_LED_PIN) && PICO_DEFAULT_LED_PIN != 255
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
         "  LED           : %d\n", PICO_DEFAULT_LED_PIN);
 #endif
 
     // Build info
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
         "\n %s\n"
         " Built %s %s\n"
         " branch '%s'\n"
@@ -5837,7 +5850,8 @@ void OSD::MemoryInfo() {
     extern char __flash_binary_start, __flash_binary_end;  // pico-sdk linker symbols
     extern char end, __HeapLimit;                          // heap arena [end, ceiling)
 
-    char (&buf)[OSD_INFO_BUF_SZ] = osd_info_buf;
+    char* const buf = osdInfoBuf();
+    if (!buf) return;
     int pos = 0;
     const int KB = 1024;
 
@@ -5851,56 +5865,56 @@ void OSD::MemoryInfo() {
     size_t heap_total  = (size_t)((uintptr_t)heap_lim - (uintptr_t)&end) + heap_strand;
     size_t heap_free   = getFreeHeap();
     size_t heap_used   = heap_total > heap_free ? heap_total - heap_free : 0;
-    pos += snprintf(buf + pos, sizeof(buf) - pos, " SRAM (%d KB usable):\n", (int)(sram_total / KB));
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "  Static bss+data: %d KB\n", (int)(sram_static / KB));
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "  Heap used/total: %d/%d KB\n", (int)(heap_used / KB), (int)(heap_total / KB));
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "  Heap free      : %d KB\n", (int)(heap_free / KB));
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " SRAM (%d KB usable):\n", (int)(sram_total / KB));
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  Static bss+data: %d KB\n", (int)(sram_static / KB));
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  Heap used/total: %d/%d KB\n", (int)(heap_used / KB), (int)(heap_total / KB));
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  Heap free      : %d KB\n", (int)(heap_free / KB));
     if (heap_strand)
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "   above overlay : %d KB\n", (int)(heap_strand / KB));
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "  Largest block  : %d KB\n", (int)(getLargestAllocatable() / KB));
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "   above overlay : %d KB\n", (int)(heap_strand / KB));
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  Largest block  : %d KB\n", (int)(getLargestAllocatable() / KB));
 
     // ── FLASH ──────────────────────────────────────────────────────────────────
     size_t fw = (size_t)((uintptr_t)&__flash_binary_end - (uintptr_t)&__flash_binary_start);
     uint32_t flash_total = (1u << rx[3]);
-    pos += snprintf(buf + pos, sizeof(buf) - pos, " FLASH (%d MB):\n", (int)(flash_total >> 20));
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "  Firmware       : %d KB\n", (int)(fw / KB));
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " FLASH (%d MB):\n", (int)(flash_total >> 20));
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  Firmware       : %d KB\n", (int)(fw / KB));
     Buffer::PoolStat fp = Buffer::poolStat(Buffer::TIER_FLASH);
     if (fp.total)
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "  Buffer pool    : %d/%d KB\n", (int)(fp.used / KB), (int)(fp.total / KB));
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  Buffer pool    : %d/%d KB\n", (int)(fp.used / KB), (int)(fp.total / KB));
 
     // ── PSRAM ──────────────────────────────────────────────────────────────────
     // A chip that was found but is switched off (Debug > PSRAM) would otherwise just
     // be missing from this page, reading as a hardware fault. Say so instead.
     if (!Config::psram_enabled && (butter_psram_probed() || psram_probed_size()))
-        pos += snprintf(buf + pos, sizeof(buf) - pos,
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos,
                         " PSRAM          : off (Debug menu)\n");
 #ifdef BUTTER_PSRAM_GPIO
     if (butter_psram_size()) {
         uint32_t bsz = butter_psram_size();
         size_t emu = (size_t)butter_pages * MEM_PG_SZ;
         Buffer::PoolStat bp = Buffer::poolStat(Buffer::TIER_BUTTER);
-        pos += snprintf(buf + pos, sizeof(buf) - pos, " Butter PSRAM (%d.%d MB):\n",
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " Butter PSRAM (%d.%d MB):\n",
             (int)(bsz >> 20), (int)(((bsz & 0xFFFFF) * 10) >> 20));
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "  Emu RAM pages  : %d KB\n", (int)(emu / KB));
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "  Buffer arena   : %d/%d KB\n", (int)(bp.used / KB), (int)(bp.total / KB));
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  Emu RAM pages  : %d KB\n", (int)(emu / KB));
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  Buffer arena   : %d/%d KB\n", (int)(bp.used / KB), (int)(bp.total / KB));
     }
 #endif
     if (psram_size()) {
         uint32_t psz = psram_size();
         size_t emu = (size_t)psram_pages * MEM_PG_SZ;
         Buffer::PoolStat sp = Buffer::poolStat(Buffer::TIER_SPI);
-        pos += snprintf(buf + pos, sizeof(buf) - pos, " SPI PSRAM (%d.%d MB):\n",
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " SPI PSRAM (%d.%d MB):\n",
             (int)(psz >> 20), (int)(((psz & 0xFFFFF) * 10) >> 20));
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "  Emu RAM pages  : %d KB\n", (int)(emu / KB));
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "  Buffer arena   : %d/%d KB\n", (int)(sp.used / KB), (int)(sp.total / KB));
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  Emu RAM pages  : %d KB\n", (int)(emu / KB));
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  Buffer arena   : %d/%d KB\n", (int)(sp.used / KB), (int)(sp.total / KB));
     }
     Buffer::PoolStat swp = Buffer::poolStat(Buffer::TIER_SWAP);
     if (swp.total)
-        pos += snprintf(buf + pos, sizeof(buf) - pos, " SD swap pool   : %d/%d KB\n", (int)(swp.used / KB), (int)(swp.total / KB));
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " SD swap pool   : %d/%d KB\n", (int)(swp.used / KB), (int)(swp.total / KB));
 
     // ── Enabled features (Subsystem SRAM budget) ────────────────────────────────
     using namespace Subsystems;
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "\n Enabled features (SRAM):\n");
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "\n Enabled features (SRAM):\n");
     size_t feat_total = 0;
     for (int i = 0; i < FEAT_COUNT; i++) {
         FeatureId f = (FeatureId)i;
@@ -5909,9 +5923,9 @@ void OSD::MemoryInfo() {
         feat_total += c;
         // Round up so a sub-KB feature (e.g. 512 B Z-Controller) isn't shown as 0 KB;
         // a genuinely-zero cost (Gigascreen on butter, ULA+/Timex) stays 0.
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "  %-14s : %d KB\n", featureName(f), (int)((c + KB - 1) / KB));
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  %-14s : %d KB\n", featureName(f), (int)((c + KB - 1) / KB));
     }
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "  %-14s : %d KB\n", "TOTAL", (int)((feat_total + KB - 1) / KB));
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  %-14s : %d KB\n", "TOTAL", (int)((feat_total + KB - 1) / KB));
 
     // ── PSRAM by feature ────────────────────────────────────────────────────────
     // The big tiered buffers (GM.DLS bank, GS sample RAM, prevFB, DivMMC banks) live
@@ -5924,12 +5938,12 @@ void OSD::MemoryInfo() {
         size_t pc = featurePsramCost(f);
         if (!pc) continue;
         if (!psram_feat_n++)
-            pos += snprintf(buf + pos, sizeof(buf) - pos, "\n PSRAM by feature:\n");
+            pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "\n PSRAM by feature:\n");
         psram_feat_total += pc;
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "  %-14s : %d KB\n", featureName(f), (int)((pc + KB - 1) / KB));
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  %-14s : %d KB\n", featureName(f), (int)((pc + KB - 1) / KB));
     }
     if (psram_feat_n)
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "  %-14s : %d KB\n", "TOTAL", (int)((psram_feat_total + KB - 1) / KB));
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  %-14s : %d KB\n", "TOTAL", (int)((psram_feat_total + KB - 1) / KB));
 
     showTextDialog("Memory Info", buf);
 }
@@ -5970,11 +5984,12 @@ static int appendFilename(char* buf, int pos, int bufsize, const string& path, i
 #define EMU_INFO_BUF_SZ 2560
 static char* emu_buf    = nullptr;
 static int   emu_buf_sz = 0;
-static inline char* emuBuf()   { return emu_buf ? emu_buf : osd_info_buf; }
+static inline char* emuBuf()   { return emu_buf ? emu_buf : osdInfoBuf(); }
 static inline int   emuBufSz() { return emu_buf ? emu_buf_sz : OSD_INFO_BUF_SZ; }
 
 static void buildEmulatorInfoText() {
     char* buf = emuBuf();
+    if (!buf) return;
     const int bufsz = emuBufSz();
     int pos = 0;
 
@@ -6481,7 +6496,7 @@ static void buildEmulatorInfoText() {
 // open — the RTC clock above all: a frozen reading reads as a stopped clock.
 const char* emuInfoText() {
     buildEmulatorInfoText();
-    return emuBuf();
+    return emuBuf() ? emuBuf() : "";
 }
 
 void OSD::EmulatorInfo() {
@@ -6508,12 +6523,13 @@ extern "C" int xinput_app_format_devices_info(char* buf, int bufsz);
 const char* hidInfoText() {
     extern int hid_app_format_devices_info(char* buf, int bufsz);
     extern int xinput_app_format_devices_info(char* buf, int bufsz);
-    char (&buf)[OSD_INFO_BUF_SZ] = osd_info_buf;
+    char* const buf = osdInfoBuf();
+    if (!buf) return "";
     buf[0] = '\0';
-    int xpos = xinput_app_format_devices_info(buf, sizeof(buf));
+    int xpos = xinput_app_format_devices_info(buf, OSD_INFO_BUF_SZ);
     if (xpos < 0) xpos = 0;
     buf[xpos] = '\0';
-    int hpos = hid_app_format_devices_info(buf + xpos, sizeof(buf) - xpos);
+    int hpos = hid_app_format_devices_info(buf + xpos, OSD_INFO_BUF_SZ - xpos);
     if (hpos < 0) hpos = 0;
     buf[xpos + hpos] = '\0';
     return buf;
@@ -6867,24 +6883,26 @@ bool OSD::updateROM(const string& fname, uint8_t arch) {
 // reads. It's a host-controller limit, not this code. See CLAUDE.md.
 static bool benchFsSpeed(const char* benchPath, const char* volName,
                          const char* title, float& rd, float& wr) {
-    static uint8_t io_buf[512];
-    static FIL f;    // 2KB core stack — never put a FIL on it
+    ScopedHeap sh(512 + sizeof(FIL));   // never on the core stack — and no longer 1.1 KB of .bss
+    if (!sh) return false;
+    uint8_t* io_buf = sh.as<uint8_t>();
+    FIL* fp = (FIL*)(io_buf + 512);
     UINT bw, br;
     bool ok = false;
     char msg[24];
 
     snprintf(msg, sizeof(msg), "%s write...", volName);
     OSD::progressDialog(title, msg, 0, 0);
-    memset(io_buf, 0x55, sizeof(io_buf));
-    if (f_open(&f, benchPath, FA_CREATE_ALWAYS | FA_WRITE) == FR_OK) {
+    memset(io_buf, 0x55, 512);
+    if (f_open(fp, benchPath, FA_CREATE_ALWAYS | FA_WRITE) == FR_OK) {
         uint64_t t0 = time_us_64();
         uint32_t total = 0;
         while (time_us_64() - t0 < 2000000ULL && total < 512u * 1024u) {
-            if (f_write(&f, io_buf, sizeof(io_buf), &bw) != FR_OK) break;
+            if (f_write(fp, io_buf, 512, &bw) != FR_OK) break;
             total += bw;
         }
         uint64_t elapsed = time_us_64() - t0;
-        f_close(&f);
+        f_close(fp);
         if (elapsed > 0 && total > 0) {
             wr = (float)total / (float)elapsed;
             ok = true;
@@ -6893,13 +6911,13 @@ static bool benchFsSpeed(const char* benchPath, const char* volName,
 
     snprintf(msg, sizeof(msg), "%s read...", volName);
     OSD::progressDialog(title, msg, 50, 1);
-    if (f_open(&f, benchPath, FA_READ) == FR_OK) {
+    if (f_open(fp, benchPath, FA_READ) == FR_OK) {
         uint64_t t0 = time_us_64();
         uint32_t total = 0;
-        while (f_read(&f, io_buf, sizeof(io_buf), &br) == FR_OK && br > 0)
+        while (f_read(fp, io_buf, 512, &br) == FR_OK && br > 0)
             total += br;
         uint64_t elapsed = time_us_64() - t0;
-        f_close(&f);
+        f_close(fp);
         if (elapsed > 0 && total > 0)
             rd = (float)total / (float)elapsed;
     }
@@ -6996,6 +7014,8 @@ static bool benchNetSpeed(NetBenchCtx& ctx, const char* title) {
 // One benchmark run for a picked row (1=CPU 2=SRAM 3=PSRAM 4=SD 5=USB [6=NET]
 // 6/7=All) — one row of the menu's Speed test submenu.
 void OSD::SpeedTestRun(uint8_t st_opt) {
+    char* const info_buf = osdInfoBuf();   // scratch for the whole run (see osdInfoBuf)
+    if (!info_buf) return;
     {
         // With the net client built in, row 6 is NET and "All tests" shifts to 7.
 #if ZIFI_NET_CLIENT
@@ -7050,7 +7070,7 @@ void OSD::SpeedTestRun(uint8_t st_opt) {
         // --- SRAM R/W ---
         // osd_info_buf used as scratch; results saved in floats before we refill it
         if (do_sram) {
-            char (&scratch)[OSD_INFO_BUF_SZ] = osd_info_buf;
+            char* const scratch = info_buf;
             uint64_t t0, elapsed;
             uint32_t total;
 
@@ -7090,7 +7110,7 @@ void OSD::SpeedTestRun(uint8_t st_opt) {
         if (do_psram) {
             // SPI PSRAM — burst via psram_write_range / psram_read_range
             if (has_spi) {
-                char (&burst)[OSD_INFO_BUF_SZ] = osd_info_buf;
+                char* const burst = info_buf;
                 uint64_t t0, elapsed;
                 uint32_t total;
 
@@ -7176,7 +7196,7 @@ void OSD::SpeedTestRun(uint8_t st_opt) {
 #endif
 
         // --- Build result text ---
-        char (&buf)[OSD_INFO_BUF_SZ] = osd_info_buf;
+        char* const buf = info_buf;
         int pos = 0;
 
         if (do_cpu) {
@@ -7940,14 +7960,15 @@ const char* const hkDescEN[Config::HK_COUNT] = {
 
 // The Help > Hot keys page of the new UI: description + current binding.
 const char* hotkeysText() {
-    char (&buf)[OSD_INFO_BUF_SZ] = osd_info_buf;
+    char* const buf = osdInfoBuf();
+    if (!buf) return "";
     int pos = 0;
     for (int i = 0; i < Config::HK_COUNT; i++) {
         if (Config::hotkeys[i].vk == (uint16_t)fabgl::VK_NONE) continue;  // unbound: as the classic page
         const string b = hkBindingText(i);
-        pos += snprintf(buf + pos, sizeof(buf) - pos, " %-20s %s\n",
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " %-20s %s\n",
                         hkDescEN[i], b.c_str());
-        if (pos >= (int)sizeof(buf) - 1) break;
+        if (pos >= (int)OSD_INFO_BUF_SZ - 1) break;
     }
     // Everything below is hard-wired in ESPectrum::processKeyboard — not entries of the
     // table above, so not remappable and previously listed only on the classic page.
@@ -7956,22 +7977,22 @@ const char* hotkeysText() {
         // On Profi plain PrtScr is the Karabas XT-keyboard toggle, so BMP capture moves
         // to Alt+PrtScr. The XT toggle is now the ONLY way to reach that setting — its
         // Machine-menu row is gone, which makes this line its documentation.
-        pos += snprintf(buf + pos, sizeof(buf) - pos, " %-20s %s\n",
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " %-20s %s\n",
                         "XT keyboard", "Alt+~ or PrtScr");
-        pos += snprintf(buf + pos, sizeof(buf) - pos, " %-20s %s\n",
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " %-20s %s\n",
                         "BMP capture", "Alt+PrtScr");
     } else {
-        pos += snprintf(buf + pos, sizeof(buf) - pos, " %-20s %s\n",
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " %-20s %s\n",
                         "BMP capture", "PrtScr");
     }
-    pos += snprintf(buf + pos, sizeof(buf) - pos, " %-20s %s\n",
+    pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " %-20s %s\n",
                     "Cursor = Joystick", "ScrollLk");
     if (profi) {
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "\n Karabas (Menu = Win)\n");
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "\n Karabas (Menu = Win)\n");
         for (int p = 0; p < kProfiHkCount; p++) {
-            pos += snprintf(buf + pos, sizeof(buf) - pos, " %-20s %s\n",
+            pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " %-20s %s\n",
                             kProfiHkDescEN[p], kProfiHkKeys[p]);
-            if (pos >= (int)sizeof(buf) - 1) break;
+            if (pos >= (int)OSD_INFO_BUF_SZ - 1) break;
         }
     }
     return buf;
@@ -8335,27 +8356,8 @@ int OSD::joyPickKey(int currentVk) {
 #define DLG_OBJ_INPUT 1
 #define DLG_OBJ_COMBO 2
 
-struct dlgObject {
-    string Name;
-    unsigned short int posx;
-    unsigned short int posy;
-    int objLeft;
-    int objRight;
-    int objTop;
-    int objDown;
-    unsigned char objType;
-    string Label;
-};
 
-const dlgObject dlg_Objects[5] = {
-    {"Bank",70,16,-1,-1, 4, 1, DLG_OBJ_COMBO , "RAM Bank  "},
-    {"Address",70,32,-1,-1, 0, 2, DLG_OBJ_INPUT , "Address   "},
-    {"Value",70,48,-1,-1, 1, 4, DLG_OBJ_INPUT , "Value     "},
-    {"Ok",7,65,-1, 4, 2, 0, DLG_OBJ_BUTTON,  "  Ok  "},
-    {"Cancel",52,65, 3,-1, 2, 0, DLG_OBJ_BUTTON, "  Cancel  "}
-};
 
-const string BankCombo[9] = { "   -   ", "   0   ", "   1   ", "   2   ", "   3   ", "   4   ", "   5   ", "   6   ", "   7   " };
 
 
 
@@ -8367,11 +8369,6 @@ void flushKbd() {
     }
 }
 
-const dlgObject dlg_Objects2[3] = {
-    {"Address",70,32,-1,-1, 0, 1, DLG_OBJ_INPUT , "Address   "},
-    {"Ok",     7, 65, 2, 2, 0, 2, DLG_OBJ_BUTTON, "  Ok  "},
-    {"Cancel", 52,65, 2, 2, 1, 0, DLG_OBJ_BUTTON, "  Cancel  "}
-};
 
 
 

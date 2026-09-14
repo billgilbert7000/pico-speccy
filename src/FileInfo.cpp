@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include "TryAlloc.h"
 #include <string.h>
 #include <string>
 
@@ -15,7 +16,6 @@ using namespace std;
 extern Font Font6x8;
 
 // Static FIL to avoid stack bloat
-static FIL s_infoFile;
 
 static const char* getBaseName(const char* name) {
     const char* slash = strrchr(name, '/');
@@ -97,8 +97,10 @@ static void showInfoBox(const string& info, int lineCount) {
         return;
     }
     const int MAX_LINES = 128;
-    static const char* lineStarts[MAX_LINES];
-    static int lineLens[MAX_LINES];
+    ScopedHeap lh(MAX_LINES * (sizeof(const char*) + sizeof(int)));   // was 1 KB of .bss
+    if (!lh) return;
+    const char** lineStarts = lh.as<const char*>();
+    int* lineLens = (int*)(lineStarts + MAX_LINES);
     int totalLines = parseLines(info, lineStarts, lineLens, MAX_LINES);
     if (totalLines < 2) return;
 
@@ -856,10 +858,11 @@ static void viewHDD(FIL* f, FSIZE_t fileSize, string& info, int& lines) {
 static void viewVHD(FIL* f, FSIZE_t fileSize, string& info, int& lines) {
     if (fileSize < 512) { info += "Too small for VHD footer\n"; lines++; return; }
 
-    // Static: all view* helpers inline into viewInfo, so this 512 B buffer would
-    // otherwise dominate viewInfo's stack frame. viewInfo nests under do_OSD(1 KB)
-    // + the browser (0.7 KB) on the 4 KB core0 stack — every byte counts. Not reentrant.
-    static uint8_t ft[512];
+    // Heap for this call, not stack (viewInfo nests deep under the browser) and not
+    // a static (512 B of .bss for a footer read once per .vhd).
+    ScopedHeap fth(512);
+    if (!fth) { info += "(no memory)\n"; lines++; return; }
+    uint8_t* ft = fth.as<uint8_t>();
     UINT br;
     f_lseek(f, fileSize - 512);
     f_read(f, ft, 512, &br);
@@ -893,7 +896,9 @@ static void viewVHD(FIL* f, FSIZE_t fileSize, string& info, int& lines) {
 
 // ---- Main dispatcher ----
 void FileInfo::viewInfo(const string& path) {
-    FIL& f = s_infoFile;
+    ScopedHeap fsh(sizeof(FIL));          // off the stack AND off .bss (was a static FIL)
+    if (!fsh) return;
+    FIL& f = *fsh.as<FIL>();
     if (f_open(&f, path.c_str(), FA_READ) != FR_OK)
         return;
 

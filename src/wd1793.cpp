@@ -42,6 +42,7 @@ THE SOFTWARE.
 #include "psram_spi.h"
 #include "trdos_boot.h"
 #include "Buffer.h"
+#include "TryAlloc.h"
 #include <string.h>
 
 static bool sclConvertToTRD(rvmWD1793 *wd);
@@ -4321,14 +4322,17 @@ bool rvmWD1793CreateEmptyTRD(const char *path) {
     // deep in the OSD file-browser call chain on core0's 2 KB stack (PICO_STACK_SIZE),
     // and ~820 B of locals overflowed it → stack corruption → MSTKERR fault on the
     // next ISR entry. Static, like FileInfo.cpp. Not reentrant — one-shot creation.
-    static FIL f;
-    static uint8_t buf[256];
-    if (f_open(&f, path, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK) return false;
+    // ...and not a static either (820 B of .bss for a one-shot): heap for this call.
+    ScopedHeap sh(sizeof(FIL) + 256);
+    if (!sh) return false;
+    FIL* fp = sh.as<FIL>();
+    uint8_t* buf = (uint8_t*)(fp + 1);
+    if (f_open(fp, path, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK) return false;
     UINT bw;
 
     // Sectors 0-7: catalog (empty = zeros, 8 sectors = 128 directory entries)
     memset(buf, 0, 256);
-    for (int s = 0; s < 8; s++) f_write(&f, buf, 256, &bw);
+    for (int s = 0; s < 8; s++) f_write(fp, buf, 256, &bw);
 
     // Sector 9 (0-indexed: 8): service sector (disk info at offsets 0xE1-0xE7)
     // Reader expects this at file offset 2048+227 = 8*256+0xE3
@@ -4344,16 +4348,16 @@ bool rvmWD1793CreateEmptyTRD(const char *path) {
     memset(buf + 0xea, 0x20, 9);
     // 0xF5-0xFC: disk name (8 chars)
     memcpy(buf + 0xf5, "NEW DISK", 8);
-    f_write(&f, buf, 256, &bw);
+    f_write(fp, buf, 256, &bw);
 
     // Sectors 9-15: rest of track 0, zeros
     memset(buf, 0, 256);
-    for (int s = 9; s < 16; s++) f_write(&f, buf, 256, &bw);
+    for (int s = 9; s < 16; s++) f_write(fp, buf, 256, &bw);
 
     // Remaining 2544 sectors (tracks 1-79, both sides): zeros
-    for (int s = 0; s < 2544; s++) f_write(&f, buf, 256, &bw);
+    for (int s = 0; s < 2544; s++) f_write(fp, buf, 256, &bw);
 
-    f_close(&f);
+    f_close(fp);
     return true;
 }
 

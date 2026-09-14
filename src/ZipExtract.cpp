@@ -13,6 +13,7 @@ using namespace std;
 #include "ZipExtract.h"
 #include "FileUtils.h"
 #include "Buffer.h"
+#include "TryAlloc.h"
 #include "NetArena.h"
 #include "MemESP.h"
 #include "AlfCart.h"
@@ -36,7 +37,6 @@ extern "C" size_t getLargestAllocatable(void);  // OSDMain.cpp — malloc panics
 
 // Shared filename scratch buffer — extract/extractAll/viewInfo each used a
 // 252-byte static; only one zip operation runs at a time.
-static char s_zip_fnBuf[252];
 
 const char* ZipExtract::TEMP_FILE = "/tmp/.zip_extract";
 
@@ -188,6 +188,9 @@ struct ZipWorkGuard {
 
 string ZipExtract::extract(const string& zipPath, uint8_t fileType) {
     s_zip_err = nullptr;
+    ScopedHeap fnh(256);               // entry-name buffer for this call (was a 252 B static)
+    if (!fnh) return "";
+    char* const fn = fnh.as<char>();
 
     // The emulator is paused behind the OSD for the whole extract, so the dormant
     // Gigascreen prev-FB can back the inflate state (~8 KB), the 32 KB LZ dict and
@@ -225,8 +228,8 @@ string ZipExtract::extract(const string& zipPath, uint8_t fileType) {
         if (hdr.nameLen == 0 || hdr.nameLen > 250) break;
 
         // Read filename — use static buffer to save stack
-        if (f_read(&zipFile, s_zip_fnBuf, hdr.nameLen, &br) != FR_OK || br != hdr.nameLen) break;
-        s_zip_fnBuf[hdr.nameLen] = 0;
+        if (f_read(&zipFile, fn, hdr.nameLen, &br) != FR_OK || br != hdr.nameLen) break;
+        fn[hdr.nameLen] = 0;
 
         // Skip extra field
         if (hdr.extraLen > 0)
@@ -235,13 +238,13 @@ string ZipExtract::extract(const string& zipPath, uint8_t fileType) {
         FSIZE_t dataStart = f_tell(&zipFile);
 
         Debug::log("ZIP: scan '%s' method=%u flags=0x%x csz=%u usz=%u match=%d",
-                   s_zip_fnBuf, hdr.compression, hdr.flags, hdr.compressedSize,
-                   hdr.uncompressedSize, (int)hasMatchingExt(s_zip_fnBuf, fileType));
+                   fn, hdr.compression, hdr.flags, hdr.compressedSize,
+                   hdr.uncompressedSize, (int)hasMatchingExt(fn, fileType));
 
         // Check: not a directory, has matching extension
-        if (s_zip_fnBuf[hdr.nameLen - 1] != '/' && hasMatchingExt(s_zip_fnBuf, fileType)) {
+        if (fn[hdr.nameLen - 1] != '/' && hasMatchingExt(fn, fileType)) {
             ZipEntry& e = entries[entryCount];
-            const char* base = getBaseName(s_zip_fnBuf);
+            const char* base = getBaseName(fn);
             strncpy(e.name, base, sizeof(e.name) - 1);
             e.name[sizeof(e.name) - 1] = 0;
             e.dataOffset = dataStart;
@@ -648,6 +651,9 @@ bool ZipExtract::extractDeflate(FIL* zipFile, uint32_t compressedSize, const cha
 void ZipExtract::viewInfo(const string& zipPath) {
     ZipWorkGuard work;   // only the zip FIL is used here, but it is the same block
     if (!work.ok()) return;
+    ScopedHeap fnh(256);
+    if (!fnh) return;
+    char* const fn = fnh.as<char>();
 
     FIL& zipFile = s_work->zip;
     if (f_open(&zipFile, zipPath.c_str(), FA_READ) != FR_OK)
@@ -678,8 +684,8 @@ void ZipExtract::viewInfo(const string& zipPath) {
         if (hdr.signature != ZIP_LOCAL_SIGNATURE) break;
         if (hdr.nameLen == 0 || hdr.nameLen > 250) break;
 
-        if (f_read(&zipFile, s_zip_fnBuf, hdr.nameLen, &br) != FR_OK || br != hdr.nameLen) break;
-        s_zip_fnBuf[hdr.nameLen] = 0;
+        if (f_read(&zipFile, fn, hdr.nameLen, &br) != FR_OK || br != hdr.nameLen) break;
+        fn[hdr.nameLen] = 0;
 
         if (hdr.extraLen > 0)
             f_lseek(&zipFile, f_tell(&zipFile) + hdr.extraLen);
@@ -687,8 +693,8 @@ void ZipExtract::viewInfo(const string& zipPath) {
         FSIZE_t dataStart = f_tell(&zipFile);
 
         // Skip directories
-        if (s_zip_fnBuf[hdr.nameLen - 1] != '/') {
-            const char* base = getBaseName(s_zip_fnBuf);
+        if (fn[hdr.nameLen - 1] != '/') {
+            const char* base = getBaseName(fn);
             char line[48];
             if (hdr.uncompressedSize >= 1024 * 1024)
                 snprintf(line, sizeof(line), "%.30s %luMB", base, (unsigned long)(hdr.uncompressedSize / (1024 * 1024)));
@@ -781,6 +787,9 @@ void ZipExtract::viewInfo(const string& zipPath) {
 
 int ZipExtract::extractAll(const string& zipPath, const string& destDir) {
     s_zip_err = nullptr;
+    ScopedHeap fnh(256);
+    if (!fnh) return 0;
+    char* const fn = fnh.as<char>();
     NetArenaLease arena;   // same paused-emulator lease as extract() — see there
 
     ZipWorkGuard work;
@@ -810,8 +819,8 @@ int ZipExtract::extractAll(const string& zipPath, const string& destDir) {
         if (hdr.signature != ZIP_LOCAL_SIGNATURE) break;
         if (hdr.nameLen == 0 || hdr.nameLen > 250) break;
 
-        if (f_read(&zipFile, s_zip_fnBuf, hdr.nameLen, &br) != FR_OK || br != hdr.nameLen) break;
-        s_zip_fnBuf[hdr.nameLen] = 0;
+        if (f_read(&zipFile, fn, hdr.nameLen, &br) != FR_OK || br != hdr.nameLen) break;
+        fn[hdr.nameLen] = 0;
 
         if (hdr.extraLen > 0)
             f_lseek(&zipFile, f_tell(&zipFile) + hdr.extraLen);
@@ -819,9 +828,9 @@ int ZipExtract::extractAll(const string& zipPath, const string& destDir) {
         FSIZE_t dataStart = f_tell(&zipFile);
 
         // Skip directories
-        if (s_zip_fnBuf[hdr.nameLen - 1] != '/' && (hdr.compression == 0 || hdr.compression == 8)) {
+        if (fn[hdr.nameLen - 1] != '/' && (hdr.compression == 0 || hdr.compression == 8)) {
             // Build destination path: destDir + basename
-            const char* base = getBaseName(s_zip_fnBuf);
+            const char* base = getBaseName(fn);
 
             // Extract to a temp on the destination volume, then rename in place
             bool ok = extractFile(&zipFile, hdr.compression, hdr.compressedSize, hdr.uncompressedSize, tmpPath);
@@ -834,7 +843,7 @@ int ZipExtract::extractAll(const string& zipPath, const string& destDir) {
                 else Debug::log("ZIP: rename %s -> %s failed (%d)", tmpPath, destPath, (int)rr);
             } else {
                 Debug::log("ZIP: extract '%s' failed (comp=%u csz=%lu)",
-                           s_zip_fnBuf, hdr.compression, (unsigned long)hdr.compressedSize);
+                           fn, hdr.compression, (unsigned long)hdr.compressedSize);
             }
             // Re-seek past data (extractFile consumed it, but be safe)
         }

@@ -17,6 +17,7 @@
 #include "psram_spi.h"
 #include "pwm_audio.h"
 #include "Buffer.h"
+#include "TryAlloc.h"
 #include "Debug.h"
 #include "graphics.h"
 #include <hardware/vreg.h>
@@ -1042,12 +1043,14 @@ int Config::loadRemotes(Remote* out, int cap) {
 
 void Config::saveRemotes(const Remote* list, int count) {
     FileUtils::mkdirParents(CONFIG_DIR);
+    ScopedHeap bh(512);        // off the stack (saveRemotes runs deep under do_OSD) and off .bss
+    if (!bh) return;
+    char* buf = bh.as<char>();
     FIL* f = fopen2(REMOTES_PATH, FA_WRITE | FA_CREATE_ALWAYS);
     if (!f) return;
     for (int i = 0; i < count; ++i) {
         const Remote& r = list[i];
-        static char buf[512];   // off the stack — saveRemotes also runs deep under do_OSD
-        int n = snprintf(buf, sizeof(buf), "%s\t%s\t%u\t%s\t%d\t%s\t%s\t%s\n",
+        int n = snprintf(buf, 512, "%s\t%s\t%u\t%s\t%d\t%s\t%s\t%s\n",
                          r.proto ? "sftp" : "ftp", r.host.c_str(), (unsigned)r.port,
                          r.user.c_str(), r.savepass ? 1 : 0,
                          r.savepass ? r.pass.c_str() : "", r.alias.c_str(), r.path.c_str());
