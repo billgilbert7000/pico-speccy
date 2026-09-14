@@ -486,28 +486,23 @@ static constexpr uint8_t TS_PAL_MAX_FLUSHES = 8;
 // (bumped at the EndFrame arming), which frame the pending change belongs to,
 // and where the RENDERER is — published by tsRenderExec as
 // (frame seq << 16) | content line about to be drawn, i.e. lines below it are
-// done. The seq travels in bits 7..2 of the job's `kind` byte (6 bits).
+// done. The job's `kind` byte: bit 0 line/DMA, bit 1 tile-map prefetch parity,
+// bits 3..2 the palette BANK the line is rendered with (ts256_cur_bank), bits
+// 7..4 the frame seq (4 bits — core1 never lags 8 frames).
 static uint8_t  ts_frame_seq = 0;
 static uint8_t  ts_pal_seq = 0;
 static volatile uint32_t ts_render_pos = 0;
-// PalSel written while the frame's lines were being rendered = a per-line
-// palette-bank effect. 16c without the TSU renders nibbles onto slots 0..15
-// (one gpal bank per frame), so such a frame goes through the ts256 remap
-// instead, which carries {palsel, nibble} per line. Frames of hold, refreshed
-// by every mid-frame write; the switch itself costs one frame of wrong colours.
-static uint16_t ts_palsel_raster = 0;
 static bool     ts_pal_assigned = false;   // ts256Assign already ran for the pending change
-static constexpr uint16_t TS_PALSEL_RASTER_HOLD = 150;
 // [TSPAL] diagnostic (1 Hz while CRAM changes happen): which path applied the
 // palette and where the beam was — the numbers a report of "wrong palette /
 // split picture" on a TS-Conf title needs before any theory.
 static struct {
-    uint32_t changes, applies, p_force, p_nobeam, p_norow, p_blank, p_vis, p_later, blocked_seq, waited;
+    uint32_t changes, applies, p_force, p_nobeam, p_norow, p_blank, p_vis, p_later, blocked_seq, waited, p_bank;
     int      beam_min, beam_max;
     uint32_t lat_max_us, chg_gt_max_us;
     uint64_t change_us;
     uint32_t c1_prev;
-} ts_pal_dbg = {0,0,0,0,0,0,0,0,0,0, 999,-999, 0,0, 0, 0};
+} ts_pal_dbg = {0,0,0,0,0,0,0,0,0,0,0, 999,-999, 0,0, 0, 0};
 static uint64_t ts_frame_start_us = 0;
 uint8_t g_ts_fastmem = 0;
 bool     VIDEO::ts_tsu_live = false;
@@ -548,7 +543,7 @@ static inline uint32_t tsRenderUs() { return timer_hw->timerawl; }
 
 // ── TS-Conf line rendering on core1 ─────────────────────────────────────────
 // A content line is a pure function of {line, y counter, GXOffs, VPage, PalSel,
-// VConfig(GFXOVR), Border} plus frame-stable state (mode, geometry, ts256_map,
+// VConfig(GFXOVR), Border} plus frame-stable state (mode, geometry, ts256_map_b,
 // pair tables, OSD flags, flashing). core0 snapshots those seven at the line
 // boundary (tsDrawTick) into a job and core1's render loop executes it, so the
 // ~11 us of PSRAM line reads per row leave core0's frame. The queue keeps the
@@ -584,7 +579,7 @@ static uint16_t*  ts_c1_sf  = nullptr;          // [TS_C1_SFILE][256]
 // entry i (+1; 0 = never). Read and written ONLY under `queued` (which requires
 // ts_c1_ring) and at the allocation below, so they live in the same lazy block
 // as the ring instead of costing 528 B of .bss on every board — the arrays the
-// RENDERER reads per pixel (s_gline, s_tsline, ts256_map) deliberately stay
+// RENDERER reads per pixel (s_gline, s_tsline, ts256_map_b) deliberately stay
 // static: moving those to a palloc block was tried on 2026-09-07 and reverted
 // the same day after FPS dropped (cause never established — see CLAUDE.md).
 static uint32_t*  ts_c1_tsu_job = nullptr;      // [TS_C1_TSU]
@@ -954,7 +949,6 @@ void VIDEO::tsVideoForceOff() {
     ts_render_live = 0;
     ts_tsu_live = false;
     ts_pal256_live = false;
-    ts_palsel_raster = 0;
     ts_pal_row = -1;
     setVsyncLead(false);
     if (c256) applyPalette();     // the ts256 remap had taken over the hardware palette
@@ -2174,13 +2168,66 @@ static void tsPairPaletteLoad() {
 // ("blue flashes on the letters"). Sharing happens only when the 184 slots run
 // out (then a cell joins the slot of its colour, else the nearest colour);
 // cells never assigned share nothing.
-static uint8_t  ts256_map[256];        // CRAM index → slot
-static uint16_t ts256_slot_col[256];   // slot → CRAM555 it currently shows, 0xFFFF = none
-static uint8_t  ts256_slot_ref[256];   // cells mapped to the slot
-static uint32_t ts256_dirty[8];        // slots whose colour must reach the hardware
+// ── Palette VERSIONS in the framebuffer bytes (2026-09-14) ──────────────────
+// A single hardware palette and a single-buffered framebuffer cannot both be
+// right when the guest frame and the display frame drift (V-Sync pacing off, or
+// a display mode not matched to the machine's ~50 Hz): rows of two guest frames
+// are on screen at once and one global table can only fit one of them. So the
+// slot POOL is split into `ts256_nb` equal banks and every palette version goes
+// to the next bank: a cell keeps ONE offset shared by all banks
+// (`ts256_off`), the per-bank map `ts256_map_b[b][cell]` = pool[b*bs + off], and
+// a line job carries the bank of the version it was rendered with (kind bits
+// 3..2). A row therefore always displays the colours it was rendered with,
+// whatever the beam and the renderer are doing, and the palette needs no beam
+// scheduling at all. nb-1 changes per frame are exact (nb versions can be on
+// screen at once); more fold into the current bank. The bank count is chosen at
+// the (in)validating flush from how many distinct colours CRAM holds (each bank
+// must fit them all with headroom); nb == 1 is the old single-table scheme with
+// the beam rule below (256c titles with a full 256-colour palette land there).
+#define TS256_MAX_BANKS 4
+static uint8_t  ts256_off[256];        // CRAM index → offset inside a bank
+static uint8_t  ts256_map_b[TS256_MAX_BANKS][256];   // bank → CRAM index → hardware slot
+static uint16_t ts256_slot_col[256];   // offset → CRAM555 it currently shows, 0xFFFF = none
+static uint16_t ts256_slot_ref[256];   // cells mapped to the offset (256 cells can share one)
+static uint32_t ts256_dirty_b[TS256_MAX_BANKS][8];   // per bank: offsets whose colour must reach the hardware
 static bool     ts256_valid = false;   // map assigned (else full rebuild)
+static bool     ts256_exhausted = false;   // a bank ran out of offsets (nearest-colour fallback used)
 static uint8_t  ts256_pool[184];
 static uint8_t  ts256_pool_n = 0;
+static uint8_t  ts256_nb = 1;          // palette banks in use
+static uint8_t  ts256_bs = 0;          // offsets per bank
+static uint8_t  ts256_cur_bank = 0;    // bank lines are rendered with from now on
+static uint32_t ts256_ver = 0;         // versions created since the last invalidate
+// A bulk DMA rewrote the pixels the renderer reads since the last palette
+// version: the next CRAM change is a RE-INDEX (new pixels drawn for the new
+// palette — RobFgift: 30 KB of tile graphics + 16 colours every second frame)
+// and takes a bank of its own. Without it the change is a palette ANIMATION
+// over unchanged pixels (Ninja Gaiden: sprite/border cells every 4th frame),
+// and the old rows must follow it too — see tsPalettePoll.
+static bool     ts_reindex_hint = false;
+static constexpr uint32_t TS_REINDEX_MIN_BYTES = 2048;
+
+// TsConf::dmaStart, every bulk DMA: destination inside the base bitmap or a
+// tile-graphics page (not the sprite page — sprite frames are streamed by
+// many games and are no re-index of the picture), big enough to be a redraw.
+void VIDEO::tsVramDmaNote(uint32_t addr, uint32_t len) {
+    if (!ts_pal256_live || ts_reindex_hint || len < TS_REINDEX_MIN_BYTES) return;
+    const uint32_t page = addr >> 14;
+    const uint8_t vp = TsConf::r.vpage;
+    bool hit = false;
+    switch (ts_vmode_live) {
+        case TSV_ZX:   hit = (page == vp); break;
+        case TSV_16C:  hit = ((page & 0xF8) == (vp & 0xF8)); break;
+        case TSV_256C: hit = ((page & 0xF0) == (vp & 0xF0)); break;
+        default: break;
+    }
+    if (!hit && ts_tsu_live) {
+        const uint8_t tsc = TsConf::r.tsconf;
+        if ((tsc & 0x20) && (page & 0xF8) == (TsConf::r.t0gpage & 0xF8)) hit = true;
+        if ((tsc & 0x40) && (page & 0xF8) == (TsConf::r.t1gpage & 0xF8)) hit = true;
+    }
+    if (hit) ts_reindex_hint = true;
+}
 
 static void ts256PoolInit() {
     if (ts256_pool_n) return;
@@ -2201,25 +2248,54 @@ static inline uint32_t ts555Dist(uint16_t a, uint16_t b) {
     return (uint32_t)(dr * dr + dg * dg + db * db);
 }
 
-static inline void ts256MarkDirty(uint8_t slot) { ts256_dirty[slot >> 5] |= 1u << (slot & 31); }
+// The offset's colour changed: every bank has to be rewritten there (each one
+// when it next becomes the current bank).
+static inline void ts256MarkDirty(uint8_t off) {
+    for (int b = 0; b < ts256_nb; b++) ts256_dirty_b[b][off >> 5] |= 1u << (off & 31);
+}
+static inline void ts256SetMap(int cell, uint8_t off) {
+    ts256_off[cell] = off;
+    for (int b = 0; b < ts256_nb; b++) ts256_map_b[b][cell] = ts256_pool[b * ts256_bs + off];
+}
 
-// Bring the cell→slot map up to date with CRAM. Cheap when nothing changed
+// How many banks the pool can hold for the palette CRAM carries right now:
+// the largest of 4/3/2 whose bank fits every distinct colour plus a quarter
+// of headroom (a fade or a shared cell's move needs fresh offsets), else 1.
+static uint8_t ts256PickBanks() {
+    uint16_t seen[256]; int n = 0;
+    for (int i = 0; i < 256; i++) {
+        const uint16_t c = TsConf::cram[i] & 0x7FFF;
+        int k = 0;
+        while (k < n && seen[k] != c) k++;
+        if (k == n) seen[n++] = c;
+    }
+    for (int nb = TS256_MAX_BANKS; nb >= 2; nb--) {
+        const int bs = ts256_pool_n / nb;
+        if (bs >= n + n / 4 + 4) return (uint8_t)nb;
+    }
+    return 1;
+}
+
+// Bring the cell→offset map up to date with CRAM. Cheap when nothing changed
 // (one pass of 256 compares); called at the first poll after a CRAM change so
-// lines rendered from then on use the new numbering, while the hardware
-// colours follow at the beam-scheduled apply (ts256Program). `full` forgets
+// lines rendered from then on use the new numbering. `full` forgets
 // everything (mode entry: the slots hold the standard palette).
 static void ts256Assign(bool full) {
     ts256PoolInit();
     if (full || !ts256_valid) {
         for (int i = 0; i < 256; i++) { ts256_slot_col[i] = 0xFFFF; ts256_slot_ref[i] = 0; }
-        for (int i = 0; i < 8; i++) ts256_dirty[i] = 0;
+        memset(ts256_dirty_b, 0, sizeof ts256_dirty_b);
         ts256_valid = false;
+        ts256_exhausted = false;
+        if (ts256_nb < 1) ts256_nb = 1;
+        ts256_bs = (uint8_t)(ts256_pool_n / ts256_nb);
     }
+    const int bs = ts256_bs;
     uint8_t pending[256]; int npend = 0;
     for (int i = 0; i < 256; i++) {
         const uint16_t c = TsConf::cram[i] & 0x7FFF;
         if (ts256_valid) {
-            const uint8_t s = ts256_map[i];
+            const uint8_t s = ts256_off[i];
             if (ts256_slot_col[s] == c) continue;                     // unchanged
             if (ts256_slot_ref[s] == 1) {                             // sole owner: recolour in place
                 ts256_slot_col[s] = c;
@@ -2234,60 +2310,121 @@ static void ts256Assign(bool full) {
         const int i = pending[k];
         const uint16_t c = TsConf::cram[i] & 0x7FFF;
         int hit = -1, freeSame = -1, freeAny = -1;
-        for (int p = 0; p < ts256_pool_n; p++) {
-            const uint8_t s = ts256_pool[p];
+        for (int s = 0; s < bs; s++) {
             if (ts256_slot_ref[s]) { if (hit < 0 && ts256_slot_col[s] == c) hit = s; }
             else {
                 if (ts256_slot_col[s] == c) { if (freeSame < 0) freeSame = s; }
                 else if (freeAny < 0) freeAny = s;
             }
         }
-        // Join a live slot of the same colour first (256 cells, 184 slots: the
+        // Join a live offset of the same colour first (256 cells, 184 slots: the
         // unused cells alone would exhaust the pool), else a free one. Sharing
         // is safe here: only the cell that CHANGES ever moves, the others keep
-        // their slot and its colour.
-        if (hit < 0 && freeSame >= 0) hit = freeSame;
+        // their offset and its colour.
+        // A free offset that still shows the colour may not hold it in EVERY
+        // bank (freed before the others were written): dirty it like a new one.
+        if (hit < 0 && freeSame >= 0) { hit = freeSame; ts256MarkDirty((uint8_t)hit); }
         else if (hit < 0 && freeAny >= 0) { hit = freeAny; ts256_slot_col[hit] = c; ts256MarkDirty((uint8_t)hit); }
         else if (hit < 0) {                                           // full: nearest live colour
             uint32_t bestd = 0xFFFFFFFFu;
-            for (int p = 0; p < ts256_pool_n; p++) {
-                const uint8_t s = ts256_pool[p];
+            for (int s = 0; s < bs; s++) {
                 if (!ts256_slot_ref[s]) continue;
                 const uint32_t d = ts555Dist(ts256_slot_col[s], c);
                 if (d < bestd) { bestd = d; hit = s; }
             }
+            ts256_exhausted = true;
         }
-        ts256_map[i] = (uint8_t)hit;
+        ts256SetMap(i, (uint8_t)hit);
         ts256_slot_ref[hit]++;
     }
+    // Banks beyond nb mirror bank 0: a line still queued with a higher bank tag
+    // from before the count shrank then renders with live slots, not a stale map.
+    if (!ts256_valid)
+        for (int b = ts256_nb; b < TS256_MAX_BANKS; b++) memcpy(ts256_map_b[b], ts256_map_b[0], 256);
     ts256_valid = true;
 }
 
-// Write the slots whose colour changed since the last programming.
-static void ts256Program() {
+// Write bank `b`'s slots whose colour changed since that bank was last written.
+// A freed offset keeps its dirty bit: the bank never got the colour, and the
+// offset's next owner must not inherit a slot only some banks hold.
+static void ts256ProgramBank(int b) {
     for (int w = 0; w < 8; w++) {
-        uint32_t bits = ts256_dirty[w];
-        ts256_dirty[w] = 0;
+        uint32_t bits = ts256_dirty_b[b][w], keep = 0;
         while (bits) {
-            const int b = __builtin_ctz(bits); bits &= bits - 1;
-            const uint8_t slot = (uint8_t)(w * 32 + b);
-            if (!ts256_slot_ref[slot]) continue;                      // freed meanwhile
-            const uint32_t col = paletteFinal(VIDEO::tsCramToRgb(ts256_slot_col[slot]));
+            const int bit = __builtin_ctz(bits); bits &= bits - 1;
+            const int off = w * 32 + bit;
+            if (off >= ts256_bs) continue;
+            if (!ts256_slot_ref[off]) { keep |= 1u << bit; continue; }
+            const uint32_t col = paletteFinal(VIDEO::tsCramToRgb(ts256_slot_col[off]));
+            const uint8_t slot = ts256_pool[b * ts256_bs + off];
             graphics_set_palette(slot, col);
             vga_set_palette_entry_solid(slot, col);
         }
+        ts256_dirty_b[b][w] = keep;
     }
 }
 
 // invalidate = forget what the hardware slots hold (mode entry / after an
-// applyPalette rewrote them): every assigned slot is written.
+// applyPalette rewrote them): the bank count is re-decided and every assigned
+// slot of every bank is written. Without it this is the GLOBAL apply: the
+// changed slots go into every bank, so every row on screen — whatever version
+// it was rendered with — shows the new colours at once (the beam-scheduled
+// path for a palette ANIMATION, see tsPalettePoll).
 static void tsPalette256Flush(bool invalidate) {
+    if (invalidate) {
+        ts256PoolInit();
+        ts256_nb = ts256PickBanks();
+        ts256_bs = (uint8_t)(ts256_pool_n / ts256_nb);
+        ts256_cur_bank = 0;
+        ts256_ver = 0;
+        ts256_valid = false;
+        Debug::log("[TSV] ts256 remap: %u palette bank%s x %u slots", ts256_nb, ts256_nb > 1 ? "s" : "", ts256_bs);
+    }
     ts256Assign(invalidate);
     if (invalidate) {
-        for (int p = 0; p < ts256_pool_n; p++)
-            if (ts256_slot_ref[ts256_pool[p]]) ts256MarkDirty(ts256_pool[p]);
+        ts_reindex_hint = false;
+        for (int o = 0; o < ts256_bs; o++)
+            if (ts256_slot_ref[o]) ts256MarkDirty((uint8_t)o);
     }
-    ts256Program();
+    for (int b = 0; b < ts256_nb; b++) ts256ProgramBank(b);
+}
+
+// Versioned apply (nb > 1): a new palette version = the next bank, written at
+// once. A bank is reused every nb versions; the rows still displayed with it
+// are either long re-rendered or — a raster palette split that alternates the
+// same two palettes every frame (Ninja Gaiden: CRAM at lines 94 and 272) —
+// hold exactly the colours being written again, so nothing visible changes
+// under the beam. The per-frame cap is a COST bound only (each version writes
+// its bank's dirty slots): a first cut capped at nb-1 "so that nb versions fit
+// on screen" and folded the second change of a frame into the current bank in
+// place, which recoloured that frame's rendered rows every frame (hw
+// 2026-09-14, "Ninja Gaiden flickers in wrong colours"). Beyond the cap the
+// change folds in place (the legacy behaviour for a per-line CRAM writer). A
+// bank that ran out of offsets degrades the whole remap to one bank (the beam
+// rule) — one frame of mismatched rows, then the pre-2026-09-14 behaviour.
+static constexpr uint8_t TS_PAL_MAX_VERSIONS = 16;
+static void ts256Version() {
+    ts_reindex_hint = false;
+    const bool bump = ts_pal_flushes < TS_PAL_MAX_VERSIONS;
+    if (bump) {
+        ts256_ver++;
+        ts256_cur_bank = (uint8_t)(ts256_ver % ts256_nb);
+        ts_pal_flushes++;
+    }
+    ts256Assign(false);
+    if (ts256_exhausted) {
+        Debug::log("[TSV] ts256 remap: bank of %u slots exhausted - back to one bank", ts256_bs);
+        ts256_nb = 1;
+        ts256_bs = ts256_pool_n;
+        ts256_cur_bank = 0;
+        ts256_valid = false;
+        ts256Assign(true);
+        for (int o = 0; o < ts256_bs; o++)
+            if (ts256_slot_ref[o]) ts256MarkDirty((uint8_t)o);
+        ts256ProgramBank(0);
+        return;
+    }
+    ts256ProgramBank(ts256_cur_bank);
 }
 
 void VIDEO::tsPaletteFlush() {
@@ -2318,9 +2455,9 @@ void VIDEO::tsPaletteFlush() {
 // with in the live mode: the nearest of the 16 gpal colours, as a pair slot in
 // TEXT mode and as the palette index itself in 16c/NOGFX (where the framebuffer
 // byte IS the hardware slot 0..15).
-uint8_t VIDEO::tsBorderSlot() { return tsBorderSlotFor(TsConf::r.border, TsConf::r.palsel); }
-uint8_t TS_RENDER_HOT VIDEO::tsBorderSlotFor(uint8_t border, uint8_t palsel) {
-    if (ts_pal256_live) return ts256_map[border];
+uint8_t VIDEO::tsBorderSlot() { return tsBorderSlotFor(TsConf::r.border, TsConf::r.palsel, ts256_cur_bank); }
+uint8_t TS_RENDER_HOT VIDEO::tsBorderSlotFor(uint8_t border, uint8_t palsel, uint8_t bank) {
+    if (ts_pal256_live) return ts256_map_b[bank & (TS256_MAX_BANKS - 1)][border];
     const uint8_t gpal = (palsel & 0x0F) << 4;
     const uint16_t want = TsConf::cram[border];
     uint8_t best = 0;
@@ -2405,43 +2542,23 @@ static void tsPalDbgPrint() {
     if (!ts_pal_dbg.changes && !ts_pal_dbg.applies) return;
     extern volatile uint32_t ts_c1_us;
     const uint32_t c1 = ts_c1_us - ts_pal_dbg.c1_prev; ts_pal_dbg.c1_prev = ts_c1_us;
-    Debug::log("[TSPAL] vsync=%d chg=%u app=%u (force %u nobeam %u norow %u blank %u vis %u later %u) beam=%d..%d latMax=%uus chgAt<=%uus blockedSeq=%u waited=%u pal256=%d c1=%uus/f pos=%08lX",
-               (int)Config::v_sync_enabled, ts_pal_dbg.changes, ts_pal_dbg.applies, ts_pal_dbg.p_force, ts_pal_dbg.p_nobeam,
+    Debug::log("[TSPAL] vsync=%d chg=%u app=%u (bank %u force %u nobeam %u norow %u blank %u vis %u later %u) beam=%d..%d latMax=%uus chgAt<=%uus blockedSeq=%u waited=%u pal256=%d nb=%u ver=%lu c1=%uus/f pos=%08lX",
+               (int)Config::v_sync_enabled, ts_pal_dbg.changes, ts_pal_dbg.applies, ts_pal_dbg.p_bank, ts_pal_dbg.p_force, ts_pal_dbg.p_nobeam,
                ts_pal_dbg.p_norow, ts_pal_dbg.p_blank, ts_pal_dbg.p_vis, ts_pal_dbg.p_later,
                ts_pal_dbg.beam_min, ts_pal_dbg.beam_max, ts_pal_dbg.lat_max_us, ts_pal_dbg.chg_gt_max_us,
-               ts_pal_dbg.blocked_seq, ts_pal_dbg.waited, (int)VIDEO::ts_pal256_live, c1 / 50, (unsigned long)ts_render_pos);
-    ts_pal_dbg.changes = ts_pal_dbg.applies = ts_pal_dbg.p_force = ts_pal_dbg.p_nobeam = ts_pal_dbg.p_norow = 0;
+               ts_pal_dbg.blocked_seq, ts_pal_dbg.waited, (int)VIDEO::ts_pal256_live, ts256_nb, (unsigned long)ts256_ver,
+               c1 / 50, (unsigned long)ts_render_pos);
+    ts_pal_dbg.changes = ts_pal_dbg.applies = ts_pal_dbg.p_force = ts_pal_dbg.p_nobeam = ts_pal_dbg.p_norow = ts_pal_dbg.p_bank = 0;
     ts_pal_dbg.p_blank = ts_pal_dbg.p_vis = ts_pal_dbg.p_later = ts_pal_dbg.blocked_seq = ts_pal_dbg.waited = 0;
     ts_pal_dbg.beam_min = 999; ts_pal_dbg.beam_max = -999; ts_pal_dbg.lat_max_us = 0; ts_pal_dbg.chg_gt_max_us = 0;
 }
 
 void VIDEO::tsPalSelWritten() {
-    if (ts_fast_armed && ts_line_idx > 0 && ts_line_t != 0xFFFFFFFFu) ts_palsel_raster = TS_PALSEL_RASTER_HOLD;
-    // Under the ts256 remap every CRAM cell already has a slot and each line
-    // carries its own palsel — nothing to flush.
+    // Under the ts256 remap (every whole-line mode but TEXT) each line carries
+    // its own palsel and every CRAM cell has a slot — nothing to flush; a
+    // per-line PalSel raster effect (nygift's splash wipe) is free. TEXT (pair
+    // tables) and ZX mode (the gpal bank on slots 0..15) re-derive their 16.
     if (!ts_pal256_live) tsCramChanged();
-}
-
-// EndFrame: switch plain 16c between "nibbles on slots 0..15" and the ts256
-// remap as the per-line PalSel evidence comes and goes (nygift's splash: the
-// LINE INT writes PalSel on every line for a top-down palette wipe).
-static void tsPalSelRasterPoll() {
-    if (ts_palsel_raster) ts_palsel_raster--;
-    if (!VIDEO::ts_render_live || VIDEO::ts_tsu_live || VIDEO::ts_vmode_live != VIDEO::TSV_16C) return;
-    const bool want = ts_palsel_raster != 0;
-    if (want == VIDEO::ts_pal256_live) return;
-    VIDEO::tsRenderDrain();
-    if (want) {
-        tsPalette256Flush(true);
-        VIDEO::tsCramDirty = false;
-        VIDEO::ts_pal256_live = true;
-    } else {
-        VIDEO::ts_pal256_live = false;
-        VIDEO::applyPalette();          // standard ramp back; slots 0..15 from gpal below
-        VIDEO::tsCramDirty = true;
-    }
-    ts_pal_row = -1;
-    Debug::log("[TSV] 16c per-line PalSel %s -> ts256 remap %s", want ? "seen" : "gone", want ? "ON" : "off");
 }
 
 // TS-Conf whole-line modes: fire the frame-pacing v_sync TS_VSYNC_LEAD_LINES
@@ -2469,6 +2586,23 @@ int VIDEO::displayBeamRow() {
 
 void VIDEO::tsPalettePoll(bool force) {
     if (!tsCramDirty) return;
+    if (ts_pal256_live && ts256_nb > 1 && ts_reindex_hint) {
+        // RE-INDEX (pixels were redrawn for this palette — ts_reindex_hint):
+        // the change becomes a new palette version in the next bank, written
+        // at once; lines posted from here on carry that bank, rows already
+        // rendered keep theirs. No beam involved. A change WITHOUT redrawn
+        // pixels is a palette animation and takes the beam-scheduled path
+        // below, applied to every bank: the rows still on screen from earlier
+        // frames hold the same pixels and must follow the animation too —
+        // versioning them made Ninja Gaiden's sprite/border cycling show the
+        // V-Sync-off tear line as a colour boundary (hw 2026-09-14).
+        ts256Version();
+        tsCramDirty = false;
+        ts_pal_row = -1;
+        ts_pal_assigned = false;
+        tsPalDbgApplied(ts_pal_dbg.p_bank, displayBeamRow());
+        return;
+    }
     // The cell→slot map follows CRAM at once (lines rendered from here on use
     // the new numbering); only the slot COLOURS wait for the beam below.
     if (ts_pal256_live && !ts_pal_assigned) { ts256Assign(false); ts_pal_assigned = true; }
@@ -2492,8 +2626,8 @@ void VIDEO::tsPalettePoll(bool force) {
     // with the two frames drifting): rows the beam scans before the renderer
     // got there keep old pixels AND the old palette, rows after carry both new.
     const uint32_t pos = ts_render_pos;
-    int dseq = (int)(((pos >> 16) - ts_pal_seq) & 0x3F);
-    if (dseq >= 32) dseq -= 64;
+    int dseq = (int)(((pos >> 16) - ts_pal_seq) & 0x0F);
+    if (dseq >= 8) dseq -= 16;
     if (dseq < 0) { ts_pal_dbg.blocked_seq++; return; }   // renderer still on an earlier frame: nothing new is on screen yet
     const int32_t top = (int32_t)lin_end;
     const int32_t doneTo = top + (int32_t)(pos & 0xFFFF) - 1;   // last completed row of the renderer's frame
@@ -3919,7 +4053,6 @@ void VIDEO::Reset() {
         ts_render_live = 0;
         ts_tsu_live = false;
         ts_pal256_live = false;
-        ts_palsel_raster = 0;
         ts_pal_row = -1;
         setVsyncLead(false);
         ts_rres_live = 0;
@@ -5243,13 +5376,14 @@ void VIDEO::tsVideoApplyPending() {
                 if (vga.frameBuffer[_y]) memset(vga.frameBuffer[_y], 0, vga.xres);
         }
     }
-    // The ts256 remap owns (almost) the whole hardware palette: 256c always, and
-    // the TSU over anything (its pixels are {palette:4, pixel:4} = any CRAM
-    // cell). Hand it back on the way out (applyPalette rewrites the standard
-    // ramp + the 16 ZX solids), take it over on the way in (full write — the
-    // slots hold the standard palette now).
-    const bool wantPal256 = (want == TSV_256C) || (wantTsu && !wantPair)
-                         || (want == TSV_16C && ts_palsel_raster != 0);   // per-line PalSel, see tsPalSelRasterPoll
+    // The ts256 remap owns (almost) the whole hardware palette in every
+    // whole-line mode but TEXT (pair tables): 256c and the TSU need it (any
+    // CRAM cell per pixel), and 16c/NOGFX take it too so the palette-VERSION
+    // banks (see ts256Version) cover a CRAM change in any of them, and a
+    // per-line PalSel effect costs nothing. Hand it back on the way out
+    // (applyPalette rewrites the standard ramp + the 16 ZX solids), take it
+    // over on the way in (full write — the slots hold the standard palette now).
+    const bool wantPal256 = wantRender && !wantPair;
     if (ts_pal256_live && !wantPal256) applyPalette();
     ts_vmode_live = want;
     ts_tsu_live = wantTsu;
@@ -5350,7 +5484,7 @@ static void TS_RENDER_HOT tsFast256(uint8_t* fb, int fx0, int fx1, const uint8_t
     }
     while (fx < fx1) { fb[fx ^ 2] = map[ln[sx & 0x1FF]]; fx++; sx++; }
 }
-// 16c: two pixels per byte, high nibble first; `map` = ts256_map (palette bank
+// 16c: two pixels per byte, high nibble first; `map` = ts256_map_b[bank] (palette bank
 // applied through gpal) or nullptr for the plain 0..15 slot output.
 __attribute__((optimize("O2", "no-unroll-loops")))
 static void TS_RENDER_HOT tsFast16(uint8_t* fb, int fx0, int fx1, const uint8_t* ln,
@@ -5513,7 +5647,7 @@ void VIDEO::tsRenderLine(uint32_t curline) {
         // Full ring (a HALT fast-forward posts a whole frame in microseconds):
         // wait for a slot — core0 would be idle for exactly that render anyway.
         { while (ts_c1_w - ts_c1_r >= TS_C1_RING) tsC1Spin(); tsC1SpinEnd(); }
-        j.l.kind = (uint8_t)((j.l.kind & 3) | ((ts_frame_seq & 0x3F) << 2));   // frame tag for ts_render_pos
+        j.l.kind = (uint8_t)((j.l.kind & 3) | (ts256_cur_bank << 2) | ((ts_frame_seq & 0x0F) << 4));   // palette bank + frame tag
         ts_c1_ring[ts_c1_w & (TS_C1_RING - 1)] = j;
         __dmb();
         ts_c1_w = ts_c1_w + 1;
@@ -5524,7 +5658,7 @@ void VIDEO::tsRenderLine(uint32_t curline) {
         return;
     }
     const uint64_t t0 = time_us_64();
-    j.l.kind = (uint8_t)((j.l.kind & 3) | ((ts_frame_seq & 0x3F) << 2));
+    j.l.kind = (uint8_t)((j.l.kind & 3) | (ts256_cur_bank << 2) | ((ts_frame_seq & 0x0F) << 4));
     tsRenderExec(j, ts_tsu_live ? &st : nullptr, TsConf::sfile, seq);
     ts_line_seq++;
     ts_render_us += (uint32_t)(time_us_64() - t0);
@@ -5680,16 +5814,17 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
     const uint32_t curline = j.l.line;
     const uint32_t ygctr = j.l.ygctr;
     const uint32_t frow = curline + lin_end;
-    ts_render_pos = ((uint32_t)(j.l.kind >> 2) << 16) | curline;   // lines below this one are done (tsPalettePoll)
+    ts_render_pos = ((uint32_t)(j.l.kind >> 4) << 16) | curline;   // lines below this one are done (tsPalettePoll)
     if (!vga.frameBuffer || frow >= (uint32_t)vga.yres) return;
     uint8_t* fb_row = (uint8_t*)vga.frameBuffer[frow];
     if (!fb_row) return;
+    const uint8_t bank = (uint8_t)((j.l.kind >> 2) & 3);   // palette version this line is rendered with
 
     const TsRres& g = kTsRres[ts_rres_live & 3];
     const int xres = (int)vga.xres;
     // Left pad in fb bytes (lores px): border pixels visible left of the area.
     const int pad_l = (int)g.lb - ((xres >= 360) ? 0 : 20);
-    const uint8_t brd = tsBorderSlotFor(j.l.border, j.l.palsel);
+    const uint8_t brd = tsBorderSlotFor(j.l.border, j.l.palsel, bank);
 
     // F8 stats / F9-F10 volume box: OSD::drawStats owns a 144x16 rect at fb bytes
     // 168.. (320-wide) / 188.. (360-wide), rows 220.. (yres 240) / 268.. (288) and
@@ -5760,12 +5895,12 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
         const uint32_t sx = (uint32_t)j.l.g_xoffs + (uint32_t)(fx0 - x0);
         if (ts_vmode_live == TSV_256C) {
             const uint8_t* ln = TsConf::pagePtr((j.l.vpage & 0xF0) + (ygctr >> 5));
-            if (ln) { tsFast256(fb_row, fx0, fx1, ln + ((ygctr & 31) << 9), sx, ts256_map); return; }
+            if (ln) { tsFast256(fb_row, fx0, fx1, ln + ((ygctr & 31) << 9), sx, ts256_map_b[bank]); return; }
         } else {
             const uint8_t* ln = TsConf::pagePtr((j.l.vpage & 0xF8) + (ygctr >> 6));
             if (ln) {
                 tsFast16(fb_row, fx0, fx1, ln + ((ygctr & 63) << 8), sx,
-                         ts_pal256_live ? ts256_map : nullptr, (uint8_t)((j.l.palsel & 0x0F) << 4));
+                         ts_pal256_live ? ts256_map_b[bank] : nullptr, (uint8_t)((j.l.palsel & 0x0F) << 4));
                 return;
             }
         }
@@ -5788,7 +5923,7 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
     static uint8_t s_nibmap[256];
     static bool s_nibmap_ok = false;
     if (!s_nibmap_ok) { for (int i = 0; i < 256; i++) s_nibmap[i] = (uint8_t)(i & 0x0F); s_nibmap_ok = true; }
-    const uint8_t* map = ts_pal256_live ? ts256_map : s_nibmap;
+    const uint8_t* map = ts_pal256_live ? ts256_map_b[bank] : s_nibmap;
     const int xa = x0 < 0 ? -x0 : 0;
     const int xb = (x0 + w > xres) ? xres - x0 : w;
 
@@ -6581,12 +6716,12 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
     // Whoever writes what a pending line READS drains first: TsConf::dmaStart
     // (guest memory), do_OSD / osdCenteredMsg / progressDialog / gfxBegin (the
     // framebuffer), mode switches and Reset. The palette flush runs with lines
-    // pending on purpose — ts256_map is read byte by byte, so a pending line
-    // takes old-or-new slots per pixel for one frame on a palette change.
+    // pending on purpose — a pending line carries its palette bank and the bank
+    // maps are read byte by byte, so only a cell that MOVED offset (a shared
+    // cell changing colour) can come out old-or-new per pixel, for one frame.
     if (Z80Ops::isTsconf) {
         tsPalettePoll(false);
         ts_pal_flushes = 0;
-        tsPalSelRasterPoll();
         tsPalDbgPrint();
         ts_frame_start_us = time_us_64();
     }

@@ -343,9 +343,11 @@ public:
 
   // ── TS-Conf video modes (VConfig VM[1:0] / NOGFX / RRES[1:0]) ─────────────
   // TEXT (80x30, 640 px wide) borrows the DS80/GMX packed-pair framebuffer and
-  // driver tables; 16c renders straight 0..15 palette indices (the gpal CRAM
-  // bank sits on hardware slots 0..15 via tsPaletteFlush); NOGFX/256c paint
-  // the border (256c needs a 256-colour slot remap — not yet). In every non-ZX
+  // driver tables; 16c / 256c / NOGFX / the TSU render CRAM indices through
+  // the ts256 slot remap, whose slot pool is split into palette-version BANKS
+  // so a row always shows the colours it was rendered with (see ts256Version
+  // in Video.cpp); in ZX mode the gpal CRAM bank sits on hardware slots 0..15
+  // via tsPaletteFlush. In every non-ZX
   // mode the per-T-state border machine is parked and the bands are painted
   // frame-granular exactly like GMX (gmxBorderFrame). Mode/geometry switches
   // are applied from EndFrame only (vblank — the driver pair tables are read
@@ -356,7 +358,7 @@ public:
                                          //     the TSU over ZX); 0 on every other machine — the one byte
                                          //     MainScreen tests
   static bool     ts_tsu_live;           // TSU layers composed (TSConfig S/T0/T1 enables, !NOTSU)
-  static bool     ts_pal256_live;        // hardware palette = ts256 remap (256c, or TSU over anything)
+  static bool     ts_pal256_live;        // hardware palette = ts256 remap (every whole-line mode but TEXT)
   static uint8_t  ts_rres_live;          // RRES the geometry is set up for
   static uint8_t  ts_crop_top;           // content lines cut at the top (RRES 288 on a 240-row fb)
   static uint32_t ts_ygctr;              // running graphics Y counter (Unreal vid.ygctr)
@@ -373,9 +375,10 @@ public:
   static bool     tsWatchedPage(uint32_t page);   // a queued line may read this physical page
   static bool     tsRenderQueueOn();     // lines (and bulk DMA) go to core1 right now
   static void     tsRenderDrainOverlap(uint32_t addr, uint32_t len); // wait until no queued line reads the range
+  static void     tsVramDmaNote(uint32_t addr, uint32_t len);   // bulk DMA into video pages → next CRAM change is a re-index
   static void     tsPostDma(uint8_t ctrl, uint8_t len, uint8_t num, uint32_t saddr, uint32_t daddr);
   static void     tsRenderDrainDma();    // core0: wait for every queued DMA transaction
-  static uint8_t  tsBorderSlotFor(uint8_t border, uint8_t palsel);
+  static uint8_t  tsBorderSlotFor(uint8_t border, uint8_t palsel, uint8_t bank); // bank = palette version (ts256)
   // Claim core1's job/TSU/SFILE block. Called from setup() on a TS-Conf boot (a
   // pristine heap keeps it in SRAM) and lazily from tsVideoApplyPending.
   static void     tsC1RingAlloc();
@@ -567,14 +570,14 @@ public:
   static void ulaPlusUpdatePaletteEntry(uint8_t entry);
   static void ulaPlusFlushPalette();   // apply pending palette to hardware
   // TS-Conf: CRAM → hardware slots. A guest change marks tsCramDirty and the
-  // framebuffer row it lands on (tsCramChanged); tsPalettePoll applies it when
-  // the display beam reaches that row (or at once when the beam is above it /
-  // in blanking), so a palette written at the top of a frame lands on the
-  // same display frame as that frame's pixels — see the RobFgift note at
-  // tsPalettePoll.
+  // framebuffer row it lands on (tsCramChanged). Under the banked ts256 remap
+  // tsPalettePoll turns it into a new palette VERSION (next bank, written at
+  // once — rows keep the bank they were rendered with); with a single bank it
+  // applies the slots when the display beam reaches rows rendered after the
+  // change — see the RobFgift note at tsPalettePoll.
   static bool tsCramDirty;
   static void tsCramChanged();
-  static void tsPalSelWritten();    // PalSel: like tsCramChanged, plus the per-line (raster) detection
+  static void tsPalSelWritten();    // PalSel: like tsCramChanged where the 16 slots / pair tables depend on it
   static void tsPalettePoll(bool force);
   static int  displayBeamRow();     // fb row under the beam, -1 = blanking, -2 = driver has none
   static void setVsyncLead(bool on);   // TS whole-line modes: frame-pacing v_sync fires before blanking

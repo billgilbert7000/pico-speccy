@@ -1031,6 +1031,7 @@ TS_HOT void TsConf::dmaStart(uint8_t ctrl) {
         if (mode == M_FILL) r.saddr = salgn ? ((r.saddr + asize * blocks) & 0x3FFFFF) : ((ss + 2) & 0x3FFFFF);
         else                r.saddr = salgn ? ((r.saddr + asize * blocks) & 0x3FFFFF) : ((ss + 2 * len * blocks) & 0x3FFFFF);
         r.daddr = dalgn ? ((r.daddr + asize * blocks) & 0x3FFFFF) : ((dd + 2 * len * blocks) & 0x3FFFFF);
+        VIDEO::tsVramDmaNote(dd, 2 * words);   // pixels redrawn → the next palette change is a re-index
         if (kTsDmaOnCore1 && VIDEO::tsRenderQueueOn()) {
             VIDEO::tsPostDma(ctrl, r.dmalen, r.dmanum, ss, dd);
         } else {

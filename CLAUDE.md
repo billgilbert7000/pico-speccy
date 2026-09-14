@@ -2425,10 +2425,70 @@ top and bottom) nor the ts256 map (stable — 16 distinct colours every frame) w
   The principled alternative, if this ever shows its limits: run large RAM->RAM DMAs
   progressively over their modelled DMA_ACT window from `dmaLineTick` (hardware order:
   the copy stays ahead of the raster), instead of one memcpy up front.
-- Hw check owed: RobFgift (no flicker, no magenta on the letters, clean top rows; V-Sync on AND off),
-  nygift's splash wipe, then the palette-changing titles — TMNT (256c, RAM→CRAM DMA every frame), Digger
-  intro (16c), Bruce Lee, Ninja Gaiden, fishbone, TS-BIOS Setup (TEXT mode goes through
-  the pair path, untouched), and a VGA board.
+- **Round 6 (2026-09-14, NOT hw-tested): palette VERSIONS in the framebuffer bytes — the fix
+  for V-Sync OFF and for display modes not matched to the machine's 50 Hz.** With the guest
+  frame free-running against the display, rows of two guest frames are on screen at once and
+  ONE global palette table can only be right for one of them: whichever way the beam rule
+  timed the apply, the rows where the beam had overtaken the renderer showed the previous
+  frame's pixels under the new palette — on RobFgift (greys permuted every second frame) that
+  is scrambled noise below a wandering line ("срывает синхру, мусор" — a description of the
+  picture, not HDMI signal loss). Per-row palette pages were ruled out: the HDMI converter's
+  two conv_color pages are selected per PIXEL (even/odd fb byte, the CRT grille), not per line.
+  Instead the 184-slot ts256 pool is split into `ts256_nb` equal BANKS (2..4, `ts256PickBanks`:
+  the largest whose bank fits every distinct CRAM colour plus a quarter of headroom; else 1 =
+  the old scheme with the beam rule — a 256c title with a full palette lands there). Every CRAM
+  change becomes a new palette VERSION written at once into the NEXT bank (`ts256Version`), a
+  cell keeps ONE offset shared by all banks (`ts256_off`, sticky as before) and the per-bank
+  maps `ts256_map_b[b][cell]` = pool[b*bs+off]; the line job carries the bank of its version
+  (kind bits 3..2; the frame seq shrank to 4 bits in 7..4) and the renderer maps through that
+  bank. A row therefore always shows the colours it was rendered with, whatever the beam and
+  the renderer phases are; nb-1 changes per frame are exact (nb consecutive versions on
+  screen), more fold into the current bank in place; a bank running out of offsets degrades
+  the mode to one bank (logged). The remap is now on in EVERY whole-line mode but TEXT
+  (`wantPal256 = wantRender && !wantPair` — plain 16c and NOGFX included), which also made
+  the per-line PalSel "raster hold" switch (`ts_palsel_raster`, tsPalSelRasterPoll) dead —
+  removed; a per-line PalSel effect is free under the remap. Cost +768 B .bss (the bank maps).
+  Host model (RobFgift-shaped permutations, 500 versions): offsets stay bounded, no
+  exhaustion, zero mismatches; the demo's 37 colours pick 3 banks. What versioning does NOT
+  fix is the pixel tear itself (single-buffered fb + drifting frames — inherent; V-Sync
+  pacing is the answer to that). `[TSPAL]` gained `bank` (versioned applies), `nb=`, `ver=`;
+  `[TSV] ts256 remap: N palette banks x M slots` logs the pick at every (in)validating flush.
+  **hw 2026-09-14 (tspal7): RobFgift and the rest clean, Ninja Gaiden FLICKERED in wrong
+  colours.** Its raster split loads CRAM twice a frame (INT handlers at lines 94 and 272,
+  one palette for the status rows, one for the play field), and the first cut capped
+  versions at nb-1 per frame "so nb versions fit on screen", folding the second change
+  into the CURRENT bank in place — which recoloured that frame's rendered rows every
+  frame. The cap was never a correctness rule: a reused bank either has no rows left on
+  screen or, for a title alternating the same two palettes, is rewritten with exactly the
+  colours it already holds. It is a cost bound now (`TS_PAL_MAX_VERSIONS` 16 per frame,
+  fold beyond). **tspal8 did not help, and the owner's log (`vsync=0 nb=4 chg=12-13/50f`,
+  all applies via `bank`) named the real mechanism: with V-Sync OFF there is a tear line
+  (rows between the beam and the renderer hold the previous frame's pixels), and Ninja
+  Gaiden ANIMATES its sprite/border cells every 4th frame. Per-row versioning is exactly
+  right for a RE-INDEX (RobFgift redraws its pixels for each palette) and exactly wrong for
+  an ANIMATION over unchanged pixels: the old rows hold the same pixels and must follow
+  the animation, or the tear line shows as a colour boundary that drifts down the screen
+  ("переливается") — tspal6's single global palette hid it. The two are told apart by
+  what the guest did to the PIXELS: `VIDEO::tsVramDmaNote` (called by every bulk DMA in
+  `TsConf::dmaStart`) sets `ts_reindex_hint` when >= 2 KB land in the base bitmap or a
+  tile-graphics page (not the sprite page: sprite frames are streamed by many games);
+  `tsPalettePoll` versions a change only while the hint is up (cleared by the version),
+  otherwise it takes the beam-scheduled path and `tsPalette256Flush(false)` writes the
+  changed slots into EVERY bank (the global apply). Order-independent in steady state:
+  the hint set by frame N's redraw covers frame N+2's palette. Same round, two latent
+  hazards in the bank bookkeeping fixed: a freed offset kept its dirty bits (a bank that
+  never got the colour would hand a stale slot to the offset's next owner), a
+  `freeSame` re-take now dirties all banks, and `ts256_slot_ref` is 16-bit (256 cells
+  can share one offset at a black mode entry). Test ELF `debug/DVp2-tspal9-1.0.5.elf`.**
+  **hw 2026-09-14, owner on tspal9: "теперь все отлично"** — Ninja Gaiden back to normal,
+  RobFgift clean, V-Sync off included. Not itemised beyond that; the 60 Hz-mode run and a
+  VGA board are still owed, and the always-on 1 Hz `[TSPAL]` line still needs a CMake gate
+  (or a decision to keep it) before this lands in a release.
+- Hw check owed: RobFgift (no flicker, no magenta on the letters, clean colours with V-Sync
+  OFF and on a 60 Hz mode — the pixel tear line may still be visible there), nygift's splash
+  wipe, then the palette-changing titles — TMNT (256c, RAM→CRAM DMA every frame; expect nb=1
+  in its log), Digger intro (16c — now through the remap), Bruce Lee, Ninja Gaiden, fishbone,
+  TS-BIOS Setup (TEXT mode goes through the pair path, untouched), and a VGA board.
 
 ### TS-Conf DRAM model: CPU/video vs DMA contention + 14 MHz wait states (2026-09-13; hw-confirmed: Bomberman AND fishbone run on the final build)
 
