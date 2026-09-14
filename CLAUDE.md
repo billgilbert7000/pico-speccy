@@ -2482,8 +2482,10 @@ top and bottom) nor the ts256 map (stable — 16 distinct colours every frame) w
   can share one offset at a black mode entry). Test ELF `debug/DVp2-tspal9-1.0.5.elf`.**
   **hw 2026-09-14, owner on tspal9: "теперь все отлично"** — Ninja Gaiden back to normal,
   RobFgift clean, V-Sync off included. Not itemised beyond that; the 60 Hz-mode run and a
-  VGA board are still owed, and the always-on 1 Hz `[TSPAL]` line still needs a CMake gate
-  (or a decision to keep it) before this lands in a release. `debug/DVp2-tspal10-1.0.5.elf`
+  VGA board are still owed. The 1 Hz `[TSPAL]` line is behind `-DTS_VIDEO_TRACE=ON` since
+  tspal11 (owner's call, 2026-09-14): the struct, both helpers and the per-frame stamp
+  compile out (`TSPAL_DBG`, `TSPAL_APPLIED`/`TSPAL_COUNT` macros), −384 B RAM, −4 KB flash
+  against tspal10 — ask for a TS_VIDEO_TRACE build before theorising about a palette report. `debug/DVp2-tspal10-1.0.5.elf`
   = tspal9 + the tables in the overlay window — **hw 2026-09-14, owner: "работает"**.
 - Hw check owed: RobFgift (no flicker, no magenta on the letters, clean colours with V-Sync
   OFF and on a 60 Hz mode — the pixel tear line may still be visible there), nygift's splash

@@ -493,9 +493,15 @@ static uint8_t  ts_frame_seq = 0;
 static uint8_t  ts_pal_seq = 0;
 static volatile uint32_t ts_render_pos = 0;
 static bool     ts_pal_assigned = false;   // ts256Assign already ran for the pending change
-// [TSPAL] diagnostic (1 Hz while CRAM changes happen): which path applied the
-// palette and where the beam was — the numbers a report of "wrong palette /
-// split picture" on a TS-Conf title needs before any theory.
+// [TSPAL] diagnostic (1 Hz while CRAM changes happen, -DTS_VIDEO_TRACE=ON):
+// which path applied the palette and where the beam was — the numbers a report
+// of "wrong palette / split picture" on a TS-Conf title needs before any theory.
+#if defined(TS_VIDEO_TRACE) && TS_VIDEO_TRACE
+#define TSPAL_DBG 1
+#else
+#define TSPAL_DBG 0
+#endif
+#if TSPAL_DBG
 static struct {
     uint32_t changes, applies, p_force, p_nobeam, p_norow, p_blank, p_vis, p_later, blocked_seq, waited, p_bank;
     int      beam_min, beam_max;
@@ -504,6 +510,12 @@ static struct {
     uint32_t c1_prev;
 } ts_pal_dbg = {0,0,0,0,0,0,0,0,0,0,0, 999,-999, 0,0, 0, 0};
 static uint64_t ts_frame_start_us = 0;
+#define TSPAL_APPLIED(field, beam) tsPalDbgApplied(ts_pal_dbg.field, (beam))
+#define TSPAL_COUNT(field)         (ts_pal_dbg.field++)
+#else
+#define TSPAL_APPLIED(field, beam) ((void)0)
+#define TSPAL_COUNT(field)         ((void)0)
+#endif
 uint8_t g_ts_fastmem = 0;
 bool     VIDEO::ts_tsu_live = false;
 bool     VIDEO::ts_pal256_live = false;
@@ -2525,12 +2537,15 @@ void VIDEO::tsCramChanged() {
         ts_pal_row = (int32_t)(lin_end + ts_line_idx);   // the next line to render
         ts_pal_seq = ts_frame_seq;
     }
+#if TSPAL_DBG
     ts_pal_dbg.changes++;
     ts_pal_dbg.change_us = time_us_64();
     const uint32_t gt = (uint32_t)(ts_pal_dbg.change_us - ts_frame_start_us);
     if (gt > ts_pal_dbg.chg_gt_max_us) ts_pal_dbg.chg_gt_max_us = gt;
+#endif
 }
 
+#if TSPAL_DBG
 static void tsPalDbgApplied(uint32_t& path, int beam) {
     path++;
     ts_pal_dbg.applies++;
@@ -2557,6 +2572,9 @@ static void tsPalDbgPrint() {
     ts_pal_dbg.p_blank = ts_pal_dbg.p_vis = ts_pal_dbg.p_later = ts_pal_dbg.blocked_seq = ts_pal_dbg.waited = 0;
     ts_pal_dbg.beam_min = 999; ts_pal_dbg.beam_max = -999; ts_pal_dbg.lat_max_us = 0; ts_pal_dbg.chg_gt_max_us = 0;
 }
+#else
+static inline void tsPalDbgPrint() {}
+#endif
 
 void VIDEO::tsPalSelWritten() {
     // Under the ts256 remap (every whole-line mode but TEXT) each line carries
@@ -2605,14 +2623,14 @@ void VIDEO::tsPalettePoll(bool force) {
         tsCramDirty = false;
         ts_pal_row = -1;
         ts_pal_assigned = false;
-        tsPalDbgApplied(ts_pal_dbg.p_bank, displayBeamRow());
+        TSPAL_APPLIED(p_bank, displayBeamRow());
         return;
     }
     // The cell→slot map follows CRAM at once (lines rendered from here on use
     // the new numbering); only the slot COLOURS wait for the beam below.
     if (ts_pal256_live && !ts_pal_assigned) { ts256Assign(false); ts_pal_assigned = true; }
     if (force || !ts_render_live || ESPectrum::maxSpeed || ts_pal_flushes >= TS_PAL_MAX_FLUSHES) {
-        tsPalDbgApplied(ts_pal_dbg.p_force, displayBeamRow());
+        TSPAL_APPLIED(p_force, displayBeamRow());
         tsPaletteFlush();
         ts_pal_flushes++;
         return;
@@ -2620,7 +2638,7 @@ void VIDEO::tsPalettePoll(bool force) {
     const int beam = displayBeamRow();
     const int32_t want = ts_pal_row;
     if (beam == -2 || want < 0) {          // no beam position / a change with no row (mode switch): at once
-        tsPalDbgApplied(beam == -2 ? ts_pal_dbg.p_nobeam : ts_pal_dbg.p_norow, beam);
+        if (beam == -2) TSPAL_APPLIED(p_nobeam, beam); else TSPAL_APPLIED(p_norow, beam);
         tsPaletteFlush();
         ts_pal_flushes++;
         return;
@@ -2633,7 +2651,7 @@ void VIDEO::tsPalettePoll(bool force) {
     const uint32_t pos = ts_render_pos;
     int dseq = (int)(((pos >> 16) - ts_pal_seq) & 0x0F);
     if (dseq >= 8) dseq -= 16;
-    if (dseq < 0) { ts_pal_dbg.blocked_seq++; return; }   // renderer still on an earlier frame: nothing new is on screen yet
+    if (dseq < 0) { TSPAL_COUNT(blocked_seq); return; }   // renderer still on an earlier frame: nothing new is on screen yet
     const int32_t top = (int32_t)lin_end;
     const int32_t doneTo = top + (int32_t)(pos & 0xFFFF) - 1;   // last completed row of the renderer's frame
     bool apply;
@@ -2646,11 +2664,11 @@ void VIDEO::tsPalettePoll(bool force) {
         apply = (beam < 0) ? (want <= top || doneTo >= top) : (beam >= want || beam <= doneTo);
     }
     if (apply) {
-        tsPalDbgApplied(dseq ? ts_pal_dbg.p_later : (beam < 0 ? ts_pal_dbg.p_blank : ts_pal_dbg.p_vis), beam);
+        if (dseq) TSPAL_APPLIED(p_later, beam); else if (beam < 0) TSPAL_APPLIED(p_blank, beam); else TSPAL_APPLIED(p_vis, beam);
         tsPaletteFlush();
         ts_pal_flushes++;
     } else {
-        ts_pal_dbg.waited++;
+        TSPAL_COUNT(waited);
     }
 }
 
@@ -6728,7 +6746,9 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
         tsPalettePoll(false);
         ts_pal_flushes = 0;
         tsPalDbgPrint();
+#if TSPAL_DBG
         ts_frame_start_us = time_us_64();
+#endif
     }
 
     static uint8_t skipCnt = 0;
