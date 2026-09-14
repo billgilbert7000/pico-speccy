@@ -4670,6 +4670,129 @@ After this there are 162 bytes of alignment fill left in `.bss`+`.data` combined
 — nothing more to reclaim there. SCRATCH_Y is now full; SCRATCH_X has ~760 B.
 NOT hw-tested.
 
+## Pentagon 100 KB vs TS-Conf 30 KB free: the 71 448 B ledger, and the heap as a list of REGIONS (2026-09-14, NOT hw-tested)
+
+Owner's log 2026-09-14 (`logs/devttyACM0_2026_09_14.10.59.59.700.txt`, build 10:50:30,
+DVp2 480p, GS off): `setup: COMPLETE freeHeap=102992` on Pentagon, `31544` on TS-Conf —
+**71 448 B apart**, and every byte of it is in three lines of the same log:
+
+| where | Pentagon | TS-Conf | diff | what |
+|---|---|---|---|---|
+| `[OVL] heap ceiling` | +54 528 B over all windows | +0 B | **54 528** | the three overlay windows: TS 22 272 + Z80 DMA 5 632 + GS 26 624 |
+| `[TSC1] core1 line renderer ON` | — | 10 768 B | **10 776** | the core1 job ring (512 x 12) + 128 TSU states + 4 SFILE slots, claimed at boot |
+| `ext_ram: pages` | −2 048 | −8 192 | **6 144** | 250 page descriptors + `ram[]` slots vs 58 (~32 B/page) |
+
+The first line is the one that matters and it was a LAYOUT defect, not a cost: on the
+TS-Conf boot the Z80 DMA and GS windows were also "to the heap" (GS off), but the heap
+ceiling was the base of the LOWEST resident window and `.tsovl` is the lowest — so
+32 256 B of released windows sat above the ceiling and reached nobody (the header's
+own table said "TS on -> heap gains nothing"). The TS window itself (22 272, of which
+19 152 used: 12 460 code/ro/data + 6 692 bss) is real TS-Conf cost; so are the ring and
+the descriptors. Everything else — VIDEO::Init, audio, the 17.5 KB tail from `audio init
+done` to `COMPLETE` (HDMI audio queue+rings 8 704, the inserted TRD's `rvmwdDisk` ~2.8 KB,
+tape/Z80/CPU reset, the rest) — costs both machines the same.
+
+**Fix: `_sbrk` JUMPS over a resident window** (`src/HeapRegions.h`, used by
+`CodeOverlay.cpp`). The heap is a list of regions — the base `[__end__, first resident
+window)` plus every run of released windows above — and when a request does not fit the
+current region the cursor moves to the first higher region that takes it whole. This
+leans on the allocator the firmware actually links, **newlib's dlmalloc 2.6.4**
+(`_mallocr.c` `malloc_extend_top`, NOT nano malloc — `__malloc_av_` in the ELF): a
+MORECORE that returns an address other than the old top end is its "foreign sbrk" case,
+it fences the old top with two in-use fenceposts and FREES it into the bins, so the base
+tail is not lost. Two dlmalloc facts shape the numbers: non-initial extensions are
+rounded UP to 4 KB pages, so a region is entered only by a request whose rounded size
+fits and its last <4 KB are never handed out (`hr_usable`); and it adds the jumped-over
+gap to `sbrked_mem`, so `mallinfo().arena/uordblks` over-report by the window size
+(`getFreeHeap` uses `fordblks` and is unaffected). Expected on the same boot:
+
+- TS-Conf, GS off: base + `[dma gs]` = **+28 608 B usable** (32 256 page-rounded, −64)
+  → ~60 KB free at 480p, ~33 KB at 576p (FB 103 680 vs 76 800).
+- TS-Conf + GS: base + `[dma]` = +4 032 B — the DMA window alone is one usable page.
+  **576p + TS-Conf + NeoGS stays at the edge**: both big windows are resident and the
+  remaining levers are the ring (10.8 KB: 512 jobs could be ~320, TSU states 128 → 64,
+  or the block into the TS window's 3 120 B slack + a bigger AUTO term), the page
+  descriptors (6 KB; PSRAM would put `pagePtr()` reads behind XIP) and the common tail.
+- Pentagon (+GS): unchanged — one region, the heap already reached through TS+DMA.
+- The ordering rule in `CodeOverlay.h` is demoted: any released window is reachable now;
+  order only decides how many 4 KB rounding losses there are (windows released TOGETHER
+  should be adjacent — `.dmaovl`/`.gsovl` are).
+
+`getFreeHeap()` adds `heap_stranded_bytes()` (regions the cursor has not reached are
+free by construction), `getContiguousHeap()` is `max(gap under the ceiling, largest
+stranded region)` — both are allocation GATES, so they must promise only what a malloc
+gets. `claimForTsconf/claimForDma` test the region's HIGH-WATER MARK (`hr_window_touched`),
+not the cursor: a window skipped by a jump is pristine even though the cursor is above
+it. Memory Info gained an `above overlay` line; the boot log prints `[OVL] heap region N:
+lo..hi (B) <- sbrk` per region and `+N B stranded` on the ceiling line.
+
+**Test: `tools/heap_regions_test.c` drives NEWLIB'S OWN `_mallocr.c` (4.1.0, the
+toolchain's) through `HeapRegions.h`** — recipe in its header (`gh api` fetch + a sed
+that renames the entry points, one process per scenario because dlmalloc's arena is
+global). Four scenarios (TS-only 576p FB + fill + jump + free/realloc/calloc/trim + FB
+again; TS+GS one-page DMA window; Pentagon+GS single region + the DMA claim edge;
+DMA-only where the TS window is used and the GS window jumped to), each checked to
+FAIL under a hand mutation (no jump / no hwm / unrounded usable). **Re-run after any
+change to HeapRegions.h.** Cost: +56 B .data, +4 B .bss. Test ELF
+`debug/DVp2-heapregions-1.0.5.elf`. **Owed on hardware:** a TS-Conf boot showing two
+`[OVL] heap region` lines and `setup: COMPLETE` ~28 KB higher, then 576p TS-Conf without
+GS; a Pentagon boot unchanged; and a long TS session (the jump happens the first time a
+malloc no longer fits the base — mid-session, under a running machine).
+
+**hw 2026-09-14 (owner, build 11:17): TS-Conf + NeoGS 480p `COMPLETE` 41 896 (was ~27 K);
+576p + NeoGS + UART console BOOTS at `COMPLETE freeHeap=15000` — and with one more
+subsystem on it PANICKED (`*** PANIC *** Out of memory` right after `AY init done`,
+i.e. inside `Subsystems::applyPending`).** The 576p ledger from that log: base region
+153 908 → 576p FB 103 680 **in 4 chunks** (no 100 KB hole after the first 480p claim; the
+chunked path works) → 45 544 → TSC1 ring 34 768 → pages 26 576 → GS::init (the private
+prefetch cache, 4.4 KB heap) 21 664 → HDMI audio blob 8 704 + the rest → 15 000. Two
+fixes from it (build 11:5x, `debug/DVp2-heapregions2-1.0.5.elf`). **hw 2026-09-14 (owner):
+576p + TS-Conf + NeoGS + Covox + TSFM, UART console off, boots at 14 KB free — the
+configuration that panicked before — and the owner called it enough for now.** The
+further levers below are recorded, not scheduled:
+
+- **`src/TryAlloc.h` — `tryMalloc`/`tryCalloc` (OSDMain.cpp) and `operator new(std::nothrow)`
+  routed to them (cxx_shims.cpp).** pico_malloc panics on NULL, so every `if (!p)` after a
+  `new (std::nothrow)` or `calloc` in `Subsystem.cpp` was dead code — a subsystem coming
+  up on a thin heap took the firmware down instead of switching itself off. The helper
+  probes `getLargestAllocatable()` (the non-panicking `__real_malloc` binary search) and
+  then allocates through the wrapped, mutex-taking malloc; the ten subsystem buffers with
+  a real fallback (Covox, PIT, TSFM, OPLL + its queue, SN, OPL3 + its queue, MIDI L/R) use
+  it, and the nothrow `new` of every chip object does now by construction. MB02/DivMMC's
+  `calloc`s stay panicking on purpose: their hot paths would dereference the NULL later,
+  and a panic at boot is the better failure. Check `nm`: `operator new(unsigned int,
+  std::nothrow_t const&)` must be at a `cxx_shims` address, not libstdc++'s `new_opnt.o`.
+- **Butter pages leave the LRU pool** (`assign_ram`, ESPectrum.cpp: `locked=true` for a
+  butter page when `pageBudgetButter() >= MEM_PG_CNT * MEM_PG_SZ` and there is no SPI
+  tier). `mem_desc_t::pages` is a `std::list` — one 16 B heap node per unlocked page — and
+  its only readers are `_sync` (victim search for a NON-pointer page being banked in:
+  never runs when every page is a POINTER) and `revoke_1_ram_page` (wants an SRAM page;
+  pages 1-3 are pushed first). 242 nodes on TS-Conf's 250 pages = **−3.9 KB**, −800 B on
+  Pentagon; Murmuzavr past the chip (swap pages exist) pools everything as before.
+
+**What is left for 576p + TS-Conf + NeoGS, with sizes, all owner decisions** (measured
+14 KB free with Covox + TSFM on and the console off; ~10 KB with it on): `TSCONF_HOT_IN_RAM` OFF = −3 840 B of
+window on TS sessions (~0.8 ms/frame on port-heavy titles, measured at a scene already at
+full rate); the TSC1 block (10 768 B: 512 jobs are needed — `haltAdvanceTo` posts a whole
+288-line frame at once and the poster waits on a full ring — but TSU states 128 → 64 and
+SFILE slots 4 → 2 are −2.3 KB against more `tsC1WaitJob` stalls on titles that stream
+sprites/raster effects; or move the TSU states + job tags, 2 576 B, into the TS window's
+3 120 B slack as `TS_OVL_BSS`); the GS private prefetch cache (4.4 KB, `s_pc_*`) is
+allocated on butter too — `gs_mem_raw_read` still reaches `gs_pc_read` for classic-GS
+banked pages and any non-pointer-backed NeoGS window, so skipping it needs a path audit
+first; `osd_info_buf` 1 536 B static → lazy (13 sites, one returns the pointer); the UART
+console's 4 KB ring is the price of the console (the boot burst is ~3.6 KB of lines at
+115200) and stays. Not levers: the HDMI audio blob (ISR-read, SRAM only), `conv_color`
+(PIO palette), aligning the window bases (the base tail dlmalloc cannot use would just
+become window slack).
+
+**TurboSound FM SRAM, measured the same day (owner's question):** static **11 B**
+(`opnfm[2]` pointers + `TsfmSubsys` flags; `s_sin_tab`/`s_tl_base` pointers 8 B), code all
+in FLASH (no `.time_critical` from OpnFm.cpp in the map). Heap ONLY while Audio →
+TurboSound FM is on: 2 x `sizeof(OpnFm)` = **2 016 B** + shared tables 2 560 B (sine 2 048
++ tl base 512) + `audioBufferFM` 1 280 B = **5 856 B**, plus the second AY (`AySound`
+chip1, 1 612 B) if TurboSound was not already on → **~7.5 KB**, freed on Off. Not a lever.
+
 ## What belongs in a machine overlay: the audit (2026-09-14, NOT hw-tested)
 
 The question was whether the three heavy, mutually exclusive machines — TS-Conf,

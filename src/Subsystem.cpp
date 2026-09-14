@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <new>
+#include "TryAlloc.h"
 
 #include "ESPectrum.h"
 #include "Config.h"
@@ -103,7 +104,7 @@ bool CovoxSubsys::apply() {
 
     if (wanted) {
         if (!ESPectrum::audioBufferCovoxL) {
-            ESPectrum::audioBufferCovoxL = (uint8_t*)calloc(2 * ESP_AUDIO_SAMPLES_PENTAGON, 1);
+            ESPectrum::audioBufferCovoxL = (uint8_t*)tryCalloc(2 * ESP_AUDIO_SAMPLES_PENTAGON);
             if (!ESPectrum::audioBufferCovoxL) {
                 Debug::log("CovoxSubsys: OOM");
                 wanted = false;
@@ -141,7 +142,7 @@ bool PitSubsys::apply() {
 
     if (wanted) {
         if (!ESPectrum::audioBufferPIT) {
-            ESPectrum::audioBufferPIT = (uint8_t*)calloc(ESP_AUDIO_SAMPLES_PENTAGON, 1);
+            ESPectrum::audioBufferPIT = (uint8_t*)tryCalloc(ESP_AUDIO_SAMPLES_PENTAGON);
             if (!ESPectrum::audioBufferPIT) {
                 Debug::log("PitSubsys: OOM");
                 wanted = false;
@@ -225,7 +226,7 @@ bool TsfmSubsys::apply() {
 
     if (wanted) {
         if (!ESPectrum::audioBufferFM)
-            ESPectrum::audioBufferFM = (int16_t*)calloc(ESP_AUDIO_SAMPLES_PENTAGON, sizeof(int16_t));
+            ESPectrum::audioBufferFM = (int16_t*)tryCalloc(ESP_AUDIO_SAMPLES_PENTAGON * sizeof(int16_t));
         if (!opnfm[0]) opnfm[0] = new (std::nothrow) OpnFm();
         if (!opnfm[1]) opnfm[1] = new (std::nothrow) OpnFm();
         if (!ESPectrum::audioBufferFM || !opnfm[0] || !opnfm[1] || !OpnFm::tablesReady()) {
@@ -272,10 +273,10 @@ bool OpllSubsys::apply() {
 
     if (wanted) {
         if (!ESPectrum::audioBufferOPLL)
-            ESPectrum::audioBufferOPLL = (int16_t*)calloc(ESP_AUDIO_SAMPLES_PENTAGON, sizeof(int16_t));
+            ESPectrum::audioBufferOPLL = (int16_t*)tryCalloc(ESP_AUDIO_SAMPLES_PENTAGON * sizeof(int16_t));
         if (!opllfm) opllfm = new (std::nothrow) OpllFm();
         if (!ESPectrum::opllWriteQueue)
-            ESPectrum::opllWriteQueue = (uint32_t*)malloc(256 * sizeof(uint32_t));
+            ESPectrum::opllWriteQueue = (uint32_t*)tryMalloc(256 * sizeof(uint32_t));
         ESPectrum::opllQHead = ESPectrum::opllQTail = 0;
         // A missing queue is not fatal — OPLLPortWrite degrades to direct writes.
         if (!ESPectrum::audioBufferOPLL || !opllfm || !OpllFm::tablesReady()) {
@@ -374,7 +375,7 @@ bool SnSubsys::apply() {
 
     if (wanted) {
         if (!ESPectrum::audioBufferSN)
-            ESPectrum::audioBufferSN = (uint8_t*)calloc(ESP_AUDIO_SAMPLES_PENTAGON, 1);
+            ESPectrum::audioBufferSN = (uint8_t*)tryCalloc(ESP_AUDIO_SAMPLES_PENTAGON);
         if (!snChip) snChip = new (std::nothrow) SnSound();
         if (!ESPectrum::audioBufferSN || !snChip) {
             Debug::log("SnSubsys: OOM, free=%u", (unsigned)getFreeHeap());
@@ -416,13 +417,13 @@ bool OplSubsys::apply() {
 
     if (wanted) {
         if (!ESPectrum::audioBufferOPL_L) {
-            ESPectrum::audioBufferOPL_L = (int16_t*)calloc(2 * ESP_AUDIO_SAMPLES_PENTAGON, sizeof(int16_t));
+            ESPectrum::audioBufferOPL_L = (int16_t*)tryCalloc(2 * ESP_AUDIO_SAMPLES_PENTAGON * sizeof(int16_t));
             ESPectrum::audioBufferOPL_R = ESPectrum::audioBufferOPL_L
                 ? ESPectrum::audioBufferOPL_L + ESP_AUDIO_SAMPLES_PENTAGON : nullptr;
         }
         if (!oplfm) oplfm = new (std::nothrow) OplFm();
         if (!ESPectrum::oplWriteQueue)
-            ESPectrum::oplWriteQueue = (uint32_t*)malloc(512 * sizeof(uint32_t));
+            ESPectrum::oplWriteQueue = (uint32_t*)tryMalloc(512 * sizeof(uint32_t));
         ESPectrum::oplQHead = ESPectrum::oplQTail = 0;
         // A missing queue is not fatal — OPLPortWrite degrades to direct writes.
         if (!ESPectrum::audioBufferOPL_L || !oplfm) {
@@ -479,10 +480,10 @@ bool MidiSubsys::apply() {
 
     if (wanted) {
         if (!ESPectrum::audioBufferMIDI_L) {
-            ESPectrum::audioBufferMIDI_L = (uint8_t*)calloc(ESP_AUDIO_SAMPLES_PENTAGON, 1);
+            ESPectrum::audioBufferMIDI_L = (uint8_t*)tryCalloc(ESP_AUDIO_SAMPLES_PENTAGON);
         }
         if (!ESPectrum::audioBufferMIDI_R) {
-            ESPectrum::audioBufferMIDI_R = (uint8_t*)calloc(ESP_AUDIO_SAMPLES_PENTAGON, 1);
+            ESPectrum::audioBufferMIDI_R = (uint8_t*)tryCalloc(ESP_AUDIO_SAMPLES_PENTAGON);
         }
         if (!ESPectrum::audioBufferMIDI_L || !ESPectrum::audioBufferMIDI_R) {
             Debug::log("MidiSubsys: OOM");

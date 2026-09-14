@@ -567,6 +567,17 @@ static void assign_ram(int i) {
   static size_t butter_remains = Buffer::pageBudgetButter();
   static size_t spi_budget     = Buffer::pageBudgetSpi();
   static size_t butter_idx = 0;
+  // A butter (XIP) page is a plain pointer; the only thing the LRU pool
+  // (`mem_desc_t::pages`, one 16 B heap node per unlocked page) ever does with a
+  // POINTER page is hand its SRAM to a NON-pointer page being banked in
+  // (`_sync`, SPI/swap tiers) — and `revoke_1_ram_page` wants an SRAM page, which
+  // pages 1-3 supply first. So when every page fits in butter (no SPI, no swap
+  // page can exist) a butter page in the pool is a node nobody will ever visit:
+  // 242 of them on TS-Conf's 250 pages = 3.9 KB of heap, 50 on Pentagon. Pass
+  // locked=true (= not pooled) for them in that case; Murmuzavr past the chip
+  // still pools everything, as before. hw 2026-09-14 ledger, "ext_ram: pages".
+  static const bool butter_holds_all =
+      Buffer::pageBudgetButter() >= (size_t)MEM_PG_CNT * MEM_PG_SZ && Buffer::pageBudgetSpi() == 0;
   // Profi DS80 hires color attr pages (56/58) + CP/M's hot working page (61):
   // on SPI-PSRAM boards the Profi BIOS selects bankLatch=56..63 (portDFFD[2:0]=7)
   // causing sync()/swaps 50-100×/frame → ~1 FPS.  Fix: allocate as SRAM-backed
@@ -632,7 +643,7 @@ static void assign_ram(int i) {
   } else {
     if (butter_remains >= MEM_PG_SZ) {
       MemESP::ram[i].assign_ram(
-          (uint8_t *)PSRAM_DATA + (butter_idx++) * MEM_PG_SZ, i, false);
+          (uint8_t *)PSRAM_DATA + (butter_idx++) * MEM_PG_SZ, i, /*locked=*/butter_holds_all);
       butter_remains -= MEM_PG_SZ;
       ++butter_pages;
     } else if (spi_budget >= ((size_t)MEM_PG_SZ * (i + 1))) {

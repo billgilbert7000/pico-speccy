@@ -16,6 +16,7 @@
 #include <functional>     // std::__throw_bad_function_call
 #include <sys/reent.h>
 #include "pico.h"          // panic()
+#include "TryAlloc.h"
 
 namespace __gnu_cxx {
 // libstdc++'s default std::terminate handler prints the active exception's
@@ -44,3 +45,11 @@ void __throw_out_of_range_fmt(const char* fmt, ...) { panic("out_of_range: %s", 
 // routine only re-derives the UTC defaults tzvars.o already holds, and it costs
 // siscanf → vfiscanf → iswspace → the 28 KB Unicode tables to do so.
 extern "C" void _tzset_unlocked_r(struct _reent*) {}
+
+// Replaceable allocation functions: make `new (std::nothrow)` mean what it says.
+// libstdc++'s versions call plain operator new, i.e. pico_malloc's malloc, which
+// PANICS on NULL — so every `if (!p)` after a nothrow new in this firmware was
+// unreachable. These go through TryAlloc (probe, then allocate). The matching
+// nothrow deletes need no replacement: libstdc++'s forward to operator delete.
+void* operator new(std::size_t n, const std::nothrow_t&) noexcept   { return tryMalloc(n); }
+void* operator new[](std::size_t n, const std::nothrow_t&) noexcept { return tryMalloc(n); }

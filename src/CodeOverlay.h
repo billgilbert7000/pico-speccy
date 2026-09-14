@@ -16,20 +16,20 @@
 // this boot actually needs; the rest are handed to the heap by raising the
 // ceiling our own _sbrk() enforces.
 //
-// ORDERING IS LOAD-BEARING and it is why .tsovl sits BELOW .gsovl. There is one
-// sbrk ceiling and the heap grows upward, so only a window adjacent to the heap
-// top can be given back: with a reserved .gsovl above it, releasing .tsovl still
-// gains the heap those bytes (ceiling moves up to .gsovl's base), but releasing
-// .gsovl under a reserved .tsovl gains nothing — its address range is stranded
-// above the ceiling. TS-Conf is the rarer feature, so it takes the lower slot:
-// Layout, heap at the bottom: [heap ...][.tsovl][.dmaovl][.gsovl][stack], ordered
-// by DESCENDING probability of being released. The heap gains the contiguous
-// prefix of released windows, so e.g.:
-//   nothing on             -> heap gains all three
-//   GS on, TS+DMA off      -> heap gains .tsovl + .dmaovl   (the common case)
-//   DMA on, TS off         -> heap gains .tsovl only
-//   TS on                  -> heap gains nothing (there is nothing below it)
-// A window whose feature is ON is never given back — only a boot decision (or a
+// THE HEAP IS A LIST OF REGIONS (since 2026-09-14). There is one upward-growing
+// sbrk cursor, but our _sbrk (CodeOverlay.cpp) JUMPS over a resident window into
+// the released windows above it when a request no longer fits below — newlib's
+// dlmalloc was built for a non-contiguous MORECORE (it fences the old top and
+// frees it). So every released window reaches the heap whatever is resident:
+// Layout, heap at the bottom: [heap ...][.tsovl][.dmaovl][.gsovl][stack].
+//   nothing on             -> one region, heap gains all three
+//   GS on, TS+DMA off      -> one region, heap gains .tsovl + .dmaovl
+//   TS on, GS off          -> two regions: base + [.dmaovl .gsovl] (32 KB)
+//   TS on, GS on           -> two regions: base + [.dmaovl]
+// A stranded region loses its last <4 KB to dlmalloc's page rounding, so the
+// order still matters a little: windows most often released TOGETHER should be
+// adjacent (one region, one rounding loss), which .dmaovl/.gsovl are. A window
+// whose feature is ON is never given back — only a boot decision (or a
 // mid-session claim, below) settles that.
 //
 // No relocation is involved and no PIC: the VMA is fixed, so the linker resolved

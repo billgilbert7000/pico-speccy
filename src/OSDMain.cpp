@@ -5099,6 +5099,12 @@ extern "C" void *sbrk(intptr_t incr);
 // memory that _sbrk() then refuses ends in pico_malloc's panic-on-OOM.
 // Answers &__HeapLimit when the overlay is compiled out.
 extern "C" char* heap_ceiling_now(void);
+// The heap is a list of REGIONS since 2026-09-14 (CodeOverlay.cpp): a released
+// overlay window above a resident one is heap too, and _sbrk jumps into it when a
+// request no longer fits below. Those regions are free by construction and count
+// here; the two probes read them through these (0 with the overlays compiled out).
+extern "C" size_t heap_stranded_bytes(void);
+extern "C" size_t heap_stranded_largest(void);
 
 size_t getFreeHeap(void) {
     struct mallinfo mi = mallinfo();
@@ -5107,16 +5113,19 @@ size_t getFreeHeap(void) {
     char *brk = (char *)sbrk(0);
     char *lim = heap_ceiling_now();
     size_t sbrk_free = (brk < lim) ? (size_t)(lim - brk) : 0;
-    return mi.fordblks + sbrk_free;
+    return mi.fordblks + sbrk_free + heap_stranded_bytes();
 }
 
 // Upper bound on a single contiguous allocation that will succeed without
 // tripping SDK's check_alloc panic. Ignores fordblks (may be fragmented);
-// trusts only sbrk headroom, which is always contiguous.
+// trusts only sbrk headroom, which is always contiguous — either the gap under
+// the current ceiling or a whole stranded region _sbrk would jump into.
 size_t getContiguousHeap(void) {
     char *brk = (char *)sbrk(0);
     char *lim = heap_ceiling_now();
-    return (brk < lim) ? (size_t)(lim - brk) : 0;
+    size_t gap = (brk < lim) ? (size_t)(lim - brk) : 0;
+    size_t str = heap_stranded_largest();
+    return gap > str ? gap : str;
 }
 
 // Largest single block that malloc() can actually satisfy RIGHT NOW, without
@@ -5140,6 +5149,18 @@ extern "C" size_t getLargestAllocatable(void) {
         else   { hi = mid - 1; }             // too big → search lower
     }
     return lo;
+}
+
+// Non-panicking allocation (TryAlloc.h): probe first, allocate second.
+extern "C" void* tryMalloc(size_t n) {
+    if (n == 0) n = 1;
+    if (getLargestAllocatable() < n) return nullptr;
+    return malloc(n);
+}
+extern "C" void* tryCalloc(size_t n) {
+    void* p = tryMalloc(n);
+    if (p) memset(p, 0, n);
+    return p;
 }
 
 // Generic read-only text dialog with vertical scroll
@@ -5812,13 +5833,16 @@ void OSD::MemoryInfo() {
     char*  heap_lim    = heap_ceiling_now();
     size_t sram_total  = (size_t)((uintptr_t)heap_lim - SRAM_BASE);  // up to stack top
     size_t sram_static = (size_t)((uintptr_t)&end - SRAM_BASE);          // data + bss
-    size_t heap_total  = (size_t)((uintptr_t)heap_lim - (uintptr_t)&end);
+    size_t heap_strand = heap_stranded_bytes();                          // released windows above a resident one
+    size_t heap_total  = (size_t)((uintptr_t)heap_lim - (uintptr_t)&end) + heap_strand;
     size_t heap_free   = getFreeHeap();
     size_t heap_used   = heap_total > heap_free ? heap_total - heap_free : 0;
     pos += snprintf(buf + pos, sizeof(buf) - pos, " SRAM (%d KB usable):\n", (int)(sram_total / KB));
     pos += snprintf(buf + pos, sizeof(buf) - pos, "  Static bss+data: %d KB\n", (int)(sram_static / KB));
     pos += snprintf(buf + pos, sizeof(buf) - pos, "  Heap used/total: %d/%d KB\n", (int)(heap_used / KB), (int)(heap_total / KB));
     pos += snprintf(buf + pos, sizeof(buf) - pos, "  Heap free      : %d KB\n", (int)(heap_free / KB));
+    if (heap_strand)
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "   above overlay : %d KB\n", (int)(heap_strand / KB));
     pos += snprintf(buf + pos, sizeof(buf) - pos, "  Largest block  : %d KB\n", (int)(getLargestAllocatable() / KB));
 
     // ── FLASH ──────────────────────────────────────────────────────────────────
