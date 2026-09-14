@@ -3870,7 +3870,19 @@ artifacts: `TUNNELZX` disassembled from the TRD (runtime = file − 0x4810),
 - **`ESPectrum::multUser` vs `multiplicator`**: multUser = the user's turbo
   pick (both hotkeys write it, NVS-persisted as `Config::turbo`, restored in
   setup); multiplicator = the LIVE speed, which guest hardware may pull down
-  (EFF7 D4) or override (Profi #028B).
+  (EFF7 D4) or override (Profi #028B) — and on TS-Conf simply OWNS
+  (`applyZclk` writes it and leaves multUser alone).
+  **Both turbo hotkeys therefore cycle from `multiplicator`, never from
+  multUser** (Alt+F2 `HK_TURBO` in OSDMain.cpp, 4 states; Menu+F11 in
+  ESPectrum.cpp, 3 states) — hw-confirmed 2026-09-14. Stepping the user's pick
+  meant that after ANY guest-set clock the next press restarted at 3.5 MHz
+  instead of continuing from what the machine was running: on TS-Conf, where the
+  user never has to touch turbo at all, multUser sat at 0 for the whole session
+  and the hotkey looked broken. The F8 stats background reads `multiplicator`
+  for the same reason, and 14 MHz is painted `C_ACCENT` (green in all three
+  themes), NOT `C_ICON_R` — it is an ordinary clock there, and red reads as an
+  error. Light stats backgrounds (that green, and C_ICON_Y for 28 MHz) take
+  `C_BG` as ink: Slate's `C_TEXT` is near-white and leaves under 2:1 on both.
 - **EFF7 bit audit** (vs speccy.info): D0 16col — now honored unconditionally
   on is1024 (lazy 512 B LUT; the menu "16 colours" toggle still gates the
   other Pentagons); D1 512x192 NOT implemented (only real gap; the DS80

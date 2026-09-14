@@ -1305,15 +1305,24 @@ void OSD::drawStats() {
         nm::gfxComputeSurface();
         nm::gfxInstallPalette();          // applyPalette may have rewritten our block
         const int base = nm::uiPaletteBase();
+        // 14 MHz is an ordinary clock on TS-Conf (TS-BIOS, .spg headers and games
+        // all ask for it), so it must not be painted in the colour every other
+        // panel uses for an error: green. C_ACCENT is a green in all three
+        // themes. The ink is paired with the background rather than always
+        // C_TEXT — in the Slate theme that is near-white, which on the green and
+        // on the yellow leaves under 2:1 contrast; the ZX theme's C_TEXT is
+        // already black, so nothing changes there.
         nm::UiColor bg;
         if (ESPectrum::maxSpeed)                bg = nm::C_ICON_C;
         else switch (ESPectrum::multiplicator) {
             case 1:  bg = nm::C_SEL_BG;  break;
-            case 2:  bg = nm::C_ICON_R;  break;
+            case 2:  bg = nm::C_ACCENT;  break;
             case 3:  bg = nm::C_ICON_Y;  break;
             default: bg = nm::C_FOOT_BG; break;
         }
-        VIDEO::vga.setTextColor((uint8_t)(base + nm::C_TEXT), (uint8_t)(base + bg));
+        const nm::UiColor ink = (bg == nm::C_ACCENT || bg == nm::C_ICON_Y)
+                                    ? nm::C_BG : nm::C_TEXT;
+        VIDEO::vga.setTextColor((uint8_t)(base + ink), (uint8_t)(base + bg));
         VIDEO::vga.setFont(Font6x8);
         VIDEO::vga.setCursor(x, y);
         VIDEO::vga.print(stats_lin1);
@@ -2099,11 +2108,16 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
             if (VIDEO::OSD) OSD::drawStats(); // Redraw stats for 16:9 modes
         } else
         if (hkIdx == Config::HK_TURBO) { // Turbo mode
-            ESPectrum::multUser += 1;
-            if (ESPectrum::multUser > 3) {
-                ESPectrum::multUser = 0;
-            }
-            ESPectrum::multiplicator = ESPectrum::multUser;
+            // Cycle from the LIVE clock, never from multUser. The guest owns the
+            // clock on several machines — TS-Conf writes it outright through
+            // SysConfig ZCLK (TsConf::applyZclk sets multiplicator and leaves
+            // multUser alone), Pentagon-1024 EFF7 D4 and Profi #028B pull it
+            // down — so stepping the user's pick restarted the cycle at 3.5 MHz
+            // instead of continuing from what the machine is actually running.
+            uint8_t next = ESPectrum::multiplicator + 1;
+            if (next > 3) next = 0;
+            ESPectrum::multUser = next;
+            ESPectrum::multiplicator = next;
             CPU::updateStatesInFrame();
             // TS-Conf: this is an override of the guest's SysConfig ZCLK; the
             // guest's next write to it takes the clock back (TsConf::applyZclk).

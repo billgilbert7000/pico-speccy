@@ -2114,7 +2114,10 @@ IRAM_ATTR void ESPectrum::processKeyboard() {
           // (the configurable Turbo hotkey also offers 28 MHz as a 4th state)
           static const char* const mhz[3] =
               { " CPU: 3.5 MHz " , " CPU: 7 MHz   ", " CPU: 14 MHz  " };
-          ESPectrum::multUser = (ESPectrum::multUser + 1) % 3;
+          // From the LIVE clock, not the user's pick — see the HK_TURBO handler
+          // in OSDMain.cpp: a guest-set clock (TS-Conf ZCLK, EFF7 D4, #028B)
+          // is what the user sees and what the cycle must continue from.
+          ESPectrum::multUser = (ESPectrum::multiplicator + 1) % 3;
           ESPectrum::multiplicator = ESPectrum::multUser;
           CPU::updateStatesInFrame();
           // TS-Conf: an override until the guest's next SysConfig write (applyZclk).
