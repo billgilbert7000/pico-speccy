@@ -310,7 +310,7 @@ SECTIONS
         "ERROR: .gsovl overflowed the GS code overlay window. Re-link with -DGSOVL_WIN_SIZE=40960, read the real size from `arm-none-eabi-size -A <elf> | grep .gsovl`, then fix the AUTO arithmetic in CMakeLists.txt")
     ASSERT(__dmaovl_end <= __dmaovl_win_end,
         "ERROR: .dmaovl overflowed the Z80 DMA overlay window. Re-link with -DDMAOVL_WIN_SIZE=12288, read the real size from `arm-none-eabi-size -A <elf> | grep .dmaovl`, then fix the AUTO arithmetic in CMakeLists.txt")
-    ASSERT(__tsovl_end <= __tsovl_win_end,
+    ASSERT(__tsovl_bss_end <= __tsovl_win_end,
         "ERROR: .tsovl overflowed the TS-Conf code overlay window. Re-link with -DTSOVL_WIN_SIZE=24576, read the real size from `arm-none-eabi-size -A <elf> | grep .tsovl`, then fix the AUTO arithmetic in CMakeLists.txt")
     ASSERT(__end__ <= __tsovl_win_start,
         "ERROR: .bss/heap start reaches into the code overlay windows")

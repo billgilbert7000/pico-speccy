@@ -59,9 +59,16 @@
 // already had.
 #define TS_OVL_CODE __attribute__((section(".tsovl")))
 #define TS_OVL_RO   __attribute__((section(".tsovl_ro")))
+// Zero-initialised DATA only TS-Conf touches (the ts256 palette-bank tables,
+// read per pixel by core1 — SRAM at a fixed VMA like the code, so unlike a
+// palloc block it cannot land in PSRAM). No load image: .tsovl_bss is NOLOAD
+// and CodeOverlay zeroes it whenever the window is claimed. Same rule as the
+// code — every access must sit behind a TS-only gate (ts_pal256_live).
+#define TS_OVL_BSS  __attribute__((section(".tsovl_bss")))
 #else
 #define TS_OVL_CODE __not_in_flash("tsconf")
 #define TS_OVL_RO   __not_in_flash("tsconf_ro")
+#define TS_OVL_BSS
 #endif
 
 // The GS family needs NO source annotation: its whole directory (src/GS/) is

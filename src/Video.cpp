@@ -2185,14 +2185,19 @@ static void tsPairPaletteLoad() {
 // must fit them all with headroom); nb == 1 is the old single-table scheme with
 // the beam rule below (256c titles with a full 256-colour palette land there).
 #define TS256_MAX_BANKS 4
-static uint8_t  ts256_off[256];        // CRAM index → offset inside a bank
-static uint8_t  ts256_map_b[TS256_MAX_BANKS][256];   // bank → CRAM index → hardware slot
-static uint16_t ts256_slot_col[256];   // offset → CRAM555 it currently shows, 0xFFFF = none
-static uint16_t ts256_slot_ref[256];   // cells mapped to the offset (256 cells can share one)
-static uint32_t ts256_dirty_b[TS256_MAX_BANKS][8];   // per bank: offsets whose colour must reach the hardware
+#define TS256_POOL      184                      // usable hardware slots (see ts256PoolInit)
+#define TS256_DIRTY_W   ((TS256_POOL + 31) / 32)
+// The tables live in the TS-Conf code overlay window (TS_OVL_BSS: SRAM at a
+// fixed VMA, zeroed when the window is claimed, heap on every other machine) —
+// every reader and writer is behind ts_pal256_live / the TS mode switch.
+static uint8_t  TS_OVL_BSS ts256_off[256];        // CRAM index → offset inside a bank
+static uint8_t  TS_OVL_BSS ts256_map_b[TS256_MAX_BANKS][256];   // bank → CRAM index → hardware slot
+static uint16_t TS_OVL_BSS ts256_slot_col[TS256_POOL];   // offset → CRAM555 it currently shows, 0xFFFF = none
+static uint16_t TS_OVL_BSS ts256_slot_ref[TS256_POOL];   // cells mapped to the offset (256 cells can share one)
+static uint32_t TS_OVL_BSS ts256_dirty_b[TS256_MAX_BANKS][TS256_DIRTY_W];   // per bank: offsets whose colour must reach the hardware
 static bool     ts256_valid = false;   // map assigned (else full rebuild)
 static bool     ts256_exhausted = false;   // a bank ran out of offsets (nearest-colour fallback used)
-static uint8_t  ts256_pool[184];
+static uint8_t  TS_OVL_BSS ts256_pool[TS256_POOL];
 static uint8_t  ts256_pool_n = 0;
 static uint8_t  ts256_nb = 1;          // palette banks in use
 static uint8_t  ts256_bs = 0;          // offsets per bank
@@ -2283,7 +2288,7 @@ static uint8_t ts256PickBanks() {
 static void ts256Assign(bool full) {
     ts256PoolInit();
     if (full || !ts256_valid) {
-        for (int i = 0; i < 256; i++) { ts256_slot_col[i] = 0xFFFF; ts256_slot_ref[i] = 0; }
+        for (int i = 0; i < TS256_POOL; i++) { ts256_slot_col[i] = 0xFFFF; ts256_slot_ref[i] = 0; }
         memset(ts256_dirty_b, 0, sizeof ts256_dirty_b);
         ts256_valid = false;
         ts256_exhausted = false;
@@ -2348,7 +2353,7 @@ static void ts256Assign(bool full) {
 // A freed offset keeps its dirty bit: the bank never got the colour, and the
 // offset's next owner must not inherit a slot only some banks hold.
 static void ts256ProgramBank(int b) {
-    for (int w = 0; w < 8; w++) {
+    for (int w = 0; w < TS256_DIRTY_W; w++) {
         uint32_t bits = ts256_dirty_b[b][w], keep = 0;
         while (bits) {
             const int bit = __builtin_ctz(bits); bits &= bits - 1;

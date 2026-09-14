@@ -2447,7 +2447,7 @@ top and bottom) nor the ts256 map (stable — 16 distinct colours every frame) w
   the mode to one bank (logged). The remap is now on in EVERY whole-line mode but TEXT
   (`wantPal256 = wantRender && !wantPair` — plain 16c and NOGFX included), which also made
   the per-line PalSel "raster hold" switch (`ts_palsel_raster`, tsPalSelRasterPoll) dead —
-  removed; a per-line PalSel effect is free under the remap. Cost +768 B .bss (the bank maps).
+  removed; a per-line PalSel effect is free under the remap. Cost: the ts256 tables (2296 B: four bank maps, cell offsets, per-slot colour/owner, dirty bits, pool) moved INTO the TS-Conf code overlay window as `TS_OVL_BSS` — a NOLOAD `.tsovl_bss` output section behind `.tsovl` (CMakeLists `TSOVL_SECTION`, AUTO window +2560 B), zeroed by `CodeOverlay::loadWindow` on every claim, heap on every other machine; static `.bss` went 74844 -> 72548 B (−1.5 KB against the pre-round tree). Same rule as the code: every access sits behind `ts_pal256_live`. Not a palloc block (the TS scratch-block trap: fixed SRAM VMA, cannot land in PSRAM).
   Host model (RobFgift-shaped permutations, 500 versions): offsets stay bounded, no
   exhaustion, zero mismatches; the demo's 37 colours pick 3 banks. What versioning does NOT
   fix is the pixel tear itself (single-buffered fb + drifting frames — inherent; V-Sync
@@ -2483,7 +2483,8 @@ top and bottom) nor the ts256 map (stable — 16 distinct colours every frame) w
   **hw 2026-09-14, owner on tspal9: "теперь все отлично"** — Ninja Gaiden back to normal,
   RobFgift clean, V-Sync off included. Not itemised beyond that; the 60 Hz-mode run and a
   VGA board are still owed, and the always-on 1 Hz `[TSPAL]` line still needs a CMake gate
-  (or a decision to keep it) before this lands in a release.
+  (or a decision to keep it) before this lands in a release. `debug/DVp2-tspal10-1.0.5.elf`
+  = tspal9 + the tables in the overlay window — **hw 2026-09-14, owner: "работает"**.
 - Hw check owed: RobFgift (no flicker, no magenta on the letters, clean colours with V-Sync
   OFF and on a 60 Hz mode — the pixel tear line may still be visible there), nygift's splash
   wipe, then the palette-changing titles — TMNT (256c, RAM→CRAM DMA every frame; expect nb=1

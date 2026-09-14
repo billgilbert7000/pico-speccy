@@ -12,6 +12,7 @@ extern "C" {
 // start == end, so the code below needs no per-window #if.
 extern char __tsovl_win_start[], __tsovl_win_end[];
 extern char __tsovl_start[], __tsovl_end[], __tsovl_source[];
+extern char __tsovl_bss_start[], __tsovl_bss_end[];
 extern char __dmaovl_win_start[], __dmaovl_win_end[];
 extern char __dmaovl_start[], __dmaovl_end[], __dmaovl_source[];
 extern char __gsovl_win_start[], __gsovl_win_end[];
@@ -64,6 +65,10 @@ static void recomputeCeiling() {
 
 static void loadWindow(char* dst, const char* src, size_t n) {
     if (n) memcpy(dst, src, n);
+    // The TS window carries a NOLOAD data tail (TS_OVL_BSS): crt0 never zeroes
+    // it (it is not .bss), and the heap may have used the bytes before a
+    // mid-session claim.
+    if (dst == __tsovl_start) memset(__tsovl_bss_start, 0, (size_t)(__tsovl_bss_end - __tsovl_bss_start));
     // The RP2350's Cortex-M33 has no instruction cache over SRAM (only the XIP
     // cache, and this is not XIP), so ordering the stores before the first fetch
     // is all that is needed. Nothing runs from a window yet either way: core1 is
@@ -83,9 +88,10 @@ void CodeOverlay::apply(bool tsconf, bool gs, bool dma) {
         const unsigned win = (unsigned)(x.we - x.ws);
         if (!win) continue;
         if (x.want) { loadWindow(x.cs, x.src, (size_t)(x.ce - x.cs)); *x.got = true; }
-        Debug::log("[OVL] %s %s: %u of %u B window @%08lX", x.name,
+        Debug::log("[OVL] %s %s: %u of %u B window @%08lX%s", x.name,
                    *x.got ? "code resident" : "window to the heap",
-                   (unsigned)(x.ce - x.cs), win, (unsigned long)(uintptr_t)x.ws);
+                   (unsigned)(x.ce - x.cs), win, (unsigned long)(uintptr_t)x.ws,
+                   (x.cs == __tsovl_start && __tsovl_bss_end > __tsovl_bss_start) ? " (+data tail)" : "");
     }
     recomputeCeiling();
     Debug::log("[OVL] heap ceiling %08lX (+%u B over all windows reserved)",

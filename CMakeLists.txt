@@ -607,6 +607,9 @@ if (TSOVL_WIN_SIZE STREQUAL "AUTO")
     if (PERF_TRACE)
         math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 3072")
     endif()
+    # TS_OVL_BSS data (Video.cpp's ts256 palette-bank tables, 2328 B measured
+    # 2026-09-14) lives in the window too — see .tsovl_bss below.
+    math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 2560")
     set(TSOVL_WIN_SIZE_EFFECTIVE ${_TSOVL_BYTES})
 else()
     set(TSOVL_WIN_SIZE_EFFECTIVE ${TSOVL_WIN_SIZE})
@@ -661,13 +664,24 @@ if (TSCONF_CODE_OVERLAY)
         . = ALIGN(4);\n\
         __tsovl_end = .;\n\
     } AT > FLASH\n\
-    __tsovl_source = LOADADDR(.tsovl);\n")
+    __tsovl_source = LOADADDR(.tsovl);\n\
+    /* TS-Conf-only DATA (TS_OVL_BSS: the ts256 palette-bank tables) rides in the\n\
+       same window behind the code: no load image, zeroed by CodeOverlay when the\n\
+       window is claimed, heap on every other machine. */\n\
+    .tsovl_bss __tsovl_end (NOLOAD) : {\n\
+        __tsovl_bss_start = .;\n\
+        *(.tsovl_bss .tsovl_bss.*)\n\
+        . = ALIGN(4);\n\
+        __tsovl_bss_end = .;\n\
+    }\n")
 else()
     target_compile_definitions(${PROJECT_NAME} PRIVATE TSCONF_CODE_OVERLAY=0)
     set(TSOVL_SECTION "\
     PROVIDE(__tsovl_start  = __tsovl_win_start);\n\
     PROVIDE(__tsovl_end    = __tsovl_win_start);\n\
-    PROVIDE(__tsovl_source = __tsovl_win_start);\n")
+    PROVIDE(__tsovl_source = __tsovl_win_start);\n\
+    PROVIDE(__tsovl_bss_start = __tsovl_win_start);\n\
+    PROVIDE(__tsovl_bss_end   = __tsovl_win_start);\n")
 endif()
 
 if (GS_CODE_OVERLAY)
