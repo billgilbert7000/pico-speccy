@@ -1603,8 +1603,14 @@ void hdmi_set_profi_ds80_mode(bool active,
             // Lazily allocate the ~5 KB snapshot now (freed again on DS80 disable).
             // If it fails, refuse to enter DS80 (stay in std mode) rather than crash
             // or leave no way to restore — degraded but safe.
+            //
+            // tryMalloc (src/TryAlloc.h), NOT malloc: pico_malloc PANICS on NULL, so
+            // the refusal below was dead code — TS-BIOS Setup (TEXT mode, this pair
+            // driver) on 576p + TS-Conf + NeoGS took the firmware down with
+            // "*** PANIC *** Out of memory" out of tsVideoApplyPending (hw 2026-09-14).
+            extern void* tryMalloc(size_t n);
             if (!conv_color_std_snapshot)
-                conv_color_std_snapshot = (uint32_t *) malloc(1240 * sizeof(uint32_t));
+                conv_color_std_snapshot = (uint32_t *) tryMalloc(1240 * sizeof(uint32_t));
             if (!conv_color_std_snapshot) return;
             for (int i = 0; i < 1240; i++) conv_color_std_snapshot[i] = conv_color[i];
             conv_color_std_snapshot_valid = true;

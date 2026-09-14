@@ -5363,7 +5363,7 @@ static const TsRres TS_RENDER_RO kTsRres[4] = {
 void VIDEO::tsVideoApplyPending() {
     tsRenderDrain();
     const uint8_t vc = TsConf::r.vconf;
-    const uint8_t want = (vc & 0x20) ? (uint8_t)TSV_NOGFX : (uint8_t)(vc & 0x03);
+    uint8_t want = (vc & 0x20) ? (uint8_t)TSV_NOGFX : (uint8_t)(vc & 0x03);
     const uint8_t rres = vc >> 6;
     // TSU layers: any of S_EN/T1_EN/T0_EN (TSConfig b7..b5) and not NOTSU
     // (VConfig b4). Text mode is hires and pair-slot — no TSU over it.
@@ -5379,15 +5379,30 @@ void VIDEO::tsVideoApplyPending() {
         (!wantRender || rres == ts_rres_live)) return;
 
     const bool wasPair  = (ts_vmode_live == TSV_TEXT);
-    const bool wantPair = (want == TSV_TEXT);
+    bool wantPair = (want == TSV_TEXT);
+    // The pair driver can REFUSE (its ~5 KB palette snapshot did not allocate —
+    // 576p + TS-Conf + NeoGS is at the heap edge, and TS-BIOS Setup is exactly a
+    // TEXT-mode entry from there). Render border-only then, like NOGFX: the machine
+    // stays alive and F11 leaves the Setup. Latched until the guest leaves TEXT so
+    // the allocation is not re-probed every frame. Before tryMalloc in hdmi.c this
+    // was a pico_malloc PANIC out of EndFrame (hw 2026-09-14).
+    static bool s_text_refused = false;
+    if (want != TSV_TEXT) s_text_refused = false;
+    if (wantPair && s_text_refused) { want = TSV_NOGFX; wantPair = false; }
     if (wantPair && !wasPair) {
         // Same driver path as DS80/GMX: pair tables from profi_pair_lookup with
         // the gpal CRAM bank as the 16-colour palette; ISR expands 1 fb byte → 2 px.
         tsPairPaletteLoad();
         profi_palette_dirty = false;
         profi_ds80_driver_set(true, profi_palette_live, &profi_pair_lookup[0][0]);
-        rebuildDS80ColorLut();
-        Graphics8BitPalette::ds80_active = true;
+        if (!profi_ds80_active) {
+            Debug::log("[TSV] TEXT mode: pair driver refused (no RAM for its palette snapshot) - border only until the mode changes");
+            s_text_refused = true;
+            want = TSV_NOGFX; wantPair = false;
+        } else {
+            rebuildDS80ColorLut();
+            Graphics8BitPalette::ds80_active = true;
+        }
     } else if (!wantPair && wasPair) {
         profi_ds80_driver_set(false, nullptr, nullptr);
         Graphics8BitPalette::ds80_active = false;

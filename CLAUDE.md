@@ -3048,6 +3048,52 @@ accept path), and a plain TS-BIOS / TR-DOS boot plus one .spg for "the keyboard
 still works". Defect 3 changes guest-visible interrupt timing on TS-Conf, so that
 regression set is not optional.
 
+### The border "lottery" was TS-BIOS's INT Offset setting → HSINT (SETTLED on hw 2026-09-14); the HALT-wake pin was a wrong turn, reverted
+
+"Across the Edge" on TS-Conf 576p: the border split sat 1 T LEFT of the paper
+split on some boots and aligned on others (fb dumps: top band col 178 vs paper 180
+= 52+128; NeoGS on/off irrelevant). NOT the accept phase: a fixed
+`TS_HALT_WAKE_OFFSET` (Profi's phase-0 landing, TS-Conf twin) was built, hw-refuted
+the same day and reverted. The real variable is **HSINT**: TS-BIOS writes it on
+EVERY start — `LD A,(5D1F) / LD BC,#22AF / OUT (C),A` at 0x110 of the embedded
+`ts-bios.bin`, master `ld a,(into) / wrxta HSINT` in RESET, reached from every
+START path including Setup exit — from its Setup option **"INT Offset"** (NVRAM cell
+#BC, `nv_def` default **1**, our `RTC::tsBiosSeed` seeds 1 too). Each unit is 1 T of
+INT position against the raster, and our anchor (`TS_SCREEN_TSCONF` /
+`TS_BORDER_*_TSCONF` = Pentagon + 2) is calibrated for the RESET value hsint=2. So
+hsint=1 puts every Pentagon-style border effect 1 T left of the paper. **Owner set
+INT Offset to 2 in the Setup (Alt+F11 → Reset to TS-Conf Setup) and every launch
+since is aligned.** Yesterday's RobFgift dump read `hsint=00 nv[BC]=01` — an .spg
+may write HSINT itself; the 2026-09-12 measurements (`brdT` 1640 = accept at 2 +
+1638) were taken with hsint=2 in force.
+- **Open, needs a real ZX-Evo, not us**: which INT Offset is Pentagon-exact on the
+  FPGA. The RTL arithmetic (video_sync.v, CLAUDE.md above) says hsint=2; TS-BIOS
+  ships 1 as its default. If the real machine aligns at 1, our anchor must become
+  Pentagon + 1 (both constants families); if at 2, the anchor stands and the TS-BIOS
+  default itself costs every Pentagon demo 1 T on real hardware too. Until then the
+  user-side answer is the Setup value 2. Why the value seemed to change between
+  boots with the same CMOS is not established (a re-seed after a CRC failure
+  writes 1 as well) — the dump's `hsint=`/`nv[BC]` lines are the check.
+- The generalisation to remember: **on TS-Conf the INT position is guest state
+  written by the BIOS from a user setting**, not a machine constant — any "border
+  N T off" report on TS-Conf must start with `hsint=` from the dump.
+
+### TS-BIOS Setup on 576p + TS-Conf + NeoGS PANICKED in the pair driver (fixed 2026-09-14, NOT hw-tested)
+
+Stack (owner's screenshot): `panic ← check_alloc ← __wrap_malloc ←
+hdmi_set_profi_ds80_mode ← profi_ds80_driver_set ← tsVideoApplyPending ← EndFrame`.
+The Setup is TEXT mode = the DS80/GMX pair driver, whose first activation mallocs a
+1240-word (~5 KB) conv_color snapshot with plain `malloc` — and its "if it fails,
+refuse to enter DS80" branch was dead code, pico_malloc panics on NULL. With ~14 KB
+free at 576p + NeoGS that is the boot into Setup. Now `tryMalloc` (TryAlloc.h,
+declared extern in hdmi.c — the driver has no src/ include path) so the refusal is
+real, and `tsVideoApplyPending` handles a refused driver: TEXT degrades to
+border-only (NOGFX) with a `[TSV] TEXT mode: pair driver refused` line, latched
+until the guest leaves TEXT so the probe does not run per frame. The machine stays
+alive and F11 leaves the Setup; the Setup itself is invisible in that state — the
+lever is freeing heap (GS off, 480p). Test ELF `debug/DVp2-textmode-oom-1.0.5.elf`.
+The VGA pair driver (`vga_set_profi_ds80_mode`) has no lazy malloc on this path.
+
 **Still open and NOT this bug: the ZX-mode beam renderer does not rescale for
 turbo.** `CPU::tstates` are turbo-scaled (`statesInFrame <<= m`) while
 `tStatesScreen` / `tStatesBorder` / `tStatesPerLine` and every column counter
