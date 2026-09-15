@@ -67,6 +67,7 @@ uint8_t  Config::vreq_voltage = VREG_VOLTAGE_1_50;
 bool     Config::Issue2 = true;
 uint16_t Config::mem_pg_cnt = 64;      // Murmuzavr off; the live count is MEM_PG_CNT
 bool     Config::rtc_enabled = false;
+uint16_t Config::mouse_sens = 64;        // Q8: 64 = x1/4, the historical divisor
 bool     Config::psram_enabled = true;   // Debug > PSRAM (runtime set(PSRAM OFF) twin)
 bool     Config::dbg_uart = false;       // Debug > UART console
 bool     Config::flashload = true;
@@ -1097,6 +1098,8 @@ void Config::load() {
         }
         nvs_get_b("Issue2", Issue2, sts);
         nvs_get_b("rtc_enabled", rtc_enabled, sts);
+        nvs_get_u16("mouse_sens", mouse_sens, sts);
+        if (mouse_sens < 8 || mouse_sens > 1024) mouse_sens = 64;   // a stale/foreign NVS value
         nvs_get_b("psram_enabled", psram_enabled, sts);
         nvs_get_b("dbg_uart", dbg_uart, sts);
         nvs_get_b("debug_log", Debug::log_enabled, sts);
@@ -1546,6 +1549,7 @@ void Config::save(const char* path) {
     nvs_set_u8(buf,"ngs_clock", Config::ngs_clock);
     nvs_set_str(buf,"Issue2", Issue2 ? "true" : "false");
     nvs_set_str(buf,"rtc_enabled", rtc_enabled ? "true" : "false");
+    nvs_set_i(buf,"mouse_sens", mouse_sens);
     nvs_set_str(buf,"psram_enabled", psram_enabled ? "true" : "false");
     nvs_set_str(buf,"dbg_uart", dbg_uart ? "true" : "false");
     nvs_set_str(buf,"debug_log", Debug::log_enabled ? "true" : "false");

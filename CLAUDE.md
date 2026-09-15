@@ -1523,6 +1523,26 @@ was silently doing all the work.
   offsets, or **`wheel: none (boot mouse)`** — that line is the one-glance answer to
   "why does the wheel do nothing" (`proto=boot` there means the SET_PROTOCOL did not
   take), and `foreign rpts` counts what the drop rule discarded.
+### Mouse sensitivity, and the truncation that made a slow hand drift (2026-09-15, NOT hw-tested)
+
+**Devices > "Mouse sensitivity"** — `Config::mouse_sens` (NVS `mouse_sens`,
+`SET_MOUSE_SENS`, AC_PURE), a **Q8 multiplier** on the raw HID counts before they
+reach the Kempston X/Y counters: 256 = one counter step per count, and the default 64
+(x1/4) is exactly the `>> 2` that `mouse_apply()` always had. Menu steps x1/8 .. x4.
+A foreign or stale NVS value falls back to 64 in `Config::load`.
+
+- **The fraction is now KEPT** (`mouse_frac_x/y`), which is a behaviour change even
+  at the default: `dx >> 2` dropped every movement under four counts, and dropped it
+  ASYMMETRICALLY — an arithmetic shift rounds toward minus infinity, so -1 counted as
+  -1 while +1 counted as nothing, and a slow hand crept left and up. Eight +1 reports
+  used to move the pointer by 0 and eight -1 reports by -8; both now give +-2 at
+  x1/4. The serial-mouse packet builder has kept its remainder like this all along.
+- **The serial (COM) mouse is deliberately NOT scaled by this**: it consumes
+  `mouseDX/DY` (raw counts) and halves them at packet-build time, a figure tuned on
+  hardware ("÷4 felt sluggish"). Only the Kempston counters follow the setting.
+- The wheel is not scaled either — one notch is one step of the 4-bit counter, which
+  is what the counting-cascade hardware does.
+
 - **Hw 2026-09-15 (DVp2, Dell 413C:301D): the wheel scrolls Z-Player 5.** What that
   run does NOT cover: Workbench +3e still idling at 0xFF with a wheel mouse attached,
   any other mouse's descriptor, and a `NONE`-interface mouse taking the parsed path.

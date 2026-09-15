@@ -952,14 +952,29 @@ void cursor_movement(int8_t x, int8_t y, int8_t wheel)
 // One place where a decoded mouse report reaches the emulated machine, whatever shape
 // it arrived in (boot layout, or the descriptor-parsed one). dx/dy are raw HID counts
 // (right / DOWN positive), wheel is notches (up positive).
+// Sensitivity: Config::mouse_sens is a Q8 multiplier on the raw counts (256 = one
+// counter step per HID count), and the leftover fraction is KEPT rather than shifted
+// away. The plain `dx >> 2` this replaces dropped every movement under four counts —
+// and dropped it ASYMMETRICALLY, since an arithmetic shift rounds toward minus
+// infinity: -1 counted as -1 while +1 counted as nothing, so a slow hand crept left
+// and up. Same trick the serial-mouse packet builder has always used.
+static int32_t mouse_frac_x = 0, mouse_frac_y = 0;
+
 static void mouse_apply(bool bl, bool br, bool bm, int32_t dx, int32_t dy, int32_t wheel)
 {
     ESPectrum::mouseSeen = true;
     ESPectrum::mouseButtonL = bl;
     ESPectrum::mouseButtonR = br;
     ESPectrum::mouseButtonM = bm;
-    ESPectrum::mouseX += dx >> 2;
-    ESPectrum::mouseY -= dy >> 2; // TODO: DPI
+    const int32_t sens = (int32_t)Config::mouse_sens;
+    mouse_frac_x += dx * sens;
+    mouse_frac_y += dy * sens;
+    const int32_t step_x = mouse_frac_x >> 8;   // floor: the remainder stays behind
+    const int32_t step_y = mouse_frac_y >> 8;
+    mouse_frac_x -= step_x << 8;
+    mouse_frac_y -= step_y << 8;
+    ESPectrum::mouseX += step_x;
+    ESPectrum::mouseY -= step_y;
     // Kempston wheel mouse: #FADF bits 4-7 are a free-running notch counter.
     ESPectrum::mouseWheel += (uint8_t)wheel;
     // Serial (COM) mouse packets consume deltas from these accumulators.

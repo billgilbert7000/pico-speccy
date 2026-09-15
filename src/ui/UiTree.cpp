@@ -680,6 +680,18 @@ static const Option opt_esxdos[] = {
     { "DivSD",  3 },
 };
 
+// Kempston mouse sensitivity: the value IS Config::mouse_sens, a Q8 multiplier on the
+// raw HID counts (256 = one counter step per count), so the row order is free. x1/4 is
+// what mouse_apply()'s divisor always was — every other entry is new ground.
+static const Option opt_mouse_sens[] = {
+    { "x1/8 (slowest)", 32,   "x1/8" },
+    { "x1/4 (default)", 64,   "x1/4" },
+    { "x1/2",           128,  "x1/2" },
+    { "x1",             256,  "x1"   },
+    { "x2",             512,  "x2"   },
+    { "x4 (fastest)",   1024, "x4"   },
+};
+
 // Storage and Devices used to be two top-level items, which split one question ("what is
 // this machine plugged into?") across two menus — Betadisk sat in one and the Z-Controller
 // that also drives disks in the other. Merged, storage first in the order the classic
@@ -706,6 +718,7 @@ static const Node kHardware[] = {
                 opt_ide_slot_hints, p_hasSD, p_ideOn),
     NM_ACTION_EN(NM_IND TXT_IDE_CREATE,  act_ideCreate, p_hasSD, p_ideOn),
     NM_BOOL  (TXT_HW_RTC,        SET_RTC,     nullptr),
+    NM_RADIO (TXT_HW_MOUSE_SENS, SET_MOUSE_SENS, opt_mouse_sens, nullptr),
 };
 
 // ── Video > TFT panel ──────────────────────────────────────────────────────────
