@@ -258,6 +258,7 @@
 #define TXT_OPT_THEME        "Theme"
 #define TXT_OPT_VGA_MENU_PAL "VGA colors"
 #define TXT_OPT_UI_CORNERS   "Corners"
+#define TXT_OPT_UI_SOUND     "Menu sound"
 #define TXT_OPT_REPLACE_ROM  "Replace ZX rom"
 #define TXT_OPT_UPDATE_FW    "Update firmware"
 #define TXT_ROM_PICK         "Select ROM file"

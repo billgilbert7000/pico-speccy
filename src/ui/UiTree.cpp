@@ -1003,6 +1003,16 @@ static const Option opt_ui_corners[] = {
     { "Rounded", 1 },
     { "Square",  0 },
 };
+// The menu's own click. It is played on top of the machine's audio at full scale,
+// so it gets its own attenuation rather than following the emulator volume: Loud is
+// what the firmware always did, Normal (the default) is half that amplitude, Low a
+// quarter, Off skips the click entirely.
+static const Option opt_ui_click_vol[] = {
+    { "Off",    0 },
+    { "Low",    1 },
+    { "Normal", 2 },
+    { "Loud",   3 },
+};
 
 // ── Interface ──────────────────────────────────────────────────────────────────
 // Everything about the firmware's own UI and indication, split out of Options
@@ -1014,6 +1024,7 @@ static const Node kInterface[] = {
     NM_RADIO   (TXT_OPT_THEME,        SET_UI_THEME,   opt_ui_theme,    nullptr),
     NM_RADIO_EN(NM_IND TXT_OPT_VGA_MENU_PAL, SET_UI_VGA_PAL, opt_ui_vga_pal, p_vgaOut, p_themeSlate),
     NM_RADIO (TXT_OPT_UI_CORNERS,   SET_UI_CORNERS, opt_ui_corners,  nullptr),
+    NM_RADIO (TXT_OPT_UI_SOUND,     SET_UI_CLICK_VOL, opt_ui_click_vol, nullptr),
     NM_DYNH  (TXT_OTHER_HOTKEYS,    hotkeys_build, hotkeys_key, opt_hotkey_hints, nullptr),
     // LED indication is one group: the master toggle, its legend (a reference for
     // the indicators, so greyed while they are off) and the board's own SD LED,

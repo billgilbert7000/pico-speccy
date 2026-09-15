@@ -471,6 +471,11 @@ public:
     static bool ui_vga_solid;
     static bool ui_rounded;
     static uint8_t ui_theme;
+    // ui_click_vol: the menu's own click/key sound, 0 = Off, 1 = Low, 2 = Normal,
+    // 3 = Loud. The click is written at full scale on top of whatever the machine's
+    // volume is (OSD::click), so it needs an attenuation of its own; Loud is what
+    // the firmware always did.
+    static uint8_t ui_click_vol;
     // Palette: 0=Default, 1=Grayscale
     static uint8_t palette;
     static uint8_t audio_driver;

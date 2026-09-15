@@ -141,6 +141,7 @@ NM_INT_ACCESS (midiStorage, midi_storage)
 NM_BOOL_ACCESS(uiVgaPal,  ui_vga_solid)
 NM_BOOL_ACCESS(uiCorners, ui_rounded)
 NM_INT_ACCESS (uiTheme,   ui_theme)
+NM_INT_ACCESS (uiClickVol, ui_click_vol)
 NM_INT_ACCESS (joyType,   joystick)
 NM_BOOL_ACCESS(tabFire,   TABasfire1)
 NM_INT_ACCESS (esxdos,    esxdos)
@@ -383,6 +384,9 @@ static bool hook_crtFilter(int32_t, int32_t) {
 // the Config value directly, so there is nothing to push here — the redraw the flags
 // trigger (F_PALETTE re-install / F_MODAL chrome restore) is the whole apply.
 static bool hook_uiLook(int32_t, int32_t) { return true; }
+// Interface > Menu sound: OSD::click reads Config::ui_click_vol on every click, so
+// there is nothing to push either — and the menu clicks once per keypress anyway,
+// which makes the F_PREVIEW value change audible as you cycle the options.
 
 // Video > HDMI > Clock drive: 0 = Normal (12 mA fast), 1 = Soft (8 mA slow). Pad
 // registers only, so the preview is live and instantly reversible.

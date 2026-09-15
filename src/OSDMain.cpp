@@ -333,15 +333,36 @@ static const uint8_t click128[116] = {   0,8,32,32,32,32,32,32,32,32,32,32,32,32
                                         32,32,8,0
                                     };
 
-IRAM_ATTR void OSD::click() {
-    if (Config::tape_player /*|| Config::real_player*/)
-        return; // Disable interface click on tape player mode
-    pwm_audio_set_volume(ESP_VOLUME_MAX);
+// Interface > Menu sound (Config::ui_click_vol): the click is written at FULL
+// scale regardless of the machine's own volume, so it needs an attenuation of
+// its own. pwm_audio's volume argument is linear in 1/16 steps around 0 dB
+// (pwm_audio_set_volume: vol = volume + 16, and the sample is multiplied by
+// vol << 3), hence -8 is half amplitude and -12 a quarter. Off skips the write
+// entirely rather than passing a silent volume — there is nothing to hear and
+// no reason to overwrite the frame's audio buffer with a mute click.
+static inline bool clickAudible() { return Config::ui_click_vol != 0; }
+static inline int8_t clickVolume() {
+    switch (Config::ui_click_vol) {
+        case 1:  return ESP_VOLUME_MAX - 12;    // Low
+        case 2:  return ESP_VOLUME_MAX - 8;     // Normal
+        default: return ESP_VOLUME_MAX;         // Loud — what the firmware always did
+    }
+}
+static inline void clickPlay() {
+    pwm_audio_set_volume(clickVolume());
     if (Z80Ops::is48)
         pwm_audio_write((uint8_t*) click48, (uint8_t*) click48, 12, 0, 0);
     else
         pwm_audio_write((uint8_t*) click128, (uint8_t*) click128, 116, 0, 0);
     pwm_audio_set_volume(ESPectrum::aud_volume);
+}
+
+IRAM_ATTR void OSD::click() {
+    if (Config::tape_player /*|| Config::real_player*/)
+        return; // Disable interface click on tape player mode
+    // The paused-badge repaint below is not sound — it still has to happen with
+    // the click muted.
+    if (clickAudible()) clickPlay();
     if (CPU::paused) {
         // The new UI has its own badge; the classic centered box buried the very
         // screen it annotates. DS80 keeps the classic one (our palette would
@@ -358,12 +379,7 @@ IRAM_ATTR void OSD::click() {
 IRAM_ATTR void OSD::clickNoPause() {
     if (Config::tape_player)
         return; // Disable interface click on tape player mode
-    pwm_audio_set_volume(ESP_VOLUME_MAX);
-    if (Z80Ops::is48)
-        pwm_audio_write((uint8_t*) click48, (uint8_t*) click48, 12, 0, 0);
-    else
-        pwm_audio_write((uint8_t*) click128, (uint8_t*) click128, 116, 0, 0);
-    pwm_audio_set_volume(ESPectrum::aud_volume);
+    if (clickAudible()) clickPlay();
 }
 void close_all(void);
 void flash_timings(int mhz);                        // main.cpp
