@@ -61,7 +61,7 @@
     X(R_ALF1,           "ALF1",             "ALF cartridge")      \
     X(R_P3,             "P3",               "+3 v4.0")             \
     X(R_P3E,            "P3e",              "+3 (IDEDOS)")           \
-    X(R_P3DIV,          "P3div",            "+3 (divIDE)")
+    X(R_P3DIV,          "P3div",            "+3 (DivIDE)")
 
 #define NM_X_IDX(id, str) id,
 #define NM_XR_IDX(id, str, ui) id,
