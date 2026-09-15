@@ -5,13 +5,26 @@
 uint16_t graphics_max_tft_freq_mhz = 126;
 
 // PIO clock divider must be integer or half-integer (n/2) for clean TMDS pixel clock.
-// TMDS bit clock = pixel_clock * 10 = 252MHz for 25.2MHz pixel clock.
-// sys_clk=378MHz → div=1.5; sys_clk=252MHz → div=1.0
-#if CPU_MHZ <= 252
-#define PIO_DIV  1.0f
-#else
-#define PIO_DIV  1.5f
-#endif
+// TMDS bit clock = pixel_clock * 10; the HDMI PIO program is 10 instructions
+// (one bit per lane per cycle, clock pair as side-set), so SM clock = TMDS rate.
+//
+// TMDS_STD_MHZ 252 = 25.2 MHz pixel, and it is the same at EVERY CPU clock:
+// 252/1.0, 378/1.5, 504/2.0 all land on it, which is why the timing table does
+// not depend on the Overclock setting.  h_total is 800 px (line_bytes 400 x 2)
+// in every standard mode → 31.5 kHz line rate, 31.75 µs per line.
+//
+// TMDS_FAST_MHZ 378 = 37.8 MHz pixel: the same tables at x1.5 the pixel rate,
+// i.e. 47.25 kHz / 21.16 µs per line and x1.5 the refresh (90 / 75 Hz).  Only
+// sys_clk 378 gives it a clean divider (1.0), so those modes are gated on
+// Config::cpu_mhz == 378 — see Config::isFastVideoMode().
+#define TMDS_STD_MHZ   252
+#define TMDS_FAST_MHZ  378
+#define PIO_DIV        ((float)CPU_MHZ / (float)TMDS_STD_MHZ)
+// Clamped at >= 1.0: a build whose boot clock is below 378 MHz (ZERO2) cannot
+// reach this TMDS rate at all, and sm_config_set_clkdiv() asserts on a divider
+// under 1. Such a board can still select these modes after raising the CPU clock
+// in the menu — graphics_set_sys_clk_mhz() then recomputes the whole table.
+#define PIO_DIV_FAST   (CPU_MHZ < TMDS_FAST_MHZ ? 1.0f : (float)CPU_MHZ / (float)TMDS_FAST_MHZ)
 
 static struct video_mode_t video_mode[] = {
     { // [0] 640x480 60Hz
@@ -195,6 +208,154 @@ static struct video_mode_t video_mode[] = {
         .line_bytes = 400,
         .v_offset = 0,
         .pio_clk_div = PIO_DIV
+    },
+
+    // ---------------------------------------------------------------------
+    // 37.8 MHz pixel clock (sys_clk 378 MHz, PIO divider 1.0 — no fractional
+    // divider at all).  Byte-for-byte the tables above: same h_total (800 px),
+    // same v_total, so the line rate is 47.25 kHz and every refresh is exactly
+    // x1.5.  Each sits at its standard twin's index + VMODE_FAST_OFFSET, which
+    // is what graphics_fast_mode() resolves for VIDEO::Reset().
+    //
+    // NOTE the refresh is the DISPLAY's, not the machine's: with V-Sync on the
+    // emulated frame rate follows it, so these modes force V-Sync off (see
+    // resolveConstraints in UiStage.cpp).
+    // ---------------------------------------------------------------------
+    { // [9] 640x480 90Hz — 37.8MHz pixel (sys_clk=378MHz, div=1.0)
+        // 37.8MHz/800/524 = 90.17Hz (x1.5 of mode [0])
+        .v_total = 524,
+        .v_active = 480,
+        .freq = 90,
+        .pixel_clk = 37800000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 48,
+        .h_bp_bytes = 24,
+        .h_fp_bytes = 8,
+        .line_bytes = 400,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_FAST,
+        .tmds_mhz = TMDS_FAST_MHZ
+    },
+    { // [10] 640x480 75Hz Pentagon — 37.8MHz pixel (sys_clk=378MHz, div=1.0)
+        // 37.8MHz/800/644 = 73.37Hz (x1.5 of mode [1], Pentagon 48.83 x 1.5)
+        .v_total = 644,
+        .v_active = 480,
+        .freq = 75,
+        .pixel_clk = 37800000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 48,
+        .h_bp_bytes = 24,
+        .h_fp_bytes = 8,
+        .line_bytes = 400,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_FAST,
+        .tmds_mhz = TMDS_FAST_MHZ
+    },
+    { // [11] 640x480 75Hz 48K — 37.8MHz pixel (sys_clk=378MHz, div=1.0)
+        // 37.8MHz/800/628 = 75.24Hz (x1.5 of mode [2])
+        .v_total = 628,
+        .v_active = 480,
+        .freq = 75,
+        .pixel_clk = 37800000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 48,
+        .h_bp_bytes = 24,
+        .h_fp_bytes = 8,
+        .line_bytes = 400,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_FAST,
+        .tmds_mhz = TMDS_FAST_MHZ
+    },
+    { // [12] 640x480 75Hz 128K — 37.8MHz pixel (sys_clk=378MHz, div=1.0)
+        // 37.8MHz/800/629 = 75.12Hz (x1.5 of mode [3])
+        .v_total = 629,
+        .v_active = 480,
+        .freq = 75,
+        .pixel_clk = 37800000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 48,
+        .h_bp_bytes = 24,
+        .h_fp_bytes = 8,
+        .line_bytes = 400,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_FAST,
+        .tmds_mhz = TMDS_FAST_MHZ
+    },
+    { // [13] 720x576 75Hz Pentagon — 37.8MHz pixel (sys_clk=378MHz, div=1.0)
+        // 37.8MHz/800/644 = 73.37Hz (x1.5 of mode [4])
+        .v_total = 644,
+        .v_active = 576,
+        .freq = 75,
+        .pixel_clk = 37800000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = 16,
+        .h_bp_bytes = 16,
+        .h_fp_bytes = 8,
+        .line_bytes = 400,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_FAST,
+        .tmds_mhz = TMDS_FAST_MHZ
+    },
+    { // [14] 720x576 75Hz 48K — 37.8MHz pixel (sys_clk=378MHz, div=1.0)
+        // 37.8MHz/800/628 = 75.24Hz (x1.5 of mode [5])
+        .v_total = 628,
+        .v_active = 576,
+        .freq = 75,
+        .pixel_clk = 37800000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = 16,
+        .h_bp_bytes = 16,
+        .h_fp_bytes = 8,
+        .line_bytes = 400,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_FAST,
+        .tmds_mhz = TMDS_FAST_MHZ
+    },
+    { // [15] 720x576 75Hz 128K — 37.8MHz pixel (sys_clk=378MHz, div=1.0)
+        // 37.8MHz/800/629 = 75.12Hz (x1.5 of mode [6])
+        .v_total = 629,
+        .v_active = 576,
+        .freq = 75,
+        .pixel_clk = 37800000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = 16,
+        .h_bp_bytes = 16,
+        .h_fp_bytes = 8,
+        .line_bytes = 400,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_FAST,
+        .tmds_mhz = TMDS_FAST_MHZ
+    },
+    { // [16] 720x480 90Hz — 37.8MHz pixel (sys_clk=378MHz, div=1.0)
+        // 37.8MHz/800/524 = 90.17Hz (x1.5 of mode [7]), half border
+        .v_total = 524,
+        .v_active = 480,
+        .freq = 90,
+        .pixel_clk = 37800000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 360,
+        .h_sync_bytes = 16,
+        .h_bp_bytes = 16,
+        .h_fp_bytes = 8,
+        .line_bytes = 400,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_FAST,
+        .tmds_mhz = TMDS_FAST_MHZ
     }
 };
 
@@ -243,10 +404,51 @@ struct video_mode_t __not_in_flash_func(graphics_get_video_mode)(int mode)
     return video_mode[mode];
 }
 
-void graphics_set_pio_clk_div(float div)
+int graphics_fast_mode(int mode)
 {
-    for (int i = 0; i < sizeof(video_mode)/sizeof(video_mode[0]); i++)
+    const int n = (int)(sizeof(video_mode)/sizeof(video_mode[0]));
+    const int fast = mode + VMODE_FAST_OFFSET;
+    if (mode < 0 || fast >= n) return mode;
+    // Only answer for a real twin: index 8 (720x576@60) has none, and a caller
+    // must never be handed an unrelated mode because the table grew.
+    return video_mode[fast].tmds_mhz == TMDS_FAST_MHZ ? fast : mode;
+}
+
+float graphics_clk_div_at(int mode, unsigned sys_mhz, int vga)
+{
+    const int n = (int)(sizeof(video_mode)/sizeof(video_mode[0]));
+    if (mode < 0 || mode >= n || !sys_mhz) return 0.0f;
+    if (vga) {
+        // vga_reinit(): clk_sys / pixel_clk, written to CLKDIV as 16.8 with the low
+        // 12 bits masked off — i.e. the programmed divider is quantised to 1/16.
+        const int pix = video_mode[mode].vga_pixel_clk ? video_mode[mode].vga_pixel_clk
+                                                       : video_mode[mode].pixel_clk;
+        if (pix <= 0) return 0.0f;
+        const double fdiv = (double)sys_mhz * 1000000.0 / (double)pix;
+        const uint32_t d32 = (uint32_t)(fdiv * 65536.0) & 0xfffff000u;
+        return (float)d32 / 65536.0f;
+    }
+    // HDMI: the same formula graphics_set_sys_clk_mhz() stores, clamp and all —
+    // except that "below 1" is reported as unreachable instead of clamped to 1.0,
+    // which would claim a mode runs when it would silently run at the wrong rate.
+    const int tmds = video_mode[mode].tmds_mhz ? video_mode[mode].tmds_mhz : TMDS_STD_MHZ;
+    if ((float)sys_mhz < (float)tmds) return 0.0f;
+    return (float)sys_mhz / (float)tmds;
+}
+
+void graphics_set_sys_clk_mhz(unsigned mhz)
+{
+    if (!mhz) return;
+    for (int i = 0; i < sizeof(video_mode)/sizeof(video_mode[0]); i++) {
+        const int tmds = video_mode[i].tmds_mhz ? video_mode[i].tmds_mhz : TMDS_STD_MHZ;
+        float div = (float)mhz / (float)tmds;
+        // A PIO divider below 1 does not exist; a mode asking for more TMDS than
+        // sys_clk can give is simply unreachable at this clock and is gated off in
+        // the menu (Config::isFastVideoMode).  Clamp so a stale pick cannot hand
+        // pio_sm_init() an illegal divider.
+        if (div < 1.0f) div = 1.0f;
         video_mode[i].pio_clk_div = div;
+    }
 }
 
 #ifdef VGA_HDMI

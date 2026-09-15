@@ -63,6 +63,9 @@ extern "C" void graphics_set_scanlines(uint8_t level);
 extern "C" void graphics_set_crt(uint8_t level);
 extern "C" void graphics_set_dither(bool enabled);
 extern "C" void graphics_update_mode_timing(void);
+// graphics.h is a C header this TU does not include; see the note there. Returns
+// the 37.8 MHz twin of a standard video_mode[] index (the 90/75 Hz set).
+extern "C" int  graphics_fast_mode(int mode);
 extern "C" void graphics_set_hdmi_clock_drive(bool soft);
 extern "C" void hdmi_set_profi_ds80_mode(bool active, const uint32_t *palette16, const uint8_t *pair_lut);
 extern "C" void vga_set_profi_ds80_mode(bool active, const uint32_t *palette16, const uint8_t *pair_lut);
@@ -2104,8 +2107,10 @@ static inline int fbModeStride(int Mode) {
 size_t VIDEO::fbBytesForVM(uint8_t vm, size_t* prevBytes) {
     int Mode = 0;
 #ifdef VGA_HDMI
-    if (vm >= Config::VM_720x576_50)      Mode = 22;  // 360x288 full border
-    else if (vm == Config::VM_720x480_60) Mode = 23;  // 360x240 half border
+    // Explicit, like VIDEO::isFullBorder*(): VM_* is append-only and the 90/75 Hz
+    // set took 4..7, so a >= test would call 640x480@90 a 360x288 mode.
+    if (vm == Config::VM_720x576_50 || vm == Config::VM_720x576_75)      Mode = 22;  // 360x288 full border
+    else if (vm == Config::VM_720x480_60 || vm == Config::VM_720x480_90) Mode = 23;  // 360x240 half border
 #else
     (void)vm;
 #endif
@@ -2154,8 +2159,15 @@ void VIDEO::reserveFrameBuffer() {
         snprintf(note, sizeof(note), "%s: not enough RAM - using 640x480",
                  isFullBorder240() ? "720x480" : "720x576");
         OSD::bootNotice(note);
-        const uint8_t fallback = isFullBorder240() ? Config::VM_640x480_60
-                                                   : Config::VM_640x480_50;
+        // Keep the refresh family: a 90/75 Hz pick degrades to the 640x480 mode
+        // of the SAME family, not to a 50/60 Hz one — the user asked for that
+        // pixel clock, and the smaller framebuffer is the only thing at issue.
+        const uint8_t cur = activeVideoMode();
+        uint8_t fallback;
+        if (Config::isFastVideoMode(cur))
+            fallback = isFullBorder240() ? Config::VM_640x480_90 : Config::VM_640x480_75;
+        else
+            fallback = isFullBorder240() ? Config::VM_640x480_60 : Config::VM_640x480_50;
         if (SELECT_VGA) Config::vga_video_mode  = fallback;
         else            Config::hdmi_video_mode = fallback;
         Config::save();
@@ -2484,9 +2496,17 @@ void VIDEO::Reset() {
     brdcol_cnt = brdcol_start;
     brdlin_cnt = 0;
 #ifdef VGA_HDMI
+    // A "fast" (90/75 Hz) pick selects the SAME index plus VMODE_FAST_OFFSET —
+    // graphics.c holds the 37.8 MHz twin of every standard mode there, with the
+    // same geometry and the same v_total. Only sys_clk 378 MHz gives those a clean
+    // PIO divider, so anything else falls back to the 25.2 MHz twin here as well
+    // as in Config::load() — this is the path a live Overclock change reaches.
+    const uint8_t vmSel   = SELECT_VGA ? Config::vga_video_mode : Config::hdmi_video_mode;
+    const bool    useFast = Config::isFastVideoMode(vmSel) &&
+                            Config::cpu_mhz == Config::VM_FAST_CPU_MHZ;
     if (SELECT_VGA)
     {
-        switch (Config::vga_video_mode) {
+        switch (Config::baseVideoMode(vmSel)) {
             case Config::VM_640x480_50:
                 if (Config::arch == A_48K || Config::arch == A_PROFI || Config::arch == A_SCORP) video_mode = 2;
                 else if (Config::arch == A_128K || Config::arch == A_ALF) video_mode = 3;
@@ -2508,7 +2528,7 @@ void VIDEO::Reset() {
     else
     {
         // HDMI: map Config enum to graphics.c video_mode index
-        switch (Config::hdmi_video_mode) {
+        switch (Config::baseVideoMode(vmSel)) {
             case Config::VM_640x480_60:
                 video_mode = 0;
                 break;
@@ -2530,6 +2550,7 @@ void VIDEO::Reset() {
                 break;
         }
     }
+    if (useFast) video_mode = graphics_fast_mode(video_mode);
     // The 50 Hz modes above are per MACHINE — one display frame is tuned to be
     // exactly one emulated frame (v_total 644 Pentagon 48.83 Hz / 629 128K
     // 50.02 Hz / 628 48K, Profi, Scorpion 50.08 Hz) — and with v_sync pacing the

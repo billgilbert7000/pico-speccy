@@ -4384,7 +4384,7 @@ Gated by `Config::zifi_enabled`. First two: port low byte `0xEF`, high address b
 - Most real ZiFi software (e.g. `debug/NET/MRF.TRD` terminal, drivers ZW-64/ZW-64-SC/GZ-80) uses the **16550 window**, not the API. Verified by disasm: `LD B,#Fx; LD C,#EF; OUT (C),A` + `IN A,(#FDEF)` LSR poll. App sends its own AT commands over the bridge.
 - Wired in `Ports::input`/`Ports::output` after the API check.
 
-### The NIC is a serial port, not a WiFi layer — UART-only mode (2026-09-15, NOT hw-tested)
+### The NIC is a serial port, not a WiFi layer — UART-only mode (hw-confirmed DVp2, 2026-09-15)
 
 `ZiFi::enabled` used to be `zifi_enabled && wifi_enabled && arch != A_PROFI`, the
 menu row was greyed while WiFi was off (`p_nicAvail` = `p_wifiOn() && p_espSerial()`)
@@ -4410,8 +4410,13 @@ UART there at all).
 - **`LED::NET` is visible for either half** (`wifi_enabled || zifi_enabled`), so the
   lamp blinks on guest serial traffic with no WiFi — the one-glance "is the program
   even talking to the port" check.
+- **Hw 2026-09-15, owner: checked on DVp2, verdict not itemised.** The reported
+  case is the one this exists for — a guest talking to an Arduino over the 16550
+  window with WiFi off — but the run was on a GPIO-UART transport only: the
+  **USB-CDC** transport and the **on-chip CYW43** boards (where the row is greyed by
+  `p_espSerial` and there is no UART at all) are still covered by inspection.
 
-### Boot SNTP is a switch: Network → Sync at boot (`Config::sntp_auto`)
+### Boot SNTP is a switch: Network → Sync at boot (`Config::sntp_auto`, hw-confirmed DVp2 2026-09-15)
 
 The boot state machine is the only thing that talks to the link unasked, and its
 tail is the clock: `AT+CIPSNTPCFG` plus up to 15 `AT+CIPSNTPTIME?` one second apart
@@ -5031,6 +5036,65 @@ live; `VIDEO::Init()` pushes the persisted pick before core1's graphics_init.
 **The build option `HDMI_SOFT_CLK` is now only the DEFAULT of that setting and
 defaults to OFF (= Normal)** — the m1p1 + Samsung S27AG300N case that Soft was
 introduced for is now one menu pick away instead of a rebuild.
+
+### The video-mode list shows the PIO divider it would run at (hw-confirmed DVp2, 2026-09-15)
+
+Every entry of Video → Mode now carries the divider that pick would program at the
+STAGED CPU clock — `640x480 @60 (div 1.5)` — because that divider is the whole
+point of the "fast" set and of the VGA pixel clocks, and it was the one thing the
+menu did not say. Integer repeats its phase per pixel, 1.5 is the half-integer the
+TMDS path tolerates, anything else jitters (the section above is a hardware report
+caused by exactly this). `opt_video_mode` became `NM_RADIO_D` + `video_modeOpts`
+(UiTree.cpp), rebuilt on every call like `mach_pentOpts`.
+
+- **`graphics_clk_div_at(mode, sys_mhz, vga)`** (graphics.c) is the single source:
+  it mirrors `graphics_set_sys_clk_mhz()` for HDMI and `vga_reinit()` for VGA —
+  **the VGA branch reproduces the 1/16 CLKDIV quantisation** (`(uint32_t)(fdiv <<
+  16) & 0xfffff000`), so the menu shows what the PIO is actually given, not the
+  ideal ratio. Computing it in the UI instead would have drifted the first time
+  either driver changed. It answers 0 for a mode whose TMDS clock exceeds sys_clk
+  (a PIO divider below 1 does not exist) rather than clamping to 1.0 the way the
+  live table does, which would claim a mode runs when it would run at the wrong rate.
+- **A mode the current clock cannot reach quotes the divider it would have THERE**:
+  `640x480 @90 (div 1.0/378)`. The number is taken at `VM_FAST_CPU_MHZ`, not at the
+  staged clock, because the 90/75 Hz set is refused by `resolveConstraints` at every
+  clock but 378 even where the divider it has at the staged one is perfectly legal
+  (VGA: 6.625 at 252 MHz) — printing THAT would contradict the menu.
+- **The clock fields are machine-INDEPENDENT**, which is what lets `vmGraphicsIndex()`
+  pick ONE representative graphics.c entry per `VM_*` value instead of duplicating
+  `VIDEO::Reset()`'s arch-dependent mapping: all three per-machine variants of
+  640x480@50 share `vga_pixel_clk` 19894737 and all four 720x* ones share 27000000,
+  and `tmds_mhz` is per SET (252 standard / 378 fast), never per machine.
+- **`slabel` keeps the collapsed row bare** (`nodeValueLabel` prefers it), so the
+  Video row still reads `Mode  640x480 @60` and only the right pane carries the
+  divider.
+- **Width is the binding constraint, and overflow costs three glyphs, not one.**
+  The option label gets `LY.rw - 3*pad - radioW()` = **25 glyphs at 320 px**, and
+  `textClip()` does not clip mid-glyph: past the budget it keeps `fits-2` characters
+  and appends `..`, i.e. one glyph too many eats the divider itself. Hence
+  `divStr()` prints three decimals with the trailing zeros stripped, and
+  `optLabelGlyphs()` re-derives the budget from `LY` rather than hardcoding 25.
+  The one label that does not fit spaced is VGA's `(div 10.0/378)` at 26 — the
+  **space before the bracket is padding and is what gives way** (`720x576 @75(div
+  10.0/378)`), which is cheaper than losing the number. Host-checked over all 8
+  modes x 3 clocks x 2 outputs: nothing exceeds 25.
+- **`extern bool SELECT_VGA;` must be declared at GLOBAL scope** in UiTree.cpp: put
+  inside `namespace nm` it mangles to `nm::SELECT_VGA` and fails to link (vga.c
+  defines the plain symbol). A global non-member variable is not mangled, which is
+  why the same line works in OSDMain.cpp.
+- SOFTTV/TV/TFT return the static table unchanged — they drive their own panel
+  timing and have neither a TMDS nor a VGA pixel clock.
+- **Hw 2026-09-15, owner: checked on DVp2, verdict not itemised** — so read it as
+  the HDMI half: the labels are built, fit the pane and follow the Overclock row.
+  What that run does NOT cover, in order of risk: the **VGA** branch (its dividers
+  are the long ones, and its fast rows are the only labels that drop the space
+  before the bracket to stay inside 25 glyphs), a **DS80/pair-mode** surface (much
+  wider pane, so only the arithmetic is at stake), and the SOFTTV/TFT `#else` path
+  beyond linking.
+- What it reveals, and is worth knowing: at 378 MHz the VGA 640x480@50 divider is
+  **18.938, not the 19.0 its own comment in graphics.c claims** — 378e6/19894737 is
+  a hair UNDER 19, and the truncate-then-mask loses a whole 1/16 step. 0.33% fast,
+  harmless on a monitor, but the comment is aspirational and the menu is not.
 
 ### On-chip network transport = lwIP under the ZiFi facades (2026-09-06; hw-confirmed on m1p2w: WiFi join + FTP server work)
 

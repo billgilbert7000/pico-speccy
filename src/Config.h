@@ -417,13 +417,42 @@ public:
     static signed char aud_volume;
     static uint8_t audio_boost;
 
-    // Video mode enum
+    // Video mode enum.  The value IS the NVS byte, so entries are APPEND ONLY and
+    // nothing may be inferred from the ordering (isFullBorder*() used to compare
+    // with >= and had to be rewritten as explicit tests when 4..7 arrived).
     enum {
         VM_640x480_60  = 0,  // 640x480@60Hz (default)
         VM_640x480_50  = 1,  // 640x480@50Hz (arch-dependent timing)
         VM_720x480_60  = 2,  // 720x480@60Hz half border
         VM_720x576_50  = 3,  // 720x576@50Hz full border
+        // "Fast" set: the four above at a 37.8 MHz pixel clock instead of
+        // 25.2 MHz — same geometry, x1.5 the refresh.  Needs sys_clk 378 MHz
+        // (the only clock where the PIO divider comes out a clean 1.0), and
+        // forces V-Sync off, since the emulated frame rate would follow the
+        // display's.  See the table in drivers/graphics/graphics.c.
+        VM_640x480_90  = 4,  // 640x480@90Hz   (90.17)
+        VM_640x480_75  = 5,  // 640x480@75Hz   (73.37 Pentagon / 75.24 48K / 75.12 128K)
+        VM_720x480_90  = 6,  // 720x480@90Hz   half border (90.17)
+        VM_720x576_75  = 7,  // 720x576@75Hz   full border, arch-dependent as above
+        VM_LAST        = VM_720x576_75,
     };
+
+    // sys_clk the "fast" modes need; anything else cannot give the PIO a clean
+    // divider for a 378 MHz TMDS clock.
+    static const uint16_t VM_FAST_CPU_MHZ = 378;
+
+    static bool isFastVideoMode(uint8_t vm) { return vm >= VM_640x480_90 && vm <= VM_LAST; }
+    // The 25.2 MHz twin of a fast mode (identity for the standard ones): what a
+    // fast pick degrades to when the CPU clock is not 378 MHz.
+    static uint8_t baseVideoMode(uint8_t vm) {
+        switch (vm) {
+            case VM_640x480_90: return VM_640x480_60;
+            case VM_640x480_75: return VM_640x480_50;
+            case VM_720x480_90: return VM_720x480_60;
+            case VM_720x576_75: return VM_720x576_50;
+            default:            return vm;
+        }
+    }
 
     static uint8_t hdmi_video_mode;
     static uint8_t vga_video_mode;

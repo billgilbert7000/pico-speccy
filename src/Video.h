@@ -391,9 +391,15 @@ public:
     return Config::hdmi_video_mode;
 #endif
   }
-  static bool isFullBorderMode() { return activeVideoMode() >= Config::VM_720x480_60; }
-  static bool isFullBorder240()  { return activeVideoMode() == Config::VM_720x480_60; }
-  static bool isFullBorder288()  { return activeVideoMode() >= Config::VM_720x576_50; }
+  // Explicit tests, NOT >= comparisons: the VM_* values are the persisted NVS
+  // byte and are append-only, so the 90/75 Hz set had to take 4..7 and the
+  // ordering carries no geometry any more (VM_640x480_90 = 4 is a 320x240 mode
+  // sitting above VM_720x576_50 = 3).
+  static bool isFullBorder240()  { const uint8_t vm = activeVideoMode();
+                                   return vm == Config::VM_720x480_60 || vm == Config::VM_720x480_90; }
+  static bool isFullBorder288()  { const uint8_t vm = activeVideoMode();
+                                   return vm == Config::VM_720x576_50 || vm == Config::VM_720x576_75; }
+  static bool isFullBorderMode() { return isFullBorder240() || isFullBorder288(); }
 
   static bool gigascreen_enabled;
   static uint8_t gigascreen_auto_countdown;

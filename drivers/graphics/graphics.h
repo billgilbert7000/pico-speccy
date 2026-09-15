@@ -37,6 +37,11 @@ typedef struct video_mode_t{
   int line_bytes;
   int v_offset;
   float pio_clk_div; // PIO divider = sys_clk / TMDS_clk, must be integer or half-integer (n/2)
+  // TMDS bit clock this mode is built for, MHz (0 = the 252 MHz default, i.e.
+  // 25.2 MHz pixel).  graphics_set_sys_clk_mhz() re-derives pio_clk_div from it
+  // whenever sys_clk moves, so a mode that wants a different pixel clock (the
+  // 90/75 Hz set: 378 MHz TMDS = 37.8 MHz pixel) keeps it at every CPU clock.
+  int tmds_mhz;
   // VGA-only overrides for fields above. If 0/zero, VGA uses the main fields.
   // HDMI never reads these — its timing is unaffected.
   int vga_v_total;
@@ -49,6 +54,10 @@ typedef struct video_mode_t{
   int vga_h_fp_bytes;
   int vga_screen_width;
 };
+
+// video_mode[] index offset of the 37.8 MHz ("fast") twin of a standard mode:
+// entries [0]..[7] have their x1.5-refresh counterpart at [9]..[16].
+#define VMODE_FAST_OFFSET 9
 
 enum graphics_mode_t {
     TEXTMODE_DEFAULT,
@@ -116,7 +125,23 @@ void draw_window(const char title[TEXTMODE_COLS + 1], uint32_t x, uint32_t y, ui
 void clrScr(uint8_t color);
 
 struct video_mode_t graphics_get_video_mode(int mode);
-void graphics_set_pio_clk_div(float div);
+// Re-derive every mode's pio_clk_div for the given sys_clk (the Overclock menu
+// moves it after boot).  Replaces the old graphics_set_pio_clk_div(): the divider
+// is now per mode, because not every mode wants the same TMDS clock.
+void graphics_set_sys_clk_mhz(unsigned mhz);
+
+// The PIO divider `mode` would be programmed with at a sys_clk of `sys_mhz`,
+// WITHOUT touching the live table: the HDMI (TMDS) one, or the VGA pixel one when
+// `vga` is non-zero.  Mirrors graphics_set_sys_clk_mhz() and vga_reinit()
+// respectively — VGA's 1/16 CLKDIV quantisation included — so a caller can show
+// what the driver will actually program.  Returns 0 when the mode is unreachable
+// at that clock (a PIO divider below 1 does not exist).
+float graphics_clk_div_at(int mode, unsigned sys_mhz, int vga);
+
+// video_mode[] index of the 37.8 MHz twin of a standard mode, or `mode` itself
+// when it has none.  The table owns its own layout: callers (VIDEO::Reset) have
+// no business adding VMODE_FAST_OFFSET themselves.
+int graphics_fast_mode(int mode);
 
 #ifdef __cplusplus
 }

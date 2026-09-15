@@ -1258,7 +1258,7 @@ void Config::load() {
             nvs_get_i("hdmi_video_mode", old_mode, sts);
             // 720x576@60 was removed (non-working) — old fb60 maps to 720x576@50
             Config::hdmi_video_mode = hb ? VM_720x480_60 : (fb60 || fb) ? VM_720x576_50 : (old_mode > 0 ? VM_640x480_50 : VM_640x480_60);
-        } else if (Config::hdmi_video_mode > VM_720x576_50) {
+        } else if (Config::hdmi_video_mode > VM_LAST) {
             // Remap configs saved before 720x576@60 removal: old enum 4 (@50) -> 3, old 3 (@60) handled below
             Config::hdmi_video_mode = VM_720x576_50;
         }
@@ -1266,11 +1266,26 @@ void Config::load() {
             int old_mode = 0;
             nvs_get_i("vga_video_mode", old_mode, sts);
             Config::vga_video_mode = old_mode > 0 ? VM_640x480_50 : VM_640x480_60;
-        } else if (Config::vga_video_mode > VM_720x576_50) {
+        } else if (Config::vga_video_mode > VM_LAST) {
             // Remap configs saved before 720x576@60 removal
             Config::vga_video_mode = VM_720x576_50;
         }
+        // The 90/75 Hz modes only exist at sys_clk 378 MHz (the one clock that
+        // gives the HDMI PIO a clean 1.0 divider for their 378 MHz TMDS rate), so
+        // a config that arrives from another board — or one whose CPU clock was
+        // lowered afterwards — degrades to the 25.2 MHz twin rather than handing
+        // the PIO a fractional divider.  The menu refuses the combination up front
+        // (resolveConstraints); this is the backstop for everything that does not
+        // go through it.
+        if (cpu_mhz != VM_FAST_CPU_MHZ) {
+            hdmi_video_mode = baseVideoMode(hdmi_video_mode);
+            vga_video_mode  = baseVideoMode(vga_video_mode);
+        }
         nvs_get_b("v_sync_enabled", v_sync_enabled, sts);
+        // ...and they drive the display faster than the machine, so v_sync pacing
+        // (one emulated frame per display frame) would run it 50% fast.
+        if (isFastVideoMode(hdmi_video_mode) || isFastVideoMode(vga_video_mode))
+            v_sync_enabled = false;
         nvs_get_b("gigascreen_enabled", gigascreen_enabled, sts);
         nvs_get_u8("gigascreen_onoff", gigascreen_onoff, sts);
         nvs_get_b("ulaplus", ulaplus, sts);

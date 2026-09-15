@@ -1028,6 +1028,39 @@ static void resolveConstraints(CommitReport& rep) {
                     changed |= force(vgm[i], 0, rep, "VGM chips off: esxDOS is off");
         }
 
+        // The 90/75 Hz video modes run the HDMI PIO at a 378 MHz TMDS clock
+        // (37.8 MHz pixel, x1.5 the standard 25.2), and sys_clk 378 MHz is the only
+        // CPU clock that gives that a clean 1.0 divider: 252 cannot reach it at all
+        // (a PIO divider below 1 does not exist) and 504 would need 1.333, a
+        // fractional divider whose phase pattern no longer repeats per pixel.
+        // Mutually constrained with the CPU clock, so it resolves by g_seq like the
+        // SAA/Timex pair: whichever of the two the user edited last wins.
+        if (Config::isFastVideoMode((uint8_t)staged(SET_VIDEO_MODE))) {
+#if !defined(VGA_HDMI) && !defined(HDMI)
+            // SOFTTV / TV / TFT drive their own panel timing — there is no TMDS or
+            // VGA pixel clock here to run at x1.5, so the pick would buy nothing and
+            // still bump the CPU clock below.
+            changed |= force(SET_VIDEO_MODE,
+                             Config::baseVideoMode((uint8_t)staged(SET_VIDEO_MODE)), rep,
+                             "90/75 Hz needs an HDMI or VGA output");
+#else
+            if (staged(SET_CPU_MHZ) != Config::VM_FAST_CPU_MHZ) {
+                if (g_seq[SET_VIDEO_MODE] >= g_seq[SET_CPU_MHZ])
+                    changed |= force(SET_CPU_MHZ, Config::VM_FAST_CPU_MHZ, rep,
+                                     "CPU clock set to 378 MHz: 90/75 Hz needs it");
+                else
+                    changed |= force(SET_VIDEO_MODE,
+                                     Config::baseVideoMode((uint8_t)staged(SET_VIDEO_MODE)), rep,
+                                     "90/75 Hz modes need CPU 378 MHz");
+            }
+            // ...and the display then runs faster than the machine. v_sync pacing is
+            // one emulated frame per DISPLAY frame (ESPectrum::loop), so leaving it on
+            // would run the Spectrum 50% fast. Not a preference here — a constraint.
+            if (staged(SET_VSYNC))
+                changed |= force(SET_VSYNC, 0, rep, "V-Sync off: the display runs at x1.5");
+#endif
+        }
+
         // MB-02+ and Profi both claim the upper MemESP pages; enabling MB-02+ on Profi
         // corrupts Profi's working set and the machine fails to boot (OSDMain.cpp:3374).
         if (staged(SET_MB02) && stagedIsProfi())
@@ -1374,8 +1407,11 @@ void commit(CommitReport& rep) {
         const size_t curBytes = curMain + curPrev, newBytes = newMain + newPrev;
         const size_t grow     = newBytes > curBytes ? newBytes - curBytes : 0;
         const size_t mainGrow = newMain  > curMain  ? newMain  - curMain  : 0;
-        const char*  label    = (g_val[SET_VIDEO_MODE] == Config::VM_720x480_60)
-                              ? "720x480" : "720x576";
+        const uint8_t vmNew   = (uint8_t)g_val[SET_VIDEO_MODE];
+        const char*  label    = (Config::baseVideoMode(vmNew) == Config::VM_720x480_60)
+                              ? "720x480"
+                              : (Config::baseVideoMode(vmNew) == Config::VM_720x576_50)
+                              ? "720x576" : "640x480";
         bool fits = (grow == 0) || getFreeHeap() >= grow + Subsystems::SRAM_MARGIN;
         if (!fits && want_gs() &&
             getFreeHeap() + curPrev >= mainGrow + Subsystems::SRAM_MARGIN) {

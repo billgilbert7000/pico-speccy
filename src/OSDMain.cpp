@@ -1233,6 +1233,10 @@ void OSD::drawOSD(bool bottom_info) {
             case Config::VM_640x480_50: vmname = "640x480@50Hz"; break;
             case Config::VM_720x480_60: vmname = "720x480@60Hz"; break;
             case Config::VM_720x576_50: vmname = "720x576@50Hz"; break;
+            case Config::VM_640x480_90: vmname = "640x480@90Hz"; break;
+            case Config::VM_640x480_75: vmname = "640x480@75Hz"; break;
+            case Config::VM_720x480_90: vmname = "720x480@90Hz"; break;
+            case Config::VM_720x576_75: vmname = "720x576@75Hz"; break;
             default:                    vmname = "unknown";      break;
         }
         char buf2[41];
@@ -5895,6 +5899,10 @@ static void buildEmulatorInfoText() {
             case Config::VM_640x480_50: vmname = "640x480@50"; break;
             case Config::VM_720x480_60: vmname = "720x480@60"; break;
             case Config::VM_720x576_50: vmname = "720x576@50"; break;
+            case Config::VM_640x480_90: vmname = "640x480@90"; break;
+            case Config::VM_640x480_75: vmname = "640x480@75"; break;
+            case Config::VM_720x480_90: vmname = "720x480@90"; break;
+            case Config::VM_720x576_75: vmname = "720x576@75"; break;
             default:                    vmname = "unknown";    break;
         }
         pos += infoAppend(buf, pos, bufsz, "\n --- Video ---\n");

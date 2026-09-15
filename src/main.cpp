@@ -2058,7 +2058,7 @@ int main() {
         if (clk_changed && clk_locked) {
             Debug::log2SD("main: sys_clk -> %d MHz OK", (int)Config::cpu_mhz);
 #ifdef VGA_HDMI
-            graphics_set_pio_clk_div((float)Config::cpu_mhz / 252.0f);
+            graphics_set_sys_clk_mhz(Config::cpu_mhz);
 #endif
             // Reinit audio: I2S PIO divider was calculated for old sys_clk
             pcm_setup(ESPectrum::Audio_freq);

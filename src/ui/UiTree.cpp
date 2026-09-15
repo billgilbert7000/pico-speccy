@@ -24,6 +24,18 @@
 #include "messages.h"        // _PIN_XSTR for the Real sound input row label
 #include <hardware/vreg.h>   // VREG_VOLTAGE_* values used by the option table
 #include <stdio.h>           // snprintf (murmuzavrTag)
+#include <string.h>          // strlen/strstr/memmove (label fitting)
+
+// graphics.c, for the PIO divider shown beside each video mode. Declared here
+// rather than including graphics.h: that header drags in the whole driver set
+// (vga.h/hdmi.h/tv.h/st7789.h and three fonts) for two prototypes.
+extern "C" int   graphics_fast_mode(int mode);
+extern "C" float graphics_clk_div_at(int mode, unsigned sys_mhz, int vga);
+#ifdef VGA_HDMI
+// vga.c. Must be declared at GLOBAL scope: inside namespace nm it would mangle to
+// nm::SELECT_VGA and fail to link, which is exactly what a local `extern` did.
+extern bool SELECT_VGA;
+#endif
 
 #if defined(VGA_HDMI)
 // Defined in drivers/vga-nextgen/vga.c; file scope, or inside namespace nm it would
@@ -144,7 +156,109 @@ static const Option opt_video_mode[] = {      // values are the VM_* enum
     { "640x480 @50", 1 },
     { "720x480 @60", 2 },
     { "720x576 @50", 3 },
+    // 37.8 MHz pixel clock instead of 25.2 (PIO divider 1.0 at sys_clk 378 MHz):
+    // same geometry, x1.5 the refresh. Need CPU 378 MHz and force V-Sync off —
+    // resolveConstraints() settles both, whichever the user edited last.
+    { "640x480 @90", 4 },
+    { "640x480 @75", 5 },
+    { "720x480 @90", 6 },
+    { "720x576 @75", 7 },
 };
+// The video-mode list carries the PIO divider each mode would run at, because that
+// divider is the whole point of the "fast" set and of the VGA pixel clocks: an
+// integer one repeats its phase per pixel, a fractional one jitters (1.5 is the
+// half-integer the TMDS path tolerates). It is a function of the mode AND of the
+// CPU clock, so it cannot be baked into a static table — hence NM_RADIO_D, rebuilt
+// on every call like mach_pentOpts (the Overclock row is right next to this one and
+// its staged value must be reflected immediately).
+//
+// The clock fields are machine-INDEPENDENT — all three per-machine variants of each
+// 50 Hz mode share one vga_pixel_clk (19.89 MHz / 27 MHz) and one tmds_mhz — so one
+// representative graphics.c index per VM_* value gives the exact divider without
+// duplicating VIDEO::Reset()'s arch-dependent mapping here.
+static int vmGraphicsIndex(int32_t vm) {
+    int idx;
+    switch (Config::baseVideoMode((uint8_t)vm)) {
+        case Config::VM_640x480_50: idx = 1; break;
+        case Config::VM_720x576_50: idx = 4; break;
+        case Config::VM_720x480_60: idx = 7; break;
+        default:                    idx = 0; break;  // VM_640x480_60
+    }
+    return Config::isFastVideoMode((uint8_t)vm) ? graphics_fast_mode(idx) : idx;
+}
+
+// Three decimals with the trailing zeros stripped: the common (clean) dividers
+// then read "1.0" / "1.5" / "14.0" rather than "1.000", and the quantised VGA ones
+// still show they are not integer ("18.938" for the 1/16 step 18.9375).
+static void divStr(char* out, size_t n, float d) {
+    snprintf(out, n, "%.3f", (double)d);
+    char* p = out + strlen(out) - 1;
+    while (p > out && *p == '0' && *(p - 1) != '.') *p-- = '\0';
+}
+
+// Glyphs an option label gets in the right pane — the width textClip() is handed
+// at UiRender.cpp's radio row. Width is the binding constraint here and overflow
+// is expensive: textClip does not clip mid-glyph, it drops to fits-2 characters
+// and appends "..", so one glyph too many costs three and mangles the divider
+// itself. 25 at 320 px; 0 before the first computeLayout().
+static int optLabelGlyphs() {
+    const int wpx = LY.rw - 3 * LY.pad - radioW();
+    return wpx > 0 ? wpx / glyphW() : 0;
+}
+
+static const Option* video_modeOpts(uint8_t& cnt) {
+    cnt = (uint8_t)(sizeof(opt_video_mode)/sizeof(opt_video_mode[0]));
+#if defined(VGA_HDMI) || defined(HDMI)
+    static Option opts[sizeof(opt_video_mode)/sizeof(opt_video_mode[0])];
+    static char lbl[sizeof(opt_video_mode)/sizeof(opt_video_mode[0])][40];
+  #ifdef VGA_HDMI
+    const int vga = ::SELECT_VGA ? 1 : 0;
+  #else
+    const int vga = 0;
+  #endif
+    // The STAGED CPU clock, not the live one: picking a 90/75 Hz mode bumps it to
+    // 378 MHz through resolveConstraints, and a label computed from the live clock
+    // would contradict the constraint that just fired.
+    const unsigned mhz = (unsigned)Stage::get(SET_CPU_MHZ);
+    for (uint8_t i = 0; i < cnt; i++) {
+        const int32_t vm = opt_video_mode[i].value;
+        opts[i] = opt_video_mode[i];
+        const float d = graphics_clk_div_at(vmGraphicsIndex(vm), mhz, vga);
+        char ds[16];
+        // A mode the CPU clock cannot reach still says what its divider WOULD be,
+        // and at which clock: "(div 1.0/378)". The 90/75 Hz set is refused by
+        // resolveConstraints at any clock but 378 even where the divider it has
+        // here is legal (VGA: 6.625 at 252 MHz), so the number quoted is the one
+        // at VM_FAST_CPU_MHZ, not the one at `mhz`.
+        const bool needsFast = Config::isFastVideoMode((uint8_t)vm) &&
+                               mhz != Config::VM_FAST_CPU_MHZ;
+        if (needsFast || d <= 0.0f) {
+            divStr(ds, sizeof(ds),
+                   graphics_clk_div_at(vmGraphicsIndex(vm), Config::VM_FAST_CPU_MHZ, vga));
+            snprintf(lbl[i], sizeof(lbl[i]), "%s (div %s/%u)", opt_video_mode[i].label,
+                     ds, (unsigned)Config::VM_FAST_CPU_MHZ);
+        } else {
+            divStr(ds, sizeof(ds), d);
+            snprintf(lbl[i], sizeof(lbl[i]), "%s (div %s)", opt_video_mode[i].label, ds);
+        }
+        // The space before the bracket is padding and is the first thing to give
+        // up: VGA's "(div 10.0/378)" is one glyph over the 25 the pane allows,
+        // and losing the space is cheaper than losing the divider to textClip's
+        // "..". Nothing else here can overflow — the widest spaced label is 25.
+        const int fits = optLabelGlyphs();
+        if (fits > 0 && (int)strlen(lbl[i]) > fits) {
+            char* sp = strstr(lbl[i], " (");
+            if (sp) memmove(sp, sp + 1, strlen(sp));   // drop that one space
+        }
+        opts[i].label  = lbl[i];
+        opts[i].slabel = opt_video_mode[i].label;   // collapsed row stays the bare mode
+    }
+    return opts;
+#else
+    return opt_video_mode;   // SOFTTV/TV/TFT drive their own panel — no PIO divider
+#endif
+}
+
 static const Option opt_render[] = {
     { "Standard",    0 },
     { "Snow effect", 1 },
@@ -583,7 +697,7 @@ static const Node kHdmi[] = {
 };
 
 static const Node kVideo[] = {
-    NM_RADIO(TXT_VID_MODE,       SET_VIDEO_MODE, opt_video_mode, nullptr),
+    NM_RADIO_D(TXT_VID_MODE,     SET_VIDEO_MODE, video_modeOpts, nullptr),
     NM_SUB  (TXT_VID_HDMI,       kHdmi,          p_hdmiOut),
     NM_RADIO(TXT_VID_PALETTE,    SET_PALETTE,    opt_palette,    nullptr),
     NM_RADIO(TXT_VID_RENDER,     SET_RENDER,     opt_render,     nullptr),
