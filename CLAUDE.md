@@ -4384,6 +4384,56 @@ Gated by `Config::zifi_enabled`. First two: port low byte `0xEF`, high address b
 - Most real ZiFi software (e.g. `debug/NET/MRF.TRD` terminal, drivers ZW-64/ZW-64-SC/GZ-80) uses the **16550 window**, not the API. Verified by disasm: `LD B,#Fx; LD C,#EF; OUT (C),A` + `IN A,(#FDEF)` LSR poll. App sends its own AT commands over the bridge.
 - Wired in `Ports::input`/`Ports::output` after the API check.
 
+### The NIC is a serial port, not a WiFi layer — UART-only mode (2026-09-15, NOT hw-tested)
+
+`ZiFi::enabled` used to be `zifi_enabled && wifi_enabled && arch != A_PROFI`, the
+menu row was greyed while WiFi was off (`p_nicAvail` = `p_wifiOn() && p_espSerial()`)
+and `act_wifi`'s disconnect branch turned `Config::zifi_enabled` off as well. All
+three are gone: **the NIC is available with WiFi off, and that is the point** — the
+ZiFi UART is an ordinary 115200 8N1 port, so with WiFi off the guest owns it end to
+end and can talk to an Arduino or anything else through the 16550 window (user's
+report, `MRF/drivers/uart-zxwifi.asm` as the guest-side driver). Requiring WiFi was
+what made `Uart.read` answer 0xFF in exactly that configuration — the ports gate on
+`Config::zifi_enabled` (Ports.cpp) but nothing had called `ZiFi::init()`, so there
+was no UART behind them. Profi (heap) and the +3e (`#xxEF` collision) still force
+it off, and on-chip-WiFi transport still greys the row (`p_espSerial` — there is no
+UART there at all).
+
+- **`act_wifi` must not `ZiFi::deinit()` with the NIC on**: that is the guest's UART
+  now, not WiFi's plumbing.
+- **What the firmware puts on that UART by itself, and when**: nothing, once WiFi is
+  off — `netBackgroundTick` (boot join + SNTP) and `netStatusRefresh` (`AT+CWJAP?` /
+  `AT+CIFSR`) both already gate on `wifi_enabled || ZiFiAT::connected`. The one
+  exception is `zifi_set_baud`'s `AT+UART_CUR=...`, sent from `ZiFi::init()`/`deinit()`
+  whenever Network → Baud is not 115200 — so UART-only mode wants the default rate.
+  Turning WiFi off itself still costs one `AT+CWQAP` at that moment.
+- **`LED::NET` is visible for either half** (`wifi_enabled || zifi_enabled`), so the
+  lamp blinks on guest serial traffic with no WiFi — the one-glance "is the program
+  even talking to the port" check.
+
+### Boot SNTP is a switch: Network → Sync at boot (`Config::sntp_auto`)
+
+The boot state machine is the only thing that talks to the link unasked, and its
+tail is the clock: `AT+CIPSNTPCFG` plus up to 15 `AT+CIPSNTPTIME?` one second apart
+(`AS_MAX_ATTEMPTS`), which is noise for anything on that UART that is not an ESP —
+and it ran even with the RTC off. `autoSyncBegin(ssid, pass, tz, sntp)` /
+`WifiNet::autoBegin(..., sntp)` take a **join-only** flag: the ESP FSM ends at
+`AS_DONE` inside `as_to_sntpcfg()` (which is also the CWJAP-timeout target, so a
+failed join ends there too) and the on-chip one at `A_DONE` as soon as `linkUp()`,
+including the already-associated fast path in `autoBegin`. With it off a boot costs
+exactly two AT commands, `CWMODE` and `CWJAP`, and then silence.
+
+- `wifi.cfg` key `sntp`; **absent = on**, so existing cards keep today's behaviour
+  (`loadWifiConfig` resets it to true before parsing, like `wifi_tz`).
+- The row is `NM_BOOL`, indented under `Sync time (SNTP)`, and deliberately **not**
+  greyed with WiFi off (a setting for the next boot, same class as Time zone) — a
+  user who turns WiFi off to free the UART must still be able to reach it.
+  `SET_SNTP_AUTO` is AC_LIVE without F_PREVIEW: nothing is live to preview, and
+  F_PREVIEW would rewrite wifi.cfg on every keypress of an edit that may be discarded.
+- Hardware Info reports `SNTP at boot` whenever WiFi is on — "why is my serial
+  device seeing AT commands" is answered there.
+- The manual `Sync time (SNTP)` action is untouched: it is user-invoked.
+
 ### UART TX/RX pins — runtime, per-board (`src/BoardPins.*`)
 - **No compile-time pin define** anymore (old `-DZIFI_TX_PIN` removed). `ZiFi::init()` reads `Config::zifi_tx_pin`/`zifi_rx_pin` and resolves via `BoardPins::resolveZifiPins()` + `uartInstanceForTx()` (authoritative RP2350 pinmux from `rp2350[ab]_interface_pins.json` — the old `(pin/4)%2` heuristic was WRONG for GPIO 8/10/24/26). UART instance/funcsel chosen at runtime; `g_uart`/`g_uart_irq` statics.
 - Config sentinels: `0xFE` = board default, `0xFF` = OFF (no UART, FIFO-only), else explicit TX (RX = odd partner). Stored in NVS (`zifi_tx_pin`/`zifi_rx_pin`).

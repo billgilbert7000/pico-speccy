@@ -286,6 +286,8 @@ static void    put_volume(int32_t v) { Config::aud_volume = (signed char)v; }
 
 static int32_t get_wifiTz()          { return (int32_t)Config::wifi_tz; }
 static void    put_wifiTz(int32_t v) { Config::wifi_tz = (signed char)v; }
+static int32_t get_sntpAuto()          { return Config::sntp_auto ? 1 : 0; }
+static void    put_sntpAuto(int32_t v) { Config::sntp_auto = (v != 0); }
 
 static int32_t get_zifiBaud()          { return (int32_t)Config::zifi_baud; }
 static void    put_zifiBaud(int32_t v) { Config::zifi_baud = (uint32_t)v; }
@@ -509,6 +511,10 @@ static bool hook_volume(int32_t nv, int32_t) {
 }
 static bool hook_wifiTz(int32_t, int32_t) {
     Config::saveWifiConfig();               // tz lives in wifi.cfg, not NVS
+    return true;
+}
+static bool hook_sntpAuto(int32_t, int32_t) {
+    Config::saveWifiConfig();               // wifi.cfg key "sntp", like tz above
     return true;
 }
 static bool hook_zifiBaud(int32_t, int32_t) {

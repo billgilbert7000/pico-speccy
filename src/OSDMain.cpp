@@ -6291,6 +6291,11 @@ static void buildEmulatorInfoText() {
         else
             pos += infoAppend(buf, pos, bufsz,
                 " WiFi           : On (not connected)\n");
+        // The one thing that puts traffic on the link by itself — worth stating,
+        // since "why is my serial device seeing AT commands" is answered here.
+        if (Config::wifi_enabled)
+            pos += infoAppend(buf, pos, bufsz, " SNTP at boot   : %s\n",
+                              Config::sntp_auto ? "On" : "Off");
     }
 
 }

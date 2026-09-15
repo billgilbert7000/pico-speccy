@@ -1332,17 +1332,20 @@ void act_wifi() {
             snprintf(q, sizeof(q), "Turn WiFi off?");
         if (!uiConfirm(q, TXT_NET_WIFI)) return;
         ZiFiAT::disconnect();
+        // Clear the cached association even if CWQAP was never acked. "WiFi off" is
+        // unambiguous, and a stale `connected` is what keeps netStatusRefresh()
+        // issuing AT+CWJAP?/AT+CIFSR on every invalidation — onto a link that may
+        // now have something other than an ESP on it (the NIC survives this now).
+        ZiFiAT::connected = false;
+        ZiFiAT::current_ssid.clear();
+        ZiFiAT::current_ip.clear();
         Config::wifi_enabled = false;
-        // The NIC is purely a layer on top of WiFi — it cannot stay on once WiFi
-        // is off. Drop it too (NVS-persisted separately from wifi.cfg). The NIC is
-        // a staged setting now — tell the stage its live value moved under it.
-        if (Config::zifi_enabled) {
-            Config::zifi_enabled = 0;
-            ZiFi::enabled = 0;
-            Config::save();
-            Stage::invalidate(SET_ZIFI_NIC);
-        }
-        if (!ZiFiAT::connected) ZiFi::deinit();
+        // The NIC SURVIVES this. It is the guest's serial port, not a layer on top
+        // of WiFi, and switching WiFi off is precisely how the user asks for a UART
+        // nothing in the firmware writes to. Turning it off here used to make that
+        // configuration unreachable from the menu.
+        // Keep the link up for it, too: deinit() would take the guest's UART down.
+        if (!ZiFiAT::connected && !Config::zifi_enabled) ZiFi::deinit();
         Config::saveWifiConfig();
         netStatusInvalidate();
         uiToast(MSG_WIFI_DISCONNECTED, false, 1500);

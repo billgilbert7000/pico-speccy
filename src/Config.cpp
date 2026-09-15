@@ -166,6 +166,7 @@ string   Config::wifi_ssid;
 string   Config::wifi_pass;
 bool     Config::wifi_enabled = false;
 signed char Config::wifi_tz = 0;
+bool     Config::sntp_auto = true;
 string   Config::net_host;
 string   Config::net_user;
 uint16_t Config::net_port = 0;
@@ -824,6 +825,7 @@ void Config::loadWifiConfig() {
     wifi_pass.clear();
     wifi_enabled = false;
     wifi_tz = 0;
+    sntp_auto = true;   // absent key = on, so existing cards keep today's behaviour
     FIL* f = fopen2(WIFI_CFG_PATH, FA_READ);
     if (!f) f = fopen2(WIFI_CFG_PATH_OLD, FA_READ); // legacy location
     if (!f) return;
@@ -841,6 +843,7 @@ void Config::loadWifiConfig() {
                 else if (key == "pass")   wifi_pass = val;
                 else if (key == "autoconnect") wifi_enabled = (val == "1" || val == "true");
                 else if (key == "tz")     wifi_tz = (signed char)atoi(val.c_str());
+                else if (key == "sntp")   sntp_auto = (val == "1" || val == "true");
                 else if (key == "net_host")  net_host = val;
                 else if (key == "net_user")  net_user = val;
                 else if (key == "net_port")  net_port = (uint16_t)atoi(val.c_str());
@@ -868,11 +871,11 @@ void Config::saveWifiConfig() {
     // 4 KB core stack is tight — a 1 KB local here overflowed it (stackOvf). Not reentrant.
     static char buf[1024];
     int n = snprintf(buf, sizeof(buf),
-                     "ssid=%s\npass=%s\ntz=%d\nautoconnect=%d\n"
+                     "ssid=%s\npass=%s\ntz=%d\nautoconnect=%d\nsntp=%d\n"
                      "net_host=%s\nnet_user=%s\nnet_port=%u\nnet_proto=%u\nbaud=%u\n"
                      "net_dl=%s\nnet_ul=%s\ncatalog_host=%s\ncatalog_port=%u\nlast_loc=%s\n",
                      wifi_ssid.c_str(), wifi_pass.c_str(),
-                     (int)wifi_tz, wifi_enabled ? 1 : 0,
+                     (int)wifi_tz, wifi_enabled ? 1 : 0, sntp_auto ? 1 : 0,
                      net_host.c_str(), net_user.c_str(),
                      (unsigned)net_port, (unsigned)net_proto, (unsigned)zifi_baud,
                      net_dl_dir.c_str(), net_ul_dir.c_str(),

@@ -239,6 +239,10 @@ const char* romsetName(int32_t composite);
     /* a value that only lands on exit would make those actions run on the OLD link.     */ \
     X(SET_WIFI_TZ,         AC_LIVE,   F_PREVIEW,             get_wifiTz,     put_wifiTz,     hook_wifiTz,    -1)          \
     X(SET_ZIFI_BAUD,       AC_LIVE,   F_PREVIEW | F_MODAL,   get_zifiBaud,   put_zifiBaud,   hook_zifiBaud,  -1)          \
+    /* Boot SNTP on/off (wifi.cfg, like tz). NOT F_PREVIEW: it changes nothing that is   */ \
+    /* live — it is read once, ~4 s into the next run — so there is no reason to write   */ \
+    /* wifi.cfg on every keypress of an edit the user may still discard.                 */ \
+    X(SET_SNTP_AUTO,       AC_LIVE,   0,                     get_sntpAuto,   put_sntpAuto,   hook_sntpAuto,  -1)          \
     /* MIDI mode swaps the whole engine (UART bitbang / GM.DLS wavetable) in the hook.    */ \
     /* GM.DLS (mode 4) is budget-gated by a special case in commit() — F_GATED would fire */ \
     /* on the cheap modes 1-2 too, which the classic dialog never gated.                  */ \

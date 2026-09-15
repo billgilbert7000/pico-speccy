@@ -1009,15 +1009,18 @@ static bool p_espLink() {
 // stay editable regardless: the link is CONFIGURED before it is brought up.
 static bool p_wifiOn() { return Config::wifi_enabled && p_espLink(); }
 // Rows that only make sense with an ESP-01 on a serial link: its baud rate, and
-// the guest-visible NIC (raw AT pass-through to the ESP) — neither exists on the
-// on-chip radio, where the TCP/IP stack is ours.
+// the guest-visible NIC (the serial window the guest sees) — neither exists on the
+// on-chip radio, where there is no UART at all and the TCP/IP stack is ours.
 static bool p_espSerial() {
 #if PICOSPECCY_WIFI
     if (Config::zifi_transport == 2) return false;
 #endif
     return true;
 }
-static bool p_nicAvail() { return p_wifiOn() && p_espSerial(); }
+// The NIC needs a link to hand the guest and nothing else. It is deliberately NOT
+// gated on WiFi: with WiFi off the guest gets a plain UART that the firmware never
+// writes to, which is how a non-ESP device on those pins is talked to.
+static bool p_nicAvail() { return p_espLink() && p_espSerial(); }
 
 static const Node kNetwork[] = {
     NM_ACTIONV_EN(TXT_NET_WIFI, act_wifi, vl_wifi, nullptr, p_espLink),
@@ -1027,6 +1030,10 @@ static const Node kNetwork[] = {
     NM_RADIO_EN(NM_IND TXT_NET_BAUD,     SET_ZIFI_BAUD,      opt_zifi_baud,     nullptr, p_espSerial),
     NM_RADIO    (TXT_NET_TZ,   SET_WIFI_TZ, opt_tz, nullptr),
     NM_ACTION_EN(TXT_NET_SYNC, act_sntp, nullptr, p_wifiOn),
+    // Not greyed with WiFi off: it is a setting for the NEXT boot, the same class as
+    // Time zone and the link settings above — and turning it off is exactly what a
+    // user with something other than an ESP on the UART comes here to do.
+    NM_BOOL     (NM_IND TXT_NET_SYNC_AUTO, SET_SNTP_AUTO, nullptr),
 #if ZIFI_NET_CLIENT
     NM_ACTION_EN(TXT_NET_FTP,  act_ftpServer, nullptr, p_wifiOn),
     NM_ACTION_EN(TXT_NET_HTTP, act_httpTest,  nullptr, p_wifiOn),

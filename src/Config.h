@@ -343,6 +343,11 @@ public:
     static uint8_t ide_scheme;   // IDE/HDD: 0=OFF 1=NEMO 2=PROFI (mutually exclusive with esxDOS DivMMC/DivIDE)
     static string ide_image[2];  // IDE hd0/hd1 image paths ([0]=master, [1]=slave)
     static uint16_t ide_chs[2][3]; // per-slot geometry override [C,H,S]; 0,0,0 = auto-detect
+    // Guest-visible serial port: the ZiFi FIFO window (#xxEF), the 16550 window and
+    // the ZX UNO pair (#FC3B/#FD3B), all bridged to the ESP link. Independent of
+    // wifi_enabled — with WiFi off this is a PLAIN UART the guest owns end to end
+    // (nothing in the firmware then writes AT commands into it), which is how an
+    // Arduino or any other serial device is talked to from the emulated machine.
     static uint8_t zifi_enabled; // 0=Off, 1=ZiFi NIC
     // ZiFi UART pins: 0xFE = board default, 0xFF = OFF, else explicit TX/RX
     // (resolved via BoardPins). See BoardPins.h / Network → GPIO picker.
@@ -354,12 +359,18 @@ public:
     static uint32_t zifi_baud;  // ESP-01S UART rate (115200 default; raised via AT+UART_CUR)
     static string wifi_ssid;
     static string wifi_pass;
-    // WiFi master switch: owns host networking (FTP/SSH/WEB), is the prerequisite for
-    // the ZiFi NIC, and (with a saved SSID) triggers the boot auto-connect. Fully
-    // independent of the NIC — the NIC never brings WiFi up. Persisted in wifi.cfg
-    // under the legacy key "autoconnect" so pre-existing configs migrate for free.
+    // WiFi master switch: owns host networking (FTP/SSH/WEB) and, with a saved SSID,
+    // triggers the boot auto-connect. Fully independent of the NIC in BOTH
+    // directions — the NIC never brings WiFi up, and WiFi is not a prerequisite for
+    // the NIC. Persisted in wifi.cfg under the legacy key "autoconnect" so
+    // pre-existing configs migrate for free.
     static bool wifi_enabled;
     static signed char wifi_tz; // SNTP timezone offset in hours (wifi.cfg key "tz")
+    // Boot-time SNTP: the only thing in the firmware that talks to the link on its
+    // own after the join. Off leaves the ESP joined but never asks it the time —
+    // the setting exists because that poll is AT traffic on a UART the user may be
+    // sharing with something else. wifi.cfg key "sntp"; absent = on (legacy).
+    static bool sntp_auto;
     // Network file-transfer client (Network → File transfer). Stored in wifi.cfg.
     // Passwords are NOT persisted (re-prompted each session).
     static string   net_host;   // last remote host

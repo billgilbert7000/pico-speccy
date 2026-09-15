@@ -264,6 +264,7 @@ enum AutoState { A_IDLE, A_JOIN, A_SNTP, A_DONE, A_FAIL };
 AutoState a_state = A_IDLE;
 uint32_t  a_deadline = 0, a_send_deadline = 0;
 int       a_tz = 0, a_join_tries = 0, a_sntp_tries = 0;
+bool      a_sntp = true;   // false = join only, never start the SNTP exchange
 char      a_pass[65] = {0};
 
 uint32_t nowMs() { return to_ms_since_boot(get_absolute_time()); }
@@ -389,11 +390,11 @@ bool sntpSync(int tz, std::string& out_str) {
     return false;
 }
 
-void autoBegin(const char* ssid_, const char* pass, int tz) {
+void autoBegin(const char* ssid_, const char* pass, int tz, bool sntp) {
     if (!s_ready) { a_state = A_FAIL; return; }
     snprintf(s_ssid, sizeof(s_ssid), "%s", ssid_ ? ssid_ : "");
     snprintf(a_pass, sizeof(a_pass), "%s", pass ? pass : "");
-    a_tz = tz; a_join_tries = 0; a_sntp_tries = 0;
+    a_tz = tz; a_join_tries = 0; a_sntp_tries = 0; a_sntp = sntp;
     autoJoin();
 }
 
@@ -407,6 +408,7 @@ void autoPoll() {
         if (linkUp()) {
             char ip[20]; ipString(ip, sizeof(ip));
             wlog("WiFi(bg): up, IP %s", ip);
+            if (!a_sntp) { a_state = A_DONE; return; }
             if (!sntpStart()) { a_state = A_FAIL; return; }
             a_sntp_tries = 0; a_send_deadline = 0;
             a_state = A_SNTP; a_deadline = now + 15000;

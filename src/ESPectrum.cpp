@@ -1138,9 +1138,11 @@ void ESPectrum::setup() {
     // Profi forces ~80 KB of SRAM pages and OOMs at VIDEO::Init if the NIC's heap
     // rings (~12 KB) are also up — so never bring ZiFi up on Profi, regardless of a
     // stale zifi_enabled. (The menu also turns the NIC off when switching to Profi.)
-    // The NIC also requires WiFi to be enabled — it is purely the guest-port
-    // emulation layer on top of WiFi, never a standalone networking switch.
-    ZiFi::enabled = Config::zifi_enabled && Config::wifi_enabled && Config::arch != A_PROFI;
+    // WiFi is deliberately NOT a condition: the NIC is the guest's serial port, and
+    // with WiFi off it is a plain UART nobody but the guest writes to (see
+    // Config::zifi_enabled). Requiring WiFi here was what made the ports read 0xFF
+    // in that configuration.
+    ZiFi::enabled = Config::zifi_enabled && Config::arch != A_PROFI;
     if (ZiFi::enabled)
         ZiFi::init();
 
@@ -3150,8 +3152,11 @@ void ESPectrum::loop() {
     // Reconnect WiFi at boot whenever WiFi is enabled and an SSID is saved. This is
     // driven ONLY by the WiFi switch — the NIC is no longer a trigger (it used to
     // pull WiFi up as a side effect via `ZiFi::enabled && rtc_enabled`, which is
-    // exactly the leak that made FTP/SSH work only with the NIC on). The background
-    // state machine also runs SNTP, harmless when RTC is off.
+    // exactly the leak that made FTP/SSH work only with the NIC on). The same state
+    // machine then runs SNTP, unless Config::sntp_auto says not to: that poll is the
+    // only unsolicited traffic the firmware puts on the link, and it is AT+CIPSNTPCFG
+    // plus up to 15 AT+CIPSNTPTIME? a second apart — noise for anything on that UART
+    // that is not an ESP, and pointless when the clock is not wanted.
     if (!Config::wifi_ssid.empty() && Config::wifi_enabled) {
         if (!rtc_autosync_begun) {
             uint32_t now = to_ms_since_boot(get_absolute_time());
@@ -3166,7 +3171,8 @@ void ESPectrum::loop() {
                 // SPI-PSRAM m1p2 Profi runs with ~10 KB free and OOMs (see
                 // profi_zifi_oom_fix). Skip only when the headroom isn't there.
                 if (Config::arch != A_PROFI || getLargestAllocatable() >= 16384)
-                    ZiFiAT::autoSyncBegin(Config::wifi_ssid, Config::wifi_pass, Config::wifi_tz);
+                    ZiFiAT::autoSyncBegin(Config::wifi_ssid, Config::wifi_pass,
+                                          Config::wifi_tz, Config::sntp_auto);
             }
         } else {
             ZiFiAT::autoSyncPoll(); // no-op unless autoSyncBegin actually ran

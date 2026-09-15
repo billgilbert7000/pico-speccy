@@ -231,7 +231,9 @@ bool isVisible(Id i) {
         case GS:       return Config::gs_enabled != 0;
         case ULAPLUS:    return Config::ulaplus;
         case GIGASCREEN: return Config::gigascreen_enabled;
-        case NET:        return Config::wifi_enabled != 0; // networking is WiFi-driven (NIC requires it)
+        // Either half of the link: host networking (WiFi) or the guest's own serial
+        // port (the NIC), which is independent of WiFi and lights this on its traffic.
+        case NET:        return Config::wifi_enabled != 0 || Config::zifi_enabled != 0;
         case TAPE:     return true;
         // The music-note glyph also reports the VGM-card FM/PSG chips (OPL3,
         // OPLL, 2x SN76489 — their port writes touchW(AY)), so it must be in

@@ -57,8 +57,9 @@ int  scan(std::string* out, int maxn, uint32_t timeout_ms);
 // into RTC::setDateTime (tz = hours) and fills out_str "YYYY-MM-DD HH:MM:SS".
 bool sntpSync(int tz, std::string& out_str);
 
-// Non-blocking boot-time variant (join + SNTP), one step per autoPoll():
-void autoBegin(const char* ssid, const char* pass, int tz);
+// Non-blocking boot-time variant (join + SNTP), one step per autoPoll().
+// `sntp` false = join only; the FSM finishes at A_DONE the moment the link is up.
+void autoBegin(const char* ssid, const char* pass, int tz, bool sntp = true);
 void autoPoll();
 bool autoBusy();
 

@@ -316,6 +316,7 @@
 // ── Network ────────────────────────────────────────────────────────────────────
 #define TXT_NET_WIFI        "WiFi"
 #define TXT_NET_SYNC        "Sync time (SNTP)"
+#define TXT_NET_SYNC_AUTO   "Sync at boot"
 #define TXT_NET_TZ          "Time zone"
 #define TXT_NET_NIC_SUB     "ZiFi NIC"
 #define TXT_NET_TRANSPORT   "Transport"

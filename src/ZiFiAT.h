@@ -37,7 +37,10 @@ public:
     // driven one step per main-loop iteration. No OSD, never blocks. Call
     // autoSyncBegin() once, then autoSyncPoll() every loop tick; it self-stops
     // and writes the result straight into RTC. autoSyncBusy() reports progress.
-    static void autoSyncBegin(const string& ssid, const string& pass, int tz);
+    // `sntp` false = join only: the FSM stops at AS_DONE after CWJAP and never
+    // issues CIPSNTPCFG/CIPSNTPTIME?, so nothing of ours touches the link again.
+    static void autoSyncBegin(const string& ssid, const string& pass, int tz,
+                              bool sntp = true);
     static void autoSyncPoll();
     static bool autoSyncBusy();
 

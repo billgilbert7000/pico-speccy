@@ -264,6 +264,7 @@ uint32_t as_deadline = 0;   // per-step timeout (ms since boot)
 uint32_t as_retry_at = 0;   // when to fire the next query in AS_RETRY
 int      as_attempts = 0;
 int      as_tz       = 0;
+bool     as_sntp     = true;   // false = join only, never ask the ESP the time
 bool     as_got_ip   = false;
 char     as_line[160];
 int      as_linelen  = 0;
@@ -292,6 +293,9 @@ void as_to_cwjap(uint32_t now) {
     as_state = AS_CWJAP; as_deadline = now + 12000;
 }
 void as_to_sntpcfg(uint32_t now) {
+    // The join is finished; everything past this point is the clock. With SNTP off
+    // the FSM ends here, which is what keeps the link silent for the rest of the run.
+    if (!as_sntp) { as_state = AS_DONE; return; }
     char cmd[96];
     snprintf(cmd, sizeof(cmd), "AT+CIPSNTPCFG=1,%d,\"pool.ntp.org\"", as_tz);
     as_send(cmd);
@@ -316,16 +320,16 @@ bool ZiFiAT::autoSyncBusy() {
     return as_state != AS_IDLE && as_state != AS_DONE && as_state != AS_FAIL;
 }
 
-void ZiFiAT::autoSyncBegin(const string& ssid, const string& pass, int tz) {
+void ZiFiAT::autoSyncBegin(const string& ssid, const string& pass, int tz, bool sntp) {
 #if PICOSPECCY_WIFI
     if (WifiNet::selected()) {
         current_ssid = ssid;
-        WifiNet::autoBegin(ssid.c_str(), pass.c_str(), tz);
+        WifiNet::autoBegin(ssid.c_str(), pass.c_str(), tz, sntp);
         return;
     }
 #endif
     ZiFi::init(); // ensure UART backend
-    as_ssid = ssid; as_pass = pass; as_tz = tz;
+    as_ssid = ssid; as_pass = pass; as_tz = tz; as_sntp = sntp;
     as_attempts = 0; as_got_ip = false; as_linelen = 0;
     as_send("AT+CWMODE=1");
     as_state = AS_CWMODE; as_deadline = as_now() + 2000;
