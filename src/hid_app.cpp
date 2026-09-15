@@ -28,6 +28,7 @@
 #include "Debug.h"
 #include "Config.h"
 #include "ESPectrum.h"
+#include "HidMouseLayout.h"
 #include "hid_rip.h"
 #include "pico/time.h"
 #if defined(ZERO2_PIO_USB_HOST)
@@ -243,6 +244,16 @@ static void process_gp_2563_0575(uint8_t instance, uint8_t const* report, uint16
 static void process_gp_feed_2320(uint8_t instance, uint8_t const* report, uint16_t len);
 static void process_gp_0810_0001(uint8_t instance, uint8_t const* report, uint16_t len);
 
+// Mouse wheel plumbing (definitions further down, beside mouse_apply).
+// Reports on a parsed mouse interface that the layout refused and that were too long
+// to be the boot report — i.e. another report id sharing the endpoint. Dropped, and
+// counted only so the HID devices page can say so.
+static uint16_t mouse_layout_foreign[CFG_TUH_HID];
+static bool mouse_layout_parse(uint8_t instance, uint8_t const* desc, uint16_t desc_len);
+static bool mouse_layout_feed (uint8_t instance, uint8_t const* report, uint16_t len);
+static void mouse_layout_clear(uint8_t instance);
+static bool mouse_layout_ready(uint8_t instance);
+
 //--------------------------------------------------------------------+
 // TinyUSB Callbacks
 //--------------------------------------------------------------------+
@@ -318,6 +329,20 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
         hid_info[instance].report_count = n;
       }
     }
+  }
+
+  // Mice: the wheel lives only in the device's own report, so parse the descriptor
+  // and — when it really describes a wheel mouse — leave boot protocol behind for
+  // this interface. A device we cannot parse keeps the boot protocol it has.
+  if (itf_protocol == HID_ITF_PROTOCOL_MOUSE || itf_protocol == HID_ITF_PROTOCOL_NONE) {
+    if (mouse_layout_parse(instance, desc_report, desc_len)
+        && itf_protocol == HID_ITF_PROTOCOL_MOUSE) {
+      tuh_hid_set_protocol(dev_addr, instance, HID_PROTOCOL_REPORT);
+      // Asynchronous: boot-format reports keep arriving until it completes, and the
+      // decoder refuses those by length so they take the boot path below.
+    }
+  } else {
+    mouse_layout_clear(instance);
   }
 
   // 0810:0001 announces boot kbd/mouse protocol but is a gamepad dongle.
@@ -448,6 +473,7 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance)
   if (instance < CFG_TUH_HID) {
     hid_snap[instance].mounted = false;
     no_rpt_info_logged[instance] = false;
+    mouse_layout_clear(instance);   // the slot is reused by whatever plugs in next
   }
 }
 
@@ -794,6 +820,32 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
   f_write(&f, tmp, strlen(tmp), &bw);
   f_close(&f);
 */
+  // A mouse whose descriptor we parsed: decode by that layout, which is the only
+  // path that carries the wheel.
+  if (mouse_layout_ready(instance)) {
+    if (mouse_layout_feed(instance, report, len)) {
+      hid_snap_set_handler(instance, HID_HANDLER_MOUSE);
+      if (!tuh_hid_receive_report(dev_addr, instance))
+        hid_log_rearm_refused(instance);
+      return;
+    }
+    // Not a report this layout describes. On a BOOT-mouse interface — the only kind
+    // we switch to report protocol — a short report is still the boot report (the
+    // SET_PROTOCOL is asynchronous, so a few arrive after it) and takes the boot path
+    // below; anything longer is another report id on the same endpoint and must NOT
+    // reach the boot cast, whose first byte would be that report id read as the
+    // button mask (id 1 = a left button held down for ever, X/Y from the wrong
+    // bytes). An itf_protocol NONE interface is left alone entirely: there the other
+    // report ids are the device's keyboard and consumer keys, and process_generic_report
+    // below is what has always dispatched them.
+    if (itf_protocol == HID_ITF_PROTOCOL_MOUSE && len > 4) {
+      if (instance < CFG_TUH_HID) mouse_layout_foreign[instance]++;
+      if (!tuh_hid_receive_report(dev_addr, instance))
+        hid_log_rearm_refused(instance);
+      return;
+    }
+  }
+
   switch (itf_protocol)
   {
     case HID_ITF_PROTOCOL_KEYBOARD:
@@ -897,23 +949,67 @@ void cursor_movement(int8_t x, int8_t y, int8_t wheel)
 
 #include "ESPectrum.h"
 
-static void process_mouse_report(hid_mouse_report_t const * report, uint16_t len)
+// One place where a decoded mouse report reaches the emulated machine, whatever shape
+// it arrived in (boot layout, or the descriptor-parsed one). dx/dy are raw HID counts
+// (right / DOWN positive), wheel is notches (up positive).
+static void mouse_apply(bool bl, bool br, bool bm, int32_t dx, int32_t dy, int32_t wheel)
 {
     ESPectrum::mouseSeen = true;
-    ESPectrum::mouseButtonL = report->buttons & MOUSE_BUTTON_LEFT;
-    ESPectrum::mouseButtonR = report->buttons & MOUSE_BUTTON_RIGHT;
-    ESPectrum::mouseButtonM = report->buttons & MOUSE_BUTTON_MIDDLE;
-    ESPectrum::mouseX += report->x >> 2;
-    ESPectrum::mouseY -= report->y >> 2; // TODO: DPI
-    // Kempston wheel-mouse: #FADF bits 4-7 are a free-running notch counter.
-    // 3-byte boot-protocol reports (buttons/x/y) have NO wheel field — reading
-    // report->wheel there picks up garbage past the report → phantom scrolls.
-    if (len >= 4) ESPectrum::mouseWheel += (int8_t)report->wheel;
+    ESPectrum::mouseButtonL = bl;
+    ESPectrum::mouseButtonR = br;
+    ESPectrum::mouseButtonM = bm;
+    ESPectrum::mouseX += dx >> 2;
+    ESPectrum::mouseY -= dy >> 2; // TODO: DPI
+    // Kempston wheel mouse: #FADF bits 4-7 are a free-running notch counter.
+    ESPectrum::mouseWheel += (uint8_t)wheel;
     // Serial (COM) mouse packets consume deltas from these accumulators.
     // HID y is down-positive, which matches the Microsoft Mouse convention
     // (the FPGA negates PS/2 y for the same reason: MS_Y => -ms_delta_y).
-    ESPectrum::mouseDX += report->x;
-    ESPectrum::mouseDY += report->y;
+    ESPectrum::mouseDX += dx;
+    ESPectrum::mouseDY += dy;
+}
+
+//--------------------------------------------------------------------+
+// Mouse wheel: report protocol, per instance
+//--------------------------------------------------------------------+
+// The descriptor parser and the report decoder live in src/HidMouseLayout.h
+// (host-tested by tools/hid_mouse_layout_test.cpp); this is only the per-instance
+// plumbing. READ THAT HEADER before touching any of it — it says why a boot-protocol
+// mouse has no wheel at all, and why a device we fail to parse has to keep the boot
+// path it already works on.
+static HidMouse::Layout mouse_layout[CFG_TUH_HID];
+
+static void mouse_layout_clear(uint8_t instance) {
+    if (instance < CFG_TUH_HID) {
+        mouse_layout[instance] = HidMouse::Layout{};
+        mouse_layout_foreign[instance] = 0;
+    }
+}
+static bool mouse_layout_ready(uint8_t instance) {
+    return instance < CFG_TUH_HID && mouse_layout[instance].use;
+}
+static bool mouse_layout_parse(uint8_t instance, uint8_t const* desc, uint16_t desc_len) {
+    if (instance >= CFG_TUH_HID) return false;
+    mouse_layout_clear(instance);
+    return HidMouse::parse(mouse_layout[instance], desc, desc_len, HID_SNAP_REPORT_BYTES);
+}
+static bool mouse_layout_feed(uint8_t instance, uint8_t const* report, uint16_t len) {
+    if (!mouse_layout_ready(instance)) return false;
+    HidMouse::Report r;
+    if (!HidMouse::decode(mouse_layout[instance], report, len, r)) return false;
+    mouse_apply(r.bl, r.br, r.bm, r.dx, r.dy, r.wheel);
+    return true;
+}
+
+static void process_mouse_report(hid_mouse_report_t const * report, uint16_t len)
+{
+    // 3-byte boot-protocol reports (buttons/x/y) have NO wheel field — reading
+    // report->wheel there picks up garbage past the report → phantom scrolls.
+    mouse_apply(report->buttons & MOUSE_BUTTON_LEFT,
+                report->buttons & MOUSE_BUTTON_RIGHT,
+                report->buttons & MOUSE_BUTTON_MIDDLE,
+                report->x, report->y,
+                len >= 4 ? (int8_t)report->wheel : 0);
   /**
 
   //------------- button state  -------------//
@@ -1908,6 +2004,25 @@ extern "C" int hid_app_format_devices_info(char* buf, int bufsz)
           hid_info[inst].report_info[i].usage_page,
           hid_info[inst].report_info[i].usage);
       }
+    }
+
+    // Wheel: without a parsed layout the interface is still a 3-byte boot mouse and
+    // #FADF's wheel nibble can never move. This line is the one-glance check.
+    if (inst < CFG_TUH_HID && mouse_layout[inst].use) {
+      const HidMouse::Layout& L = mouse_layout[inst];
+      // proto=boot here means the SET_PROTOCOL we asked for at mount did not take,
+      // and the device is still sending 3-byte reports with no wheel in them.
+      pos += snprintf(buf + pos, bufsz - pos,
+        " wheel rpt id=%u len=%u b%u proto=%s\n"
+        "  X@%u/%u Y@%u/%u W@%u/%u\n",
+        L.report_id, L.bytes, L.btn_cnt,
+        tuh_hid_get_protocol(s.dev_addr, inst) == HID_PROTOCOL_REPORT ? "report" : "boot",
+        L.x_off, L.x_size, L.y_off, L.y_size, L.w_off, L.w_size);
+      if (mouse_layout_foreign[inst])
+        pos += snprintf(buf + pos, bufsz - pos, "  foreign rpts = %u\n",
+                        mouse_layout_foreign[inst]);
+    } else if (s.itf_protocol == HID_ITF_PROTOCOL_MOUSE) {
+      pos += snprintf(buf + pos, bufsz - pos, " wheel: none (boot mouse)\n");
     }
 
     pos += snprintf(buf + pos, bufsz - pos,

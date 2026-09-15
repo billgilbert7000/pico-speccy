@@ -286,7 +286,7 @@ public:
     static bool mouseButtonL;
     static bool mouseButtonR;
     static bool mouseButtonM;
-    static uint8_t mouseWheel; // free-running notch counter; #FADF returns its low nibble
+    static uint8_t mouseWheel; // free-running 4-bit notch counter in #FADF bits 4-7 (up = +1)
     static bool mouseSeen;     // a HID mouse report arrived — the Kempston mouse is real
     static int32_t mouseDX;    // serial (COM) mouse: un-sent movement, drained per packet
     static int32_t mouseDY;

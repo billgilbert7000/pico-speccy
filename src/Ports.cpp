@@ -1831,28 +1831,26 @@ IRAM_ATTR uint8_t Ports::input(uint16_t address) {
         // No mouse ever attached → keep the bus-float 0xFF so presence
         // detection (buttons==0xFF) still reads "absent".
         if (!ESPectrum::mouseSeen) return 0xff;
-        if (Z80Ops::isProfi) {
-          // Karabas-Pro manual p.25: bit0=R, bit1=L, bit2=M (active low),
-          // bit3=1, bits4-7 = wheel notch counter.
-          return (uint8_t)(((ESPectrum::mouseWheel & 0x0F) << 4) | 0x08 |
-                           (ESPectrum::mouseButtonM ? 0 : 0x04) |
-                           (ESPectrum::mouseButtonL ? 0 : 0x02) |
-                           (ESPectrum::mouseButtonR ? 0 : 0x01));
-        }
-        // A CLASSIC Kempston mouse drives only bit0 (right) and bit1 (left),
-        // both active low; bits 2-7 are "not used" and float HIGH, so the idle
-        // byte is 0xFF — and software tests for exactly that. Workbench +3e
-        // does `IN A,(#FADF) / CP #FF / JR NZ` per frame (its pointer routine
-        // at RAM #EBC6) and treats anything else as "a button is down", so the
-        // Karabas wheel layout above — 0x0F when idle, because the wheel
-        // counter sits in bits 4-7 — left the whole GUI with a permanently
-        // pressed button and nothing in it would respond (hw 2026-09-14).
-        // ZEsarUX agrees (operaciones.c: buttons = 255, masked to 0x0F only on
-        // the ZX Next, where the wheel really is in the high nibble).
-        uint8_t kmb = 0xFF;
-        if (ESPectrum::mouseButtonL) kmb &= (uint8_t)~0x02;
-        if (ESPectrum::mouseButtonR) kmb &= (uint8_t)~0x01;
-        return kmb;
+        // Wheel mouse, one layout on every machine (Karabas-Pro manual p.25, the
+        // DIY interface in DonNews #19, the ZX Next): bit0=R, bit1=L, bit2=M (all
+        // active low), bit3 tied to 1, bits 4-7 = a 4-bit up/down wheel counter
+        // (+1 per notch scrolled up).
+        //
+        // A CLASSIC two-button mouse drives only bits 0-1 and floats bits 2-7
+        // high, i.e. the idle byte is 0xFF — and software tests for exactly that.
+        // Workbench +3e does `IN A,(#FADF) / CP #FF / JR NZ` per frame (pointer
+        // routine at RAM #EBC6) and reads anything else as "a button is down",
+        // which is what left its whole GUI unresponsive (hw 2026-09-14). The
+        // wheel counter is free-running and every driver reads DELTAS, so its
+        // power-up value is ours to choose: ESPectrum::mouseWheel starts at 0x0F,
+        // which makes an untouched wheel mouse answer that same 0xFF. Only a
+        // wheel actually turned (or a middle click) can confuse such software —
+        // as it would on real hardware, where the machine reset that re-centres
+        // our counter is the same way out.
+        return (uint8_t)(((ESPectrum::mouseWheel & 0x0F) << 4) | 0x08 |
+                         (ESPectrum::mouseButtonM ? 0 : 0x04) |
+                         (ESPectrum::mouseButtonL ? 0 : 0x02) |
+                         (ESPectrum::mouseButtonR ? 0 : 0x01));
       }
     }
 

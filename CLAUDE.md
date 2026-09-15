@@ -1440,7 +1440,7 @@ diffed against the image byte for byte — 132 of 132 matched on the first check
 turned every one of these into a data question instead of a firmware one. Do that
 first.
 
-### The Kempston mouse buttons byte idles at 0xFF — the wheel layout is Karabas-only (hw-confirmed 2026-09-14)
+### The Kempston mouse buttons byte must idle at 0xFF — the wheel counter powers up at 0x0F (hw-confirmed 2026-09-15)
 
 `#FADF` used to answer the **Karabas-Pro wheel mouse** on EVERY machine —
 `(wheel & 0x0F) << 4 | 0x08 | M | L | R`, i.e. **0x0F when nothing is pressed**.
@@ -1453,12 +1453,79 @@ button is down", so the whole GUI sat with a permanently pressed button and
 nothing in it responded. X/Y were fine the whole time (the dump had
 `(#ED9E)=27`, `(#ED9D)=79` and a live pointer at `(#ED9B/#ED9C)`), which is why it
 read as "the mouse does not work" rather than "the pointer does not move".
-`Ports.cpp` now keeps the wheel/middle-button layout for `Z80Ops::isProfi` only.
-ZEsarUX agrees (`operaciones.c`: `acumulado = 255`, only bits 0/1 cleared, high
-nibble masked to the wheel **on TBBLUE alone**; its comment spells out
-"D2-D7 - not used"). The decode itself was never wrong — non-Profi matches
-`address & 0x05FF` against 0x01DF/0x05DF/0x00DF, which is `#FBDF`/`#FFDF`/`#FADF`.
-Consequence to know: on a +3e the wheel is gone, as it should be.
+The first fix (2026-09-14) kept the wheel/middle-button layout for `Z80Ops::isProfi`
+only. ZEsarUX agrees about the classic byte (`operaciones.c`: `acumulado = 255`,
+only bits 0/1 cleared, high nibble masked to the wheel **on TBBLUE alone**; its
+comment spells out "D2-D7 - not used"). The decode itself was never wrong —
+non-Profi matches `address & 0x05FF` against 0x01DF/0x05DF/0x00DF, which is
+`#FBDF`/`#FFDF`/`#FADF`.
+
+**The wheel is now available on EVERY machine (2026-09-15) without giving that
+0xFF back up, because the counter's START VALUE is ours to choose.** The layout is
+one standard — Karabas-Pro manual p.25, the DIY interface in DonNews #19
+(zxpress.ru, "Bit/XXL", 2003) and the ZX Next all agree: bit0 R, bit1 L, bit2 M
+(active low), **bit3 tied to 1**, bits 4-7 a 4-bit up/down wheel counter (+1 per
+notch scrolled up), with the X/Y ports 8-bit free-running counters read as deltas.
+`ESPectrum::mouseWheel` therefore powers up at **0x0F**, so an untouched wheel
+mouse answers `#FADF` with exactly `0xFF` — bit-identical to the two-button mouse,
+Workbench's `CP #FF` included — and only a wheel that has actually been turned, or
+a middle click, can be mistaken for a pressed button. That is a legal state for a
+free-running counter (every driver reads deltas), and it is what real hardware does
+too: the DonNews author reports the same fault in 2003 ("some programs do not
+detect this device") and answered it with a RESET line to his counter, which only
+moves the problem to "after the first scroll".
+
+- **A machine reset (F11) re-centres the counter to 0x0F**, so a GUI whose pointer
+  moves while its buttons look stuck heals in one keypress — deliberately the SAME
+  way out real hardware has, and the reason there is no setting for this. X/Y are
+  left alone: they are position, and no reset re-centres a mouse.
+- **There is deliberately no menu row.** A toggle was written and dropped (owner,
+  2026-09-15): with the counter idling at 0x0F it would only ever differ from the
+  strict two-button mouse after the user had scrolled, which the reset already
+  answers, and the wheel layout is what the hardware being emulated does.
+### ...and a boot-protocol mouse has no wheel to give (hw-confirmed 2026-09-15)
+
+Putting the wheel in `#FADF` changed nothing on hardware, and the emulator was not
+the reason: **TinyUSB puts every boot-capable HID interface into BOOT protocol during
+enumeration** (`CFG_TUH_HID_SET_PROTOCOL_ON_ENUM`, `_hidh_default_protocol =
+HID_PROTOCOL_BOOT`), and a boot mouse report is buttons/X/Y and nothing else. The
+wheel exists only in the device's OWN report, which it sends in REPORT protocol. The
+signature is on the OSD's HID devices page: **`last len = 3`** (Dell 413C:301D — the
+report descriptor declares report id 1, 5 buttons, X, Y, Wheel, i.e. a 5-byte report
+the host never asked for). `process_mouse_report`'s `if (len >= 4)` guard, which was
+there to stop a 3-byte report's non-existent wheel byte being read past the buffer,
+was silently doing all the work.
+
+- **`src/HidMouseLayout.h`** is a minimal HID report-descriptor walker: report id,
+  bit offset and size of buttons / X / Y / Wheel, taken ONLY from the application
+  collection whose usage is Desktop/Mouse (a combo device's joystick or consumer
+  collection cannot donate an "X"). `hid_app.cpp` parses it at mount and asks for
+  REPORT protocol **only when the descriptor really carries a wheel** — a device we
+  cannot parse keeps boot protocol and the boot layout, because movement and buttons
+  are hw-proven there and a wheel is not worth risking them for.
+- **The decoder re-checks report id and length on every report**, so the boot-format
+  reports still arriving while SET_PROTOCOL is in flight are refused and fall through
+  to the boot path. On a boot-mouse interface a LONGER unmatched report is dropped,
+  never passed to the boot cast: its first byte is a report id, which that cast would
+  read as the button mask (id 1 = a left button held down for ever, X/Y from the
+  wrong bytes). An `itf_protocol NONE` interface is never dropped from — there the
+  other report ids are the device's own keyboard and consumer keys.
+- It also fixes **16-bit X/Y** mice (high-DPI), which the boot-layout cast in
+  `process_generic_report` has always read as noise.
+- **Host test `tools/hid_mouse_layout_test.cpp`** (`g++ -O2 -Wall -Wextra -Isrc -o
+  /tmp/hml tools/hid_mouse_layout_test.cpp && /tmp/hml`): report-id and id-less mice,
+  16-bit axes, composite keyboard+mouse and joystick+mouse descriptors, gamepad and
+  wheel-less mice rejected, truncated/long items rejected, sign extension, and the
+  two refusals the fallback depends on. **Re-run after ANY change there** — six
+  hand-applied mutations each fail it. A mis-parse does not misbehave by degrees: it
+  silences the pointer or decodes garbage, and neither is visible without hardware.
+- The HID devices page now prints `wheel rpt id=/len=/proto=` with the parsed
+  offsets, or **`wheel: none (boot mouse)`** — that line is the one-glance answer to
+  "why does the wheel do nothing" (`proto=boot` there means the SET_PROTOCOL did not
+  take), and `foreign rpts` counts what the drop rule discarded.
+- **Hw 2026-09-15 (DVp2, Dell 413C:301D): the wheel scrolls Z-Player 5.** What that
+  run does NOT cover: Workbench +3e still idling at 0xFF with a wheel mouse attached,
+  any other mouse's descriptor, and a `NONE`-interface mouse taking the parsed path.
 
 - **`ESPectrum::mouseSeen` is the only presence gate and there is no `Config::mouse`
   and no keyboard fallback** — without a real USB mouse `#FADF` answers 0xFF
