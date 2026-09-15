@@ -66,6 +66,7 @@ extern "C" const uint32_t profi_default_palette16[16];
 #include "DivMMC.h"
 #include "IDE.h"
 #include "Plus3eIde.h"
+#include "DivideIde.h"
 #include "ZiFi.h"
 #include "RTC.h"
 #include "Nvram24.h"
@@ -664,6 +665,23 @@ static inline bool p3eIde(uint16_t address) {
 }
 static inline uint8_t p3eIdeReg(uint16_t address) { return plus3eIdeReg(address); }
 
+// ── DivIDE: the other IDE interface a +3e ROM can be built for ─────────────────
+// Port map and evidence in DivideIde.h (Fuse peripherals/ide/divide.c). Gated on
+// IDE::portScheme for the same reason as the +3e above — the card is a card, so an
+// explicit Off, or a scheme with no image mounted, has to silence it.
+//
+// This decode runs FIRST, which is what settles its two collisions, exactly the way
+// the full divIDE card behind esxDOS -> DivIDE settles them further down (there it is
+// spelled `GS::enabled && !DivMMC::divide_mode`): General Sound's host ports #B3/#BB
+// ARE divIDE's cyl-lo and device/head registers, and the Profi CP/M shifted FDC claims
+// #A3 and #E3. Neither is reachable while the scheme is live — which is precisely why
+// resolveConstraints ties the scheme to the romset built for it rather than offering a
+// second, driverless divIDE on every machine.
+static inline bool divIde(uint16_t address) {
+    return IDE::portScheme == IDE::DIVIDE && divideIdePort(address);
+}
+static inline uint8_t divIdeReg(uint16_t address) { return divideIdeReg(address); }
+
 #if IDE_PORT_TRACE >= 2
 // The register conversation. It has to be LOW VOLUME or it destroys what it is
 // meant to observe: the +3e's drive probe writes the sector-count register 256
@@ -688,6 +706,11 @@ static inline uint8_t p3eIdeReg(uint16_t address) { return plus3eIdeReg(address)
 //   sector-count write/read-back drive test   0x24F2 IDENTIFY   0x2501.. the
 //   READ SECTORS set-up   0x268D the status poll (mask #C0, expect #40)
 //   0x25C9 the 256 x INI burst
+// One tracer for both machine-ROM IDE interfaces — the +3e's #xxEF window and the
+// divIDE taskfile the "+3 (divIDE)" romset drives. They can never be live at the
+// same time (one scheme, and each is tied to its own romset), so they share the
+// run/burst state and only the tag changes.
+static const char* p3e_tag = "+3e IDE";
 static uint32_t p3e_data_rd = 0, p3e_data_wr = 0;
 static uint8_t  p3e_wrote[8];          // last value written to each register
 static bool     p3e_wr_valid[8];
@@ -707,9 +730,9 @@ static void p3eRunFlush() {
     const char* nm = kP3eRegName[p3e_run_reg];
     const uint32_t n = p3e_run_wr_n + p3e_run_rd_n;
     if (n == 1)
-        Debug::log("[+3e IDE] %s %-8s %02X", p3e_run_wr_n ? "WR" : "RD", nm, p3e_run_first);
+        Debug::log("[%s] %s %-8s %02X", p3e_tag, p3e_run_wr_n ? "WR" : "RD", nm, p3e_run_first);
     else
-        Debug::log("[+3e IDE] %-8s wr=%lu rd=%lu %02X..%02X", nm,
+        Debug::log("[%s] %-8s wr=%lu rd=%lu %02X..%02X", p3e_tag, nm,
                    (unsigned long)p3e_run_wr_n, (unsigned long)p3e_run_rd_n,
                    p3e_run_first, p3e_run_last);
     p3e_run_reg = -1;
@@ -719,7 +742,7 @@ static void p3eRunFlush() {
 static void p3eDataFlush() {
     if (!p3e_data_rd && !p3e_data_wr) return;
     p3eRunFlush();
-    Debug::log("[+3e IDE] data burst rd=%lu wr=%lu", (unsigned long)p3e_data_rd,
+    Debug::log("[%s] data burst rd=%lu wr=%lu", p3e_tag, (unsigned long)p3e_data_rd,
                (unsigned long)p3e_data_wr);
     p3e_data_rd = p3e_data_wr = 0;
 }
@@ -730,13 +753,15 @@ static void p3eTraceIdle() {
     p3eDataFlush();
     p3eRunFlush();
     if (p3e_rb_pairs) {
-        Debug::log("[+3e IDE] read-back: %lu pairs, %lu mismatched",
+        Debug::log("[%s] read-back: %lu pairs, %lu mismatched", p3e_tag,
                    (unsigned long)p3e_rb_pairs, (unsigned long)p3e_rb_bad);
         p3e_rb_pairs = p3e_rb_bad = 0;
     }
 }
 
-static void p3eTrace(uint16_t address, uint8_t reg, uint8_t val, bool write) {
+static void p3eTrace(uint16_t address, uint8_t reg, uint8_t val, bool write,
+                     const char* tag = "+3e IDE") {
+    p3e_tag = tag;
     if (reg == 0) {
         p3eRunFlush();
         if (write) p3e_data_wr++; else p3e_data_rd++;
@@ -758,7 +783,7 @@ static void p3eTrace(uint16_t address, uint8_t reg, uint8_t val, bool write) {
             p3e_rb_bad++;
             if (p3e_rb_bad <= 4) {
                 p3eRunFlush();
-                Debug::log("[+3e IDE] READ-BACK MISMATCH %s wrote=%02X read=%02X pc=%04X",
+                Debug::log("[%s] READ-BACK MISMATCH %s wrote=%02X read=%02X pc=%04X", p3e_tag,
                            kP3eRegName[reg], p3e_wrote[reg], val, Z80::getRegPC());
                 return;
             }
@@ -1077,6 +1102,17 @@ IRAM_ATTR uint8_t Ports::input(uint16_t address) {
       const uint8_t v = IDE::read8(r);
 #if IDE_PORT_TRACE >= 2
       p3eTrace(address, r, v, false);
+#endif
+      return v;
+    }
+    // DivIDE taskfile (see divIde above) — ahead of General Sound, whose #B3/#BB
+    // are two of these registers.
+    if (divIde(address)) {
+      LED::touchR(LED::IDE);
+      const uint8_t r = divIdeReg(address);
+      const uint8_t v = IDE::read8(r);
+#if IDE_PORT_TRACE >= 2
+      p3eTrace(address, r, v, false, "divIDE");
 #endif
       return v;
     }
@@ -2781,6 +2817,23 @@ IRAM_ATTR void Ports::output(uint16_t address, uint8_t data) {
     IDE::write8(r, data);
     return;
   }
+  // DivIDE taskfile (see divIde above) — ahead of General Sound, whose #B3/#BB
+  // are two of these registers.
+  if (divIde(address)) {
+    LED::touchW(LED::IDE);
+    const uint8_t r = divIdeReg(address);
+#if IDE_PORT_TRACE >= 2
+    p3eTrace(address, r, data, true, "divIDE");
+#endif
+    IDE::write8(r, data);
+    return;
+  }
+  // ...and its write-only control register (CONMEM / MAPRAM / EPROM bank). There is
+  // no divIDE memory here on purpose (DivideIde.h): the driver lives in the machine
+  // ROM, and paging the card's EPROM over 0x0000-0x3FFF would replace the banks it
+  // runs from. Swallowed rather than ignored so the write cannot land on another
+  // card's decode of the same address.
+  if (IDE::portScheme == IDE::DIVIDE && divideCtrlPort(address)) return;
   // ZiFi NIC port: A0..A7 == 0xEF, A8..A15 selects register (0x00..0xC7)
   // 0xEFF7 (hi=0xEF > 0xC7) falls through to Pentagon mode16col handler below
   if (Config::zifi_enabled && a8 == 0xEF) {

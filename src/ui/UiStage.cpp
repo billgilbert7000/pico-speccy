@@ -253,7 +253,11 @@ static const RomsetIdx kPref128[]  = {
 #if !NO_SPAIN_ROM_128k
     R_128K_ES, R_PLUS2, R_PLUS2_ES, R_ZX81P,
 #endif
-    R_P3, R_P3E, R_128K_CS, R_LAST };
+    R_P3, R_P3E,
+#if PLUS3DIV_IN_FLASH
+    R_P3DIV,
+#endif
+    R_128K_CS, R_LAST };
 // Pentagon-class preferences offer Original / Custom / Last only — the classic menu has
 // no way to pin 128Kpg either (MENU_ROM_PREF_PENT). Kept as is.
 static const RomsetIdx kPrefPent[] = { R_PENT, R_128K_CS, R_LAST };
@@ -894,6 +898,11 @@ static bool stagedIsPlus3e() {
     if (m >= 0) return isPlus3eRomset((RomsetIdx)(m & 0xFF));
     return Config::isPlus3e();
 }
+static bool stagedIsPlus3Div() {
+    const int32_t m = staged(SET_MACHINE);
+    if (m >= 0) return isPlus3DivRomset((RomsetIdx)(m & 0xFF));
+    return Config::isPlus3Div();
+}
 static bool stagedIsPentagon() {
     return stagedArchIs(A_PENT) || stagedArchIs(A_P512) || stagedArchIs(A_P1024);
 }
@@ -964,6 +973,29 @@ static void resolveConstraints(CommitReport& rep) {
                 changed |= force(SET_ZIFI_NIC, 0, rep, "ZiFi NIC off: it shares #xxEF with the +3e IDE");
         } else if (staged(SET_IDE_SCHEME) == IDE::PLUS3E) {
             changed |= force(SET_IDE_SCHEME, IDE::OFF, rep, "IDE off: the +3e interface needs the +3e ROM");
+        }
+
+        // The +3 (divIDE) romset is the same story one interface over: its ROM drives a
+        // divIDE card (#A3..#BF), so on that machine every other scheme becomes DivIDE,
+        // and DivIDE goes away everywhere else. It has to go away, not merely idle: the
+        // decode sits ahead of General Sound in Ports.cpp and #B3/#BB are two of its
+        // registers, so a scheme left behind on a Pentagon would take the GS host ports
+        // with it. (A real divIDE with its own EPROM and automap is a different thing
+        // and already exists here — Devices -> esxDOS -> DivIDE.)
+        if (stagedIsPlus3Div()) {
+            if (staged(SET_IDE_SCHEME) != IDE::OFF && staged(SET_IDE_SCHEME) != IDE::DIVIDE)
+                changed |= force(SET_IDE_SCHEME, IDE::DIVIDE, rep, "IDE set to the divIDE interface");
+        } else if (staged(SET_IDE_SCHEME) == IDE::DIVIDE) {
+            changed |= force(SET_IDE_SCHEME, IDE::OFF, rep, "IDE off: DivIDE needs the +3 (divIDE) ROM");
+        }
+
+        // EDGE: switching TO the +3 (divIDE), same shape (and same g_seq tie-break) as
+        // the +3e edge below.
+        if (bmGet(g_dirty, SET_MACHINE) && stagedIsPlus3Div()
+            && !isPlus3DivRomset((RomsetIdx)(g_base[SET_MACHINE] & 0xFF))
+            && staged(SET_IDE_SCHEME) == IDE::OFF
+            && g_seq[SET_IDE_SCHEME] <= g_seq[SET_MACHINE]) {
+            changed |= force(SET_IDE_SCHEME, IDE::DIVIDE, rep, "IDE set to the divIDE interface");
         }
 
         // EDGE: this commit switches TO the +3e, so give it its interface — that is what

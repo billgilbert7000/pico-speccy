@@ -218,6 +218,8 @@
 #define TXT_ROM_P3          "+3"
 #define TXT_ROM_P3E         "+3 (IDEDOS)"
 #define TXT_ROM_P3E_S       "+3 (IDE)"
+#define TXT_ROM_P3DIV       "+3 (divIDE)"
+#define TXT_ROM_P3DIV_S     "+3 (div)"
 #define TXT_ROM_PENT        "128K"
 #define TXT_ROM_PENT_S      "128K"
 #define TXT_ROM_PENT_GLUK   "128K + Mr Gluk"

@@ -1496,11 +1496,10 @@ an 8-bit one.
   same in every build): `pe8` **479 bytes in one bank**, `p16` 6795 in banks 1+2,
   `div` 6794, `pcf` 6794, `zxc` 6891, `zxa` 7798, `dvm`/`mmc` 9504. The
   TAP-loading `-mod` build of sm8 differs by ~13.7 KB across all four banks.
-- **If a 16-bit disk is ever wanted, `div` is the cheap route, not `p16`.** We
-  already emulate divIDE — `Ports.cpp` decodes its ATA registers as
-  `(lo & 0xE3) == 0xA3` plus control at `0xE3`, and `DivMMC.cpp`'s `divide_mode`
-  opens .hdf and reads **full 512-byte sectors**. Missing: the `div` ROM banks and
-  letting divIDE be enabled on a +3. `p16` would additionally need a whole new
+- **The 16-bit route is `div`, not `p16`, and it is IMPLEMENTED as of 2026-09-15**
+  — see "The +3 (divIDE) romset" below. Everything but the ROM image is in the
+  tree: `IDE::DIVIDE` (scheme 5) puts the existing 16-bit ATA engine behind
+  divIDE's own taskfile, so a full-sector .hdf works. `p16` would additionally need a whole new
   decode — it abandons the `#xxEF` family for `#69`/`#6B`/`#6F`/`#79`/`#7F`.
 - `Workbench2.3_4Gb_8Bits.hdf` (octocom.speccy.org, 1 998 581 888 B, 7745/16/63,
   62 partitions) **boots and runs on the shipped sm8 ROM** (hw 2026-09-14). Its
@@ -1510,6 +1509,79 @@ an 8-bit one.
 - **`tools/idedos_audit.py` reads the partition table from ONE sector**, which is
   4 entries on a half-sector image — it showed 3 partitions of Workbench's 62.
   Unfixed.
+
+### The +3 (divIDE) romset — `R_P3DIV` + `IDE::DIVIDE` (2026-09-15, NOT hw-tested, ROM not in the tree)
+
+The SAME IDEDOS ROM as the +3e, built for a **divIDE** card (the `div` build of
+p3eroms) instead of the simple 8-bit interface — which is the configuration the
+Workbench author's own setup guide targets ("replace the machine ROMs with
+dives3e0..3.rom and tick DivIDE interface") and therefore the one that reads the
+**16-bit** IDEDOS disks. It is a romset of the +3 exactly the way `R_P3E` is:
+`isPlus3Romset()` covers it, so every +3 rule already written applies unchanged,
+and `isPlus3DivRomset()` / `Config::isPlus3Div()` add the card on top.
+
+- **Fuse is the specification here, not a ROM disassembly** (`peripherals/ide/divide.c`,
+  via the libretro/fuse-libretro mirror — worldofspectrum and octocom.speccy.org are
+  both behind this environment's egress policy, GitHub is not). It registers exactly
+  two windows over the FULL port word: `{0x00e3, 0x00a3}` for the taskfile and
+  `{0x00ff, 0x00e3}` write-only for the control register. So the HIGH BYTE IS NOT
+  DECODED and the register is A2..A4 of the low byte — `#A3` data, `#A7` error/features,
+  `#AB` count, `#AF` sector, `#B3` cyl lo, `#B7` cyl hi, `#BB` device/head, `#BF`
+  command/status. `src/DivideIde.h` is that arithmetic and `tools/divide_ide_test.cpp`
+  checks it against Fuse's own switch over all 65536 addresses (mutation-checked: a
+  wrong mask, a wrong shift and a wrong control port each fail it).
+- **The bus is 16 bits** (libspectrum `LIBSPECTRUM_IDE_DATA16`): the card holds the
+  high-byte latch, so a sector is **512 consecutive accesses to the one data port**,
+  low/high/low..., which is `IDE::read8(0)` with `eight_bit` FALSE — the default path,
+  nothing new. Consequence for the user: a +3div wants a **full-sector** .hdf, where
+  the +3e's 8-bit interface wants a half-sector one (HDF flags bit 0). Mount the wrong
+  edition and IDEDOS sees garbage; that is faithful, not a bug.
+- **No EPROM, no automap, deliberately.** A real divIDE also pages 8 KB of EPROM plus
+  32 KB of RAM over 0x0000-0x3FFF — and Fuse models it, but `divxxx_refresh_page_state`
+  acts on the automap flag ONLY when CONMEM is set or the EPROM is write-protected, and
+  `divide_wp` defaults to 0 (settings.dat) exactly as the physical jumper leaves it. The
+  ROM never writes the control port, so in this configuration the card is nothing but the
+  taskfile. Paging it in would be actively wrong: the driver lives in the machine's own
+  ROM and divIDE's romcs would replace the banks it runs from. (The FULL card — EPROM,
+  RAM, CONMEM/MAPRAM, the entry-point automap — does exist here: Devices -> esxDOS ->
+  DivIDE, `DivMMC.cpp`. The two decode the same ports, which is why only one may be live;
+  the existing "enabling esxDOS turns the IDE scheme off" rule already covers it.)
+- **`IDE::DIVIDE` is scheme 5, and the value IS the NVS `ide_scheme` byte** (the +3e
+  section's warning applies: every table that names a scheme — the `opt_ide_scheme`
+  radio, Hardware Info's name list — must use the enum, not a literal).
+- **The scheme is tied to the romset in both directions**, like `PLUS3E`:
+  `resolveConstraints` (menu), `MachineSwitch::commit` (live switch) and
+  `ESPectrum::setup` + `CPU::reset` (the paths that never see a menu). It has to go away
+  on other machines, not merely idle: **General Sound's host ports #B3/#BB ARE divIDE's
+  cyl-lo and device/head registers**, and the decode sits ahead of the GS one in
+  Ports.cpp. That is the same precedence the full divIDE card has always had (`GS::enabled
+  && !DivMMC::divide_mode`), and the host test asserts the collision so the comment cannot
+  rot. The Profi CP/M shifted FDC (#83/#A3/#C3/#E3) is the other reason.
+- No ZiFi clause, unlike the +3e: divIDE is nowhere near the NIC's `#xxEF`.
+- **The ROM image is NOT in this repository** and is not reachable from this environment
+  (both sites 403 the CONNECT; fuse ships only the `sm8` +3e banks, which we already
+  have). So the romset is **built only when someone has packed it locally**:
+  `src/roms/plus3div/src/rom{0,1,2,3}.bin` + `python3 tools/rom_pack.py plus3div`, and
+  CMake turns `PLUS3DIV_IN_FLASH` on from the presence of the generated header (the
+  `CONFIGURE_DEPENDS` glob re-configures by itself when the .c appears). Without it the
+  Machine row, the preferred-ROM row and the binding all vanish and a persisted pick
+  falls back to the stock +3 — the tree always builds.
+- **The packer MEASURES the layout instead of assuming it** and publishes it as
+  `PLUS3DIV_*` macros that `Config::requestMachine` binds through, so a different
+  p3eroms revision moves the macros and not the firmware: bank 0 reuses the +3e's
+  overlay when the builds agree, bank 1 overlays the stock +3 bank, bank 2 overlays the
+  +3e's RAW bank 2 (or ships raw if that is cheaper), bank 3 reuses the +3's 48-BASIC
+  overlay. Expected cost ~14 KB of flash (the readme's own table says the `div` build
+  differs from `sm8` in banks 1+2 only, by 6794 bytes). All four branches were exercised
+  with synthetic banks and the emitted C arrays were verified to reconstruct them.
+- **Bank 2's overlay base is `gb_rom_2_plus3e`, which makes the registry discipline
+  matter again**: MemESP keys ONE overlay per base pointer, so the +3/+3e/+3div branch
+  now registers bank 2's overlay through the variable that named the array it just
+  assigned — including `nullptr` — or the divIDE patch would stay live on a plain +3e.
+- **`pack_plus3e_raw()` was called but never defined** — `rom_pack.py plus3e`, and the
+  no-argument run that packs everything, died with a NameError after emitting the +3e
+  overlays. It exists now, as the verification its name always implied: the raw bank 2
+  array compiled into the firmware is compared against `src/rom2.bin`.
 
 ### The three uPD765 behaviours that are hangs, not wrong bytes
 

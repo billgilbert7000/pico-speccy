@@ -24,7 +24,13 @@ public:
     // card's own 24LC16 NVRAM (Nvram24) and MC146818 clock (RTC).
     // PLUS3E is the +3e's "simple 8-bit" interface: it is part of the machine (the
     // ROM drives it), not a card the user plugs in, so the romset forces this value.
-    enum Scheme : uint8_t { OFF = 0, NEMO = 1, PROFI = 2, SMUC = 3, PLUS3E = 4 };
+    // DIVIDE is the classic divIDE card's taskfile (#A3..#BF, see DivideIde.h) — a
+    // 16-bit bus, so it needs no eight_bit stride and its images are full-sector.
+    // Like PLUS3E it is tied to the romset built for it ("+3 (divIDE)"), because the
+    // same ports are also decoded by the full divIDE card behind esxDOS -> DivIDE
+    // (DivMMC.cpp) and by the Profi CP/M shifted FDC.
+    enum Scheme : uint8_t { OFF = 0, NEMO = 1, PROFI = 2, SMUC = 3, PLUS3E = 4,
+                            DIVIDE = 5 };
 
     // Active scheme mirror of Config::ide_scheme (set in init()).
     static uint8_t scheme;

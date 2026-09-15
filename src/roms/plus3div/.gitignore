@@ -1,0 +1,5 @@
+# The +3 (divIDE) ROM is not redistributable: keep both the source banks and everything
+# rom_pack.py derives from them out of the repository. See README.md.
+*
+!.gitignore
+!README.md
