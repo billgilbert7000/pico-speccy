@@ -848,6 +848,15 @@ void ESPectrum::setup() {
     } else if (Config::ide_scheme == IDE::PLUS3E) {
       Config::ide_scheme = IDE::OFF;   // the +3e interface without the +3e ROM
     }
+    // The +3 (divIDE) romset's own interface, same rule. No ZiFi clause: divIDE lives
+    // on #A3..#BF, nowhere near the NIC's #xxEF — what it does share is General Sound's
+    // #B3/#BB, and that is settled by the decode order in Ports.cpp.
+    if (Config::isPlus3Div()) {
+      if (Config::ide_scheme != IDE::OFF && Config::ide_scheme != IDE::DIVIDE)
+        Config::ide_scheme = IDE::DIVIDE;
+    } else if (Config::ide_scheme == IDE::DIVIDE) {
+      Config::ide_scheme = IDE::OFF;
+    }
     if (Config::esxdos || Config::zcontroller) {
       Debug::log("setup: +3 — DivMMC/Z-Controller off (they automap over the +3 ROMs)");
       Config::esxdos = 0;

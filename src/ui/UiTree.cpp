@@ -408,6 +408,12 @@ static const Option opt_mach_128[] = {
     // ...and the +3e is a romset of that: the same machine with Garry Lancaster's
     // replacement ROM, which carries IDEDOS and an 8-bit IDE interface on #xxEF.
     { TXT_ROM_P3E,        NM_MACH(A_128K, R_P3E), TXT_ROM_P3E_S },
+#if PLUS3DIV_IN_FLASH
+    // ...and the same IDEDOS ROM built for a divIDE card instead (16-bit bus, ports
+    // #A3..#BF). Conditional because that image is not redistributable and has to be
+    // packed locally — see tools/rom_pack.py plus3div.
+    { TXT_ROM_P3DIV,      NM_MACH(A_128K, R_P3DIV), TXT_ROM_P3DIV_S },
+#endif
     { TXT_ROM_CUSTOM,     NM_MACH(A_128K, R_128K_CS)  },
 };
 static const Option opt_mach_pent[] = {
@@ -644,16 +650,18 @@ static bool p_plus3On() {
 // there — the same rule the +3 disk rows use.
 static bool p_ideOn()   { return Stage::get(SET_IDE_SCHEME) != 0; }
 
-// IDE/HDD scheme: the value IS Config::ide_scheme. "IDEDOS" is not a card the user
-// plugs in — it is the interface the +3e ROM drives, so the romset forces that value
-// and forces it away again on any other machine (UiStage resolveConstraints). It is
-// listed here so the row can display it rather than showing a blank radio.
+// IDE/HDD scheme: the value IS Config::ide_scheme. "IDEDOS" and "DivIDE" are not cards
+// the user plugs in anywhere — each is the interface one +3 romset's ROM drives, so the
+// romset forces that value and forces it away again on any other machine (UiStage
+// resolveConstraints). They are listed here so the row can display them rather than
+// showing a blank radio.
 static const Option opt_ide_scheme[] = {
     { "Off",   0 },
     { "NEMO",  1 },
     { "PROFI", 2 },
     { "SMUC",  3 },   // IDE::SMUC
     { "IDEDOS", 4 },  // IDE::PLUS3E — numbering follows IDE::Scheme, not this list
+    { "DivIDE", 5 },  // IDE::DIVIDE — the +3 (divIDE) romset's card, same rule
 };
 
 
@@ -946,6 +954,20 @@ static const Option opt_pref48[] = {
     { TXT_ROM_LAST,    2 },
 #endif
 };
+// Values are indices into UiStage's kPref128, so a conditional row shifts every row
+// below it. Two build switches can do that here, which is four spellings of the same
+// list if the numbers are written out — they are derived instead, so the two tables
+// cannot drift apart the way the Scorpion pair once threatened to.
+#if !NO_SPAIN_ROM_128k
+#  define P128_P3 5
+#else
+#  define P128_P3 1
+#endif
+#if PLUS3DIV_IN_FLASH
+#  define P128_CS (P128_P3 + 3)
+#else
+#  define P128_CS (P128_P3 + 2)
+#endif
 static const Option opt_pref128[] = {
     { TXT_ROM_128K,     0 },
 #if !NO_SPAIN_ROM_128k
@@ -953,17 +975,17 @@ static const Option opt_pref128[] = {
     { TXT_ROM_PLUS2,    2 },
     { TXT_ROM_PLUS2_ES, 3 },
     { TXT_ROM_ZX81P,    4 },
-    { TXT_ROM_P3,       5 },
-    { TXT_ROM_P3E,      6 },
-    { TXT_ROM_CUSTOM,   7 },
-    { TXT_ROM_LAST,     8 },
-#else
-    { TXT_ROM_P3,       1 },
-    { TXT_ROM_P3E,      2 },
-    { TXT_ROM_CUSTOM,   3 },
-    { TXT_ROM_LAST,     4 },
 #endif
+    { TXT_ROM_P3,       P128_P3     },
+    { TXT_ROM_P3E,      P128_P3 + 1 },
+#if PLUS3DIV_IN_FLASH
+    { TXT_ROM_P3DIV,    P128_P3 + 2 },
+#endif
+    { TXT_ROM_CUSTOM,   P128_CS     },
+    { TXT_ROM_LAST,     P128_CS + 1 },
 };
+#undef P128_P3
+#undef P128_CS
 static const Option opt_pref_pent[] = {
     { TXT_ROM_PENT_ORIG, 0 },
     { TXT_ROM_CUSTOM,    1 },

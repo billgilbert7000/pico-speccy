@@ -267,6 +267,9 @@ public:
     static bool isPlus3() { return arch == A_128K && isPlus3Romset(romSet); }
     // ...and it is the +3e: the +3 with IDEDOS, which brings the 8-bit IDE interface.
     static bool isPlus3e() { return arch == A_128K && isPlus3eRomset(romSet); }
+    // ...or the +3 (divIDE): the same IDEDOS ROM built for a divIDE card, so the disk
+    // is on divIDE's #A3..#BF taskfile and the bus is 16 bits (DivideIde.h).
+    static bool isPlus3Div() { return arch == A_128K && isPlus3DivRomset(romSet); }
     static uint8_t  covox;
     // CPU turbo picked by the user (0..3 = 3.5/7/14/28 MHz), NVS-persisted.
     // Feeds ESPectrum::multUser at setup; the live speed may differ (EFF7 D4).
