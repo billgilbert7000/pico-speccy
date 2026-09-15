@@ -503,16 +503,14 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE GMX_IN_FLASH=1)
 # would put firmware + ROM back above the old partition base.
 target_compile_definitions(${PROJECT_NAME} PRIVATE PROFROM_IN_FLASH=1)
 # ZX Spectrum +3 (divIDE): Garry Lancaster's +3e/IDEDOS ROM built for a divIDE card
-# (the `div` build of p3eroms) instead of the +3e's own 8-bit interface. That image is
-# not redistributable, so it is not in this repository and the romset is built only
-# once someone has packed it locally:
-#     cp <div build banks> src/roms/plus3div/src/rom{0,1,2,3}.bin
+# (the `div` build of p3eroms v1.43, English) instead of the +3e's own 8-bit interface.
+# The banks live in src/roms/plus3div/src/ and are packed against the +3/+3e banks
+# already in flash (18.5 KB for the whole romset) by
 #     python3 tools/rom_pack.py plus3div
-# The packer measures each bank against the +3/+3e banks already in flash (~14 KB for
-# the whole romset in the expected case) and emits plus3div_roms.{c,h}; its presence is
-# the switch. Without it the Machine row, the preferred-ROM row and the binding in
-# Config::requestMachine all disappear, and a persisted "+3 (divIDE)" pick falls back
-# to the stock +3.
+# which emits plus3div_roms.{c,h}; the presence of that header is the switch. Drop it
+# (or the ROM) and the Machine row, the preferred-ROM row and the binding in
+# Config::requestMachine all disappear, while a persisted "+3 (divIDE)" pick falls back
+# to the stock +3 — so the tree builds either way.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/roms/plus3div/plus3div_roms.h")
     set(PLUS3DIV_IN_FLASH 1)
     message(STATUS "+3 (divIDE) ROM: packed, romset enabled")

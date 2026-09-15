@@ -1510,7 +1510,7 @@ an 8-bit one.
   4 entries on a half-sector image — it showed 3 partitions of Workbench's 62.
   Unfixed.
 
-### The +3 (divIDE) romset — `R_P3DIV` + `IDE::DIVIDE` (2026-09-15, NOT hw-tested, ROM not in the tree)
+### The +3 (divIDE) romset — `R_P3DIV` + `IDE::DIVIDE` (2026-09-15, NOT hw-tested)
 
 The SAME IDEDOS ROM as the +3e, built for a **divIDE** card (the `div` build of
 p3eroms) instead of the simple 8-bit interface — which is the configuration the
@@ -1558,22 +1558,37 @@ and `isPlus3DivRomset()` / `Config::isPlus3Div()` add the card on top.
   && !DivMMC::divide_mode`), and the host test asserts the collision so the comment cannot
   rot. The Profi CP/M shifted FDC (#83/#A3/#C3/#E3) is the other reason.
 - No ZiFi clause, unlike the +3e: divIDE is nowhere near the NIC's `#xxEF`.
-- **The ROM image is NOT in this repository** and is not reachable from this environment
-  (both sites 403 the CONNECT; fuse ships only the `sm8` +3e banks, which we already
-  have). So the romset is **built only when someone has packed it locally**:
-  `src/roms/plus3div/src/rom{0,1,2,3}.bin` + `python3 tools/rom_pack.py plus3div`, and
-  CMake turns `PLUS3DIV_IN_FLASH` on from the presence of the generated header (the
-  `CONFIGURE_DEPENDS` glob re-configures by itself when the .c appears). Without it the
-  Machine row, the preferred-ROM row and the binding all vanish and a persisted pick
-  falls back to the stock +3 — the tree always builds.
+- **The ROM is IN the tree** — `src/roms/plus3div/src/rom{0,1,2,3}.bin`, the `div`
+  build of p3eroms v1.43, **English** (`diven3e0..3`), from the `ROMS_original.rar` the
+  owner supplied (neither octocom nor worldofspectrum is reachable from this
+  environment, and **fuse ships only the `sm8` banks**: its `plus3e-{0,1,2,3}.rom` are
+  byte-identical to our +3e banks and to the +3's bank 3, md5 `bc123f62…`, `61736426…`,
+  `c363e95d…`, `a148bcc5…` — measured, so "it works in Fuse" never implied the div
+  build). CRC32 checked against the archive's own headers on extraction. The Spanish
+  set (`dives3e`, which the Workbench author's Fuse guide names) is one file copy plus
+  a re-pack away; English matches the +3/+3e romsets beside it.
+  `PLUS3DIV_IN_FLASH` stays as the escape hatch: CMake derives it from the presence of
+  the generated header (the `CONFIGURE_DEPENDS` glob re-configures by itself when the
+  .c appears), and without it the Machine row, the preferred-ROM row and the binding
+  all vanish while a persisted pick falls back to the stock +3.
 - **The packer MEASURES the layout instead of assuming it** and publishes it as
   `PLUS3DIV_*` macros that `Config::requestMachine` binds through, so a different
-  p3eroms revision moves the macros and not the firmware: bank 0 reuses the +3e's
-  overlay when the builds agree, bank 1 overlays the stock +3 bank, bank 2 overlays the
-  +3e's RAW bank 2 (or ships raw if that is cheaper), bank 3 reuses the +3's 48-BASIC
-  overlay. Expected cost ~14 KB of flash (the readme's own table says the `div` build
-  differs from `sm8` in banks 1+2 only, by 6794 bytes). All four branches were exercised
-  with synthetic banks and the emitted C arrays were verified to reconstruct them.
+  p3eroms revision moves the macros and not the firmware. Measured on this image:
+  bank 0 is byte-identical to the +3e's (reuses `gb_overlay_plus3e_rom0`, ships
+  nothing), bank 1 overlays the stock +3 bank 1 in **12768 B**, bank 2 overlays the
+  +3e's RAW bank 2 in **6215 B**, bank 3 is the +3's 48 BASIC (reuses
+  `gb_overlay_plus3_rom3`). **18.5 KB of flash**, and banks 1+2 differ from `sm8` by
+  exactly **6794** bytes — the archive readme's own figure for `div`, which is the
+  cross-check that these are the right files. The raw-bank-2 and own-bank-3 branches
+  are not exercised by this image; they were checked with synthetic banks, and the
+  emitted C arrays verified to reconstruct all four banks through the macros.
+- **The ROM confirms the port map independently.** Bank 2 carries **30 `LD BC,nn`
+  setups whose low byte is in the taskfile**, covering all eight registers
+  (#A3 data x5, #A7 x2, #AB x3, #AF x3, #B3 x3, #B7 x3, #BB x3, #BF cmd/status x8),
+  with high bytes 0x00/0x01 — i.e. not decoded, as Fuse says. Zero `#xxEF` accesses,
+  against 34 in the `sm8` bank 2 that has zero divIDE ones: the two builds are exact
+  mirrors of each other over the two interfaces. `tools/divide_ide_test.cpp` scans the
+  shipped bank and asserts every one of those decodes the way Fuse's table does.
 - **Bank 2's overlay base is `gb_rom_2_plus3e`, which makes the registry discipline
   matter again**: MemESP keys ONE overlay per base pointer, so the +3/+3e/+3div branch
   now registers bank 2's overlay through the variable that named the array it just
