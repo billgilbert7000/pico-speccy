@@ -441,7 +441,7 @@ public:
     // divider for a 378 MHz TMDS clock.
     static const uint16_t VM_FAST_CPU_MHZ = 378;
 
-    static bool isFastVideoMode(uint8_t vm) { return vm >= VM_640x480_90 && vm <= VM_LAST; }
+    static constexpr bool isFastVideoMode(uint8_t vm) { return vm >= VM_640x480_90 && vm <= VM_LAST; }
     // The 25.2 MHz twin of a fast mode (identity for the standard ones): what a
     // fast pick degrades to when the CPU clock is not 378 MHz.
     static uint8_t baseVideoMode(uint8_t vm) {

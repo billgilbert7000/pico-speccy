@@ -368,6 +368,14 @@ static void activate() {
                 // palette, picking a Byte ROM reveals COBMECT mode. Rebuild the visible
                 // set so that happens now rather than on the next entry into the level.
                 rebuildKeepingSelection();
+                // ...and it can gate rows of THIS pane, when the options are built at
+                // runtime: the 90/75 Hz video modes are listed only at CPU 378 MHz plus
+                // whichever one is staged, so picking a standard mode drops the row the
+                // staged one had. S.rcount is what the renderer bounds the pane by, and
+                // a stale one leaves a highlightable row with nothing in it.
+                S.rcount = (uint8_t)rightRowCount(n);
+                if (S.rsel >= S.rcount) S.rsel = S.rcount ? (uint8_t)(S.rcount - 1) : 0;
+                if (S.rtop > S.rsel) S.rtop = S.rsel;
                 // An instant-apply hook may have drawn modal boxes over the menu (the
                 // transport's busy/reboot dialogs) — restore the chrome like runModal.
                 if (Stage::editDrawsModal(n->setting)) drawFrameOnce();

@@ -1039,6 +1039,13 @@ static void resolveConstraints(CommitReport& rep) {
         // fractional divider whose phase pattern no longer repeats per pixel.
         // Mutually constrained with the CPU clock, so it resolves by g_seq like the
         // SAA/Timex pair: whichever of the two the user edited last wins.
+        //
+        // In practice only ONE of those two branches is reachable from the menu:
+        // video_modeOpts() lists the 90/75 Hz rows only while the staged clock is
+        // already 378, so a fast mode can be PICKED only at 378 and the "bump the
+        // CPU clock" branch is left as the backstop for a config that arrives here
+        // some other way. Lowering the clock afterwards is the live case, and it
+        // takes the second branch.
         if (Config::isFastVideoMode((uint8_t)staged(SET_VIDEO_MODE))) {
 #if !defined(VGA_HDMI) && !defined(HDMI)
             // SOFTTV / TV / TFT drive their own panel timing — there is no TMDS or

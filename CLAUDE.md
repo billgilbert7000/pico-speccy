@@ -5096,6 +5096,72 @@ caused by exactly this). `opt_video_mode` became `NM_RADIO_D` + `video_modeOpts`
   a hair UNDER 19, and the truncate-then-mask loses a whole 1/16 step. 0.33% fast,
   harmless on a monitor, but the comment is aspirational and the menu is not.
 
+### The 90/75 Hz video modes: a second pixel clock, and why they are 378-only (hw-confirmed DVp2, 2026-09-15)
+
+`VM_640x480_90 / _75 / VM_720x480_90 / VM_720x576_75` (Config.h, values 4..7) are
+the four standard modes at a **37.8 MHz pixel clock instead of 25.2** — i.e. the
+HDMI PIO at a 378 MHz TMDS rate with a **divider of exactly 1.0**, no fractional
+divider at all. `graphics.c` holds them at `[0]..[7] + VMODE_FAST_OFFSET` (9),
+byte-for-byte copies of their twins with `pixel_clk`, `freq`, `pio_clk_div` and the
+new `tmds_mhz` field changed: **same h_total (800 px), same v_total**, so the line
+rate is 47.25 kHz and every refresh is exactly x1.5 (90.17 / 73.37 Pentagon /
+75.24 48K / 75.12 128K). `graphics_fast_mode()` resolves the twin for
+`VIDEO::Reset()`; `graphics_set_sys_clk_mhz()` re-derives every mode's divider from
+its own `tmds_mhz` when the Overclock row moves, which is what keeps the standard
+set pinned at 25.2 MHz across 252/1.0, 378/1.5 and 504/2.0.
+
+- **378 MHz is the only CPU clock that works, and it is arithmetic, not policy**:
+  252 cannot reach a 378 MHz TMDS rate at all (a PIO divider below 1 does not
+  exist) and 504 would need 1.333 — a fractional divider whose phase pattern no
+  longer repeats per pixel, which is the thing the half-integer rule exists to
+  avoid. `Config::isFastVideoMode()` / `VM_FAST_CPU_MHZ` are the test; backstops
+  live in `Config::load()` (degrade to `baseVideoMode()` when the clock is not 378)
+  and in `VIDEO::Reset()` (the `useFast` gate), because a config can arrive from
+  another board.
+- **V-Sync is forced OFF with them, as a constraint and not a preference**: the
+  pacing is one emulated frame per DISPLAY frame (`ESPectrum::loop`), so at 90/75 Hz
+  the Spectrum would simply run 50% fast.
+- **The rows are HIDDEN at any other clock** (owner's call, 2026-09-15) rather than
+  listed and then refused — `video_modeOpts()` filters on the STAGED
+  `SET_CPU_MHZ`. **The staged value is the one exception and it is not cosmetic**:
+  `nodeValueLabel()` looks the value up in that same list, so a value with no row
+  of its own blanks the collapsed `Mode` row AND leaves the pane with nothing
+  marked. The pair (fast mode + non-378 clock) is reachable for as long as one menu
+  session lasts, since lowering the clock with a fast mode staged only resolves at
+  commit. Consequence: `resolveConstraints`' "bump the CPU clock to 378" branch is
+  now unreachable from the menu and survives only as the backstop; the live branch
+  is the other one.
+- **Hiding is done by TRUNCATING the option table**, so the four entries must stay
+  last and contiguous — three `static_assert`s in UiTree.cpp pin that (which is why
+  `opt_video_mode` is `constexpr` and `isFastVideoMode` had to become `constexpr`
+  too). The SOFTTV/TFT branch, which has no divider labels to build, reuses the
+  same truncation with no table of its own.
+- **`S.rcount` must be refreshed after a radio pick** (UiNav.cpp): the renderer
+  bounds the right pane by it, `rebuildKeepingSelection()` only rebuilds the LEFT
+  level, and picking a standard mode drops the staged fast row — a stale count left
+  a highlightable row with nothing in it. General to any `dopts` list that shrinks.
+- **The costs, measured**: the eight extra `video_mode[]` entries are **+772 B of
+  .data**, i.e. RAM as well as flash — that table is deliberately non-const because
+  the VGA ISR reads it through `graphics_get_video_mode()` every line, so it must
+  not sit in flash. Total for the feature was +4096 B of flash on DVp2, most of it
+  the 4 KB section-alignment step rather than code.
+- **What the hardware runs cover, exactly**: the owner's verdict on the MENU
+  filtering is "works" (DVp2, 2026-09-15), not itemised — so the list at 378 vs
+  252/504, and the firmware coming up with it. **There is no verdict on record for
+  a 90/75 Hz PICTURE**: the divider-label section above was confirmed the same day,
+  which proves the modes shipped, not that one was ever selected and displayed.
+  Also NOT covered: whether a monitor accepts 90.17 Hz vs
+  73-75 Hz at all (per-panel, and the 15 s `videoModeConfirm` auto-rollback is the
+  safety net), the **VGA** path at 37.8 MHz (divider 10.0, clean, but unexercised),
+  and HDMI AUDIO at the shorter line period — the line ISR fires every **21.16 µs**
+  instead of 31.75 with a worst measured `dur` of 19 µs, so if anything breaks here
+  first it is the audio, and `HDMIAU: dur/gap/skip/dup` is the meter.
+- Dead ends from the design round, so they are not re-derived: keeping the refresh
+  by stretching `v_total` x1.5 (line period still 21.16 µs — the ISR budget is what
+  makes it a dead end) and keeping the line rate by growing `line_bytes` 400 -> 600
+  (h_total 1200 at 37.8 MHz: refresh and ISR budget intact, but +50% DMA on the
+  top-priority channel and a timing no CEA/DMT sink knows).
+
 ### On-chip network transport = lwIP under the ZiFi facades (2026-09-06; hw-confirmed on m1p2w: WiFi join + FTP server work)
 
 Network → **Transport** gained "On-chip WiFi (CYW43)" (`Config::zifi_transport == 2`,
