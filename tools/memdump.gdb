@@ -296,3 +296,23 @@ if Z80Ops::isTc2068
   set logging enabled off
   set logging redirect off
 end
+
+# ── cores (ARM) ─────────────────────────────────────────────────────────────
+# Where each ARM core actually is. The NeoGS block above gives the GS-Z80's own
+# PC, i.e. WHICH emulated instruction is parked — but when core1 wedges inside
+# GS::pump() (the NGS_TRACE line shows it as pe/px frozen with rs=1) that says
+# nothing about WHY. This does: a backtrace separates "a callback is looping"
+# from "the load itself is stalled on the shared XIP/QMI bus", which is the one
+# question a frozen Z80 PC cannot answer.
+# Deliberately names NO symbol, so it cannot abort the sourced file the way an
+# unresolved one would (see the fishbone trap list) — and it is last regardless.
+# `thread apply all` restores the selected thread itself.
+set logging file /tmp/picospec_cores.txt
+set logging overwrite on
+set logging redirect on
+set logging enabled on
+printf "== cores (ARM) ==\n"
+info threads
+thread apply all bt 12
+set logging enabled off
+set logging redirect off

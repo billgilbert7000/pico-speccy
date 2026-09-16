@@ -2504,6 +2504,77 @@ void GS::pollPerf() {
 #endif  // GS_PERF_TRACE
 }
 
+// ── s_cpu callback-pointer guard ───────────────────────────────────────────────
+// hw 2026-09-16 (m1p2 + NeoGS, Z-Player): core1 took a UsageFault INVSTATE
+// (CFSR=0x00020000) inside z80_run() twice, both times on an indirect call
+// through one of the Z80 struct's callback pointers — once to 0x00000000 from
+// `LD A,(IY+d)` (the `read` hook), once to the address of a data object from
+// `IN A,(n)` (the `in` hook). After the fault core1 parks in sigbus_handler for
+// ever, which is exactly what the NGS_TRACE line reports as pe/px frozen with
+// rs stuck at PUMPING: pump() never returns, the GS-Z80 PC stops wherever it
+// was, the ZX half keeps running, F11 cannot help (ngsReset only LATCHES a
+// request core1 has to consume) and only a reboot recovers.
+//
+// The writer is NOT identified yet, so this does not pretend to be the fix. It
+// verifies the eight hooks step() can dispatch through, reports the first few
+// corruptions with everything needed to name the culprit, and repairs them so
+// the session survives instead of losing core1 — i.e. it converts a permanent
+// freeze into a log line. If it never fires, the corruption is somewhere else
+// in s_cpu (or `self` itself is wrong) and that is worth knowing too.
+//
+// Cost: eight loads and compares, and deliberately NOT per pump() call — the
+// check sits at the step() call site, which the 128-T credit floor already
+// gates to ~150k/s against pump's ~1M/s.
+static uint32_t s_cpu_hook_fixes = 0;
+
+static inline bool __not_in_flash_func(gs_cpu_hooks_ok)() {
+    return s_cpu.fetch_opcode == gs_cb_fetch_opcode
+        && s_cpu.fetch        == gs_cb_fetch
+        && s_cpu.read         == gs_cb_read
+        && s_cpu.write        == gs_cb_write
+        && s_cpu.in           == gs_cb_in
+        && s_cpu.out          == gs_cb_out
+        && s_cpu.nop          == gs_cb_nop
+        && s_cpu.inta         == gs_cb_inta;
+}
+
+// Cold path: flash is fine here, and Debug::log truncates at 256 bytes, so
+// report a bitmask plus the FIRST offending pair rather than all eight.
+static void gs_cpu_hooks_repair() {
+    unsigned mask = 0, bit = 0;
+    void *bad = nullptr, *exp = nullptr;
+#define GS_HOOK_CHK(field, ref)                                              \
+    do {                                                                     \
+        if ((void*)s_cpu.field != (void*)(ref)) {                            \
+            if (!mask) { bad = (void*)s_cpu.field; exp = (void*)(ref); }     \
+            mask |= 1u << bit;                                               \
+            s_cpu.field = (ref);                                             \
+        }                                                                    \
+        bit++;                                                               \
+    } while (0)
+    GS_HOOK_CHK(fetch_opcode, gs_cb_fetch_opcode);   // bit 0
+    GS_HOOK_CHK(fetch,        gs_cb_fetch);          // bit 1
+    GS_HOOK_CHK(read,         gs_cb_read);           // bit 2
+    GS_HOOK_CHK(write,        gs_cb_write);          // bit 3
+    GS_HOOK_CHK(in,           gs_cb_in);             // bit 4
+    GS_HOOK_CHK(out,          gs_cb_out);            // bit 5
+    GS_HOOK_CHK(nop,          gs_cb_nop);            // bit 6
+    GS_HOOK_CHK(inta,         gs_cb_inta);           // bit 7
+#undef GS_HOOK_CHK
+    s_cpu_hook_fixes++;
+    // Rate-capped: the first eight carry the evidence, after that only count —
+    // a per-step() log would itself take core1 down (Debug::log from core1 is
+    // milliseconds).
+    if (s_cpu_hook_fixes <= 8) {
+        Debug::log("GS: s_cpu hooks CORRUPT bad=%02X first=%p exp=%p "
+                   "PC=%04X SP=%04X cfg0=%02X mpag=%02X n=%lu - repaired",
+                   mask, bad, exp,
+                   (unsigned)Z80_PC(s_cpu), (unsigned)Z80_SP(s_cpu),
+                   (unsigned)s_ngs_cfg0, (unsigned)s_ngs_mpag,
+                   (unsigned long)s_cpu_hook_fixes);
+    }
+}
+
 void __not_in_flash_func(GS::pump)() {
     if (!enabled) return;
     // NeoGS cold-boot hold: the fw's SD boot path (loader looks for NEOGS.ROM
@@ -2652,6 +2723,8 @@ void __not_in_flash_func(GS::pump)() {
     constexpr int GS_PUMP_MAX_TSTATES = 4000;    // 0.2 ms of GS time @ 20 MHz
     const int want = s_pump_credit_t > GS_PUMP_MAX_TSTATES ? GS_PUMP_MAX_TSTATES
                                                            : s_pump_credit_t;
+    // Callback-pointer guard — see gs_cpu_hooks_ok() above.
+    if (__builtin_expect(!gs_cpu_hooks_ok(), 0)) gs_cpu_hooks_repair();
     int ran = step(want);
     s_pump_credit_t -= ran;
     if (s_pump_credit_t < -(int32_t)GS_INT_PERIOD) {
