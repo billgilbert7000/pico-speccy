@@ -345,6 +345,15 @@ void CPU::reset() {
     } else if (Config::ide_scheme == IDE::PLUS3E) {
         Config::ide_scheme = IDE::OFF;
     }
+    // ...and the same for the +3 (divIDE): its ROM drives the divIDE taskfile, and that
+    // scheme must not survive onto another machine — its decode is ahead of General
+    // Sound's #B3/#BB in Ports.cpp.
+    if (Config::isPlus3Div()) {
+        if (Config::ide_scheme != IDE::OFF && Config::ide_scheme != IDE::DIVIDE)
+            Config::ide_scheme = IDE::DIVIDE;
+    } else if (Config::ide_scheme == IDE::DIVIDE) {
+        Config::ide_scheme = IDE::OFF;
+    }
 
     // Timex video is incompatible with Byte ROM sets — auto-disable.
     // Also with Profi/Karabas: port #FF there is the Beta-128 FDC SYS register,

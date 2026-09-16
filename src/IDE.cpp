@@ -372,7 +372,9 @@ void IDE::init() {
 
     scheme = Config::ide_scheme;
     portScheme = OFF;            // nothing is visible to the guest until an image opens
-    // The +3e interface is 8 bits wide; NEMO and PROFI carry the high byte in a latch.
+    // The +3e interface is 8 bits wide; NEMO and PROFI carry the high byte in a latch,
+    // and divIDE has that latch in hardware (one data port, 512 accesses per sector —
+    // libspectrum's DATA16), which is the plain 16-bit path here.
     // Set before the OFF exit so switching a scheme off cannot leave the stride behind.
     eight_bit = (scheme == PLUS3E);
     half_sector[0] = half_sector[1] = false;   // re-derived per image in open_image()
@@ -1299,10 +1301,12 @@ uint8_t IDE::read8(uint8_t reg) {
 
 void IDE::write8(uint8_t reg, uint8_t value) {
 #if IDE_PORT_TRACE >= 2
-    // The +3e path has its own trace in Ports.cpp — it collapses the probe's 256-write
-    // sector-count sweep into one line and checks the read-backs, where one line per
-    // access floods the UART badly enough to lose the commands that matter.
-    if (reg != 0 && !eight_bit)  // don't log data register writes (too noisy)
+    // The two machine-ROM interfaces (+3e, divIDE) have their own trace in Ports.cpp —
+    // it collapses the probe's 256-write sector-count sweep into one line and checks the
+    // read-backs, where one line per access floods the UART badly enough to lose the
+    // commands that matter. Keyed on the SCHEME, not on eight_bit: divIDE is 16 bits
+    // wide and would otherwise be traced twice, which is the flood all over again.
+    if (reg != 0 && scheme != PLUS3E && scheme != DIVIDE)  // no data-register lines: too noisy
         Debug::log("[IDE WR] reg=%d val=0x%02X", reg, value);
 #endif
     switch (reg) {

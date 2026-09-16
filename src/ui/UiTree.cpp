@@ -152,7 +152,8 @@ static const Option opt_audio_driver[] = {
     { "PCM5122",  5 },              // ZERO2's I2S DAC board (I2C-configured)
 #endif
 };
-static const Option opt_video_mode[] = {      // values are the VM_* enum
+static constexpr Option opt_video_mode[] = {   // values are the VM_* enum (constexpr: the
+                                              // static_asserts below read .value)
     { "640x480 @60", 0 },
     { "640x480 @50", 1 },
     { "720x480 @60", 2 },
@@ -160,11 +161,21 @@ static const Option opt_video_mode[] = {      // values are the VM_* enum
     // 37.8 MHz pixel clock instead of 25.2 (PIO divider 1.0 at sys_clk 378 MHz):
     // same geometry, x1.5 the refresh. Need CPU 378 MHz and force V-Sync off —
     // resolveConstraints() settles both, whichever the user edited last.
+    // video_modeOpts() hides these four at any other CPU clock, and it does that
+    // by TRUNCATING the table, so they must stay last and contiguous.
     { "640x480 @90", 4 },
     { "640x480 @75", 5 },
     { "720x480 @90", 6 },
     { "720x576 @75", 7 },
 };
+static constexpr uint8_t kVmOptCount  = sizeof(opt_video_mode)/sizeof(opt_video_mode[0]);
+static constexpr uint8_t kVmBaseCount = 4;   // entries before the 90/75 Hz set
+static_assert(!Config::isFastVideoMode((uint8_t)opt_video_mode[kVmBaseCount - 1].value),
+              "opt_video_mode: the standard modes must come first");
+static_assert(Config::isFastVideoMode((uint8_t)opt_video_mode[kVmBaseCount].value),
+              "opt_video_mode: the 90/75 Hz set must be the contiguous tail");
+static_assert(Config::isFastVideoMode((uint8_t)opt_video_mode[kVmOptCount - 1].value),
+              "opt_video_mode: the 90/75 Hz set must be the contiguous tail");
 // The video-mode list carries the PIO divider each mode would run at, because that
 // divider is the whole point of the "fast" set and of the VGA pixel clocks: an
 // integer one repeats its phase per pixel, a fractional one jitters (1.5 is the
@@ -207,11 +218,32 @@ static int optLabelGlyphs() {
     return wpx > 0 ? wpx / glyphW() : 0;
 }
 
+// Is the 90/75 Hz set offerable at this staged CPU clock, and must one of its rows
+// be kept anyway because it is what the Mode row currently holds?
+//
+// The set only exists at sys_clk 378 MHz (the one clock where the PIO divider for
+// its 378 MHz TMDS rate comes out a clean 1.0), so at any other clock the rows are
+// hidden rather than listed and then refused by resolveConstraints.
+//
+// The STAGED value is kept whatever the clock, and that exception is not cosmetic:
+// nodeValueLabel() looks the value up in this very list, so a value with no row of
+// its own blanks the collapsed "Mode" row and leaves the pane with nothing marked.
+// The pair IS reachable — for as long as one menu session lasts — because changing
+// the CPU clock with a fast mode staged only resolves at commit, where the g_seq
+// tie-break decides which of the two gives way.
+static bool vmFastOffered() {
+    return (unsigned)Stage::get(SET_CPU_MHZ) == Config::VM_FAST_CPU_MHZ;
+}
+static bool vmRowVisible(int32_t vm, bool fastOk, int32_t staged) {
+    return !Config::isFastVideoMode((uint8_t)vm) || fastOk || vm == staged;
+}
+
 static const Option* video_modeOpts(uint8_t& cnt) {
-    cnt = (uint8_t)(sizeof(opt_video_mode)/sizeof(opt_video_mode[0]));
+    const int32_t staged = Stage::get(SET_VIDEO_MODE);
 #if defined(VGA_HDMI) || defined(HDMI)
-    static Option opts[sizeof(opt_video_mode)/sizeof(opt_video_mode[0])];
-    static char lbl[sizeof(opt_video_mode)/sizeof(opt_video_mode[0])][40];
+    const bool fastOk = vmFastOffered();
+    static Option opts[kVmOptCount];
+    static char lbl[kVmOptCount][40];
   #ifdef VGA_HDMI
     const int vga = ::SELECT_VGA ? 1 : 0;
   #else
@@ -221,9 +253,12 @@ static const Option* video_modeOpts(uint8_t& cnt) {
     // 378 MHz through resolveConstraints, and a label computed from the live clock
     // would contradict the constraint that just fired.
     const unsigned mhz = (unsigned)Stage::get(SET_CPU_MHZ);
-    for (uint8_t i = 0; i < cnt; i++) {
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < kVmOptCount; i++) {
         const int32_t vm = opt_video_mode[i].value;
-        opts[i] = opt_video_mode[i];
+        if (!vmRowVisible(vm, fastOk, staged)) continue;
+        const uint8_t o = n++;
+        opts[o] = opt_video_mode[i];
         const float d = graphics_clk_div_at(vmGraphicsIndex(vm), mhz, vga);
         char ds[16];
         // A mode the CPU clock cannot reach still says what its divider WOULD be,
@@ -236,27 +271,32 @@ static const Option* video_modeOpts(uint8_t& cnt) {
         if (needsFast || d <= 0.0f) {
             divStr(ds, sizeof(ds),
                    graphics_clk_div_at(vmGraphicsIndex(vm), Config::VM_FAST_CPU_MHZ, vga));
-            snprintf(lbl[i], sizeof(lbl[i]), "%s (div %s/%u)", opt_video_mode[i].label,
+            snprintf(lbl[o], sizeof(lbl[o]), "%s (div %s/%u)", opt_video_mode[i].label,
                      ds, (unsigned)Config::VM_FAST_CPU_MHZ);
         } else {
             divStr(ds, sizeof(ds), d);
-            snprintf(lbl[i], sizeof(lbl[i]), "%s (div %s)", opt_video_mode[i].label, ds);
+            snprintf(lbl[o], sizeof(lbl[o]), "%s (div %s)", opt_video_mode[i].label, ds);
         }
         // The space before the bracket is padding and is the first thing to give
         // up: VGA's "(div 10.0/378)" is one glyph over the 25 the pane allows,
         // and losing the space is cheaper than losing the divider to textClip's
         // "..". Nothing else here can overflow — the widest spaced label is 25.
         const int fits = optLabelGlyphs();
-        if (fits > 0 && (int)strlen(lbl[i]) > fits) {
-            char* sp = strstr(lbl[i], " (");
+        if (fits > 0 && (int)strlen(lbl[o]) > fits) {
+            char* sp = strstr(lbl[o], " (");
             if (sp) memmove(sp, sp + 1, strlen(sp));   // drop that one space
         }
-        opts[i].label  = lbl[i];
-        opts[i].slabel = opt_video_mode[i].label;   // collapsed row stays the bare mode
+        opts[o].label  = lbl[o];
+        opts[o].slabel = opt_video_mode[i].label;   // collapsed row stays the bare mode
     }
+    cnt = n;
     return opts;
 #else
-    return opt_video_mode;   // SOFTTV/TV/TFT drive their own panel — no PIO divider
+    // SOFTTV/TV/TFT drive their own panel — no PIO divider to show, and
+    // resolveConstraints refuses the 90/75 Hz set there outright. Hiding the tail
+    // needs no table of our own: those four entries are last (static_assert above).
+    cnt = Config::isFastVideoMode((uint8_t)staged) ? kVmOptCount : kVmBaseCount;
+    return opt_video_mode;
 #endif
 }
 
@@ -398,6 +438,12 @@ static const Option opt_mach_spectrum[] = {
     // replacement ROM, which carries IDEDOS and an 8-bit IDE interface on #xxEF.
     { TXT_ROM_P3E,        NM_MACH(A_128K, R_P3E),       TXT_ROM_P3E_S },
 #if !NO_SPAIN_ROM_128k
+#if PLUS3DIV_IN_FLASH
+    // ...and the same IDEDOS ROM built for a divIDE card instead (16-bit bus, ports
+    // #A3..#BF). Conditional because that image is not redistributable and has to be
+    // packed locally — see tools/rom_pack.py plus3div.
+    { TXT_ROM_P3DIV,      NM_MACH(A_128K, R_P3DIV), TXT_ROM_P3DIV_S },
+#endif
     { TXT_ROM_ZX81P,      NM_MACH(A_128K, R_ZX81P)    },
 #endif
     // Two rows because they are two different flash images — see UiStrings.h.
@@ -725,16 +771,18 @@ static bool p_plus3On() {
 // there — the same rule the +3 disk rows use.
 static bool p_ideOn()   { return Stage::get(SET_IDE_SCHEME) != 0; }
 
-// IDE/HDD scheme: the value IS Config::ide_scheme. "IDEDOS" is not a card the user
-// plugs in — it is the interface the +3e ROM drives, so the romset forces that value
-// and forces it away again on any other machine (UiStage resolveConstraints). It is
-// listed here so the row can display it rather than showing a blank radio.
+// IDE/HDD scheme: the value IS Config::ide_scheme. "IDEDOS" and "DivIDE" are not cards
+// the user plugs in anywhere — each is the interface one +3 romset's ROM drives, so the
+// romset forces that value and forces it away again on any other machine (UiStage
+// resolveConstraints). They are listed here so the row can display them rather than
+// showing a blank radio.
 static const Option opt_ide_scheme[] = {
     { "Off",   0 },
     { "NEMO",  1 },
     { "PROFI", 2 },
     { "SMUC",  3 },   // IDE::SMUC
     { "IDEDOS", 4 },  // IDE::PLUS3E — numbering follows IDE::Scheme, not this list
+    { "DivIDE", 5 },  // IDE::DIVIDE — the +3 (divIDE) romset's card, same rule
 };
 
 
@@ -751,6 +799,18 @@ static const Option opt_esxdos[] = {
     { "DivMMC", 1 },
     { "DivIDE", 2 },
     { "DivSD",  3 },
+};
+
+// Kempston mouse sensitivity: the value IS Config::mouse_sens, a Q8 multiplier on the
+// raw HID counts (256 = one counter step per count), so the row order is free. x1/4 is
+// what mouse_apply()'s divisor always was — every other entry is new ground.
+static const Option opt_mouse_sens[] = {
+    { "x1/8 (slowest)", 32,   "x1/8" },
+    { "x1/4 (default)", 64,   "x1/4" },
+    { "x1/2",           128,  "x1/2" },
+    { "x1",             256,  "x1"   },
+    { "x2",             512,  "x2"   },
+    { "x4 (fastest)",   1024, "x4"   },
 };
 
 // Storage and Devices used to be two top-level items, which split one question ("what is
@@ -779,6 +839,7 @@ static const Node kHardware[] = {
                 opt_ide_slot_hints, p_hasSD, p_ideOn),
     NM_ACTION_EN(NM_IND TXT_IDE_CREATE,  act_ideCreate, p_hasSD, p_ideOn),
     NM_BOOL  (TXT_HW_RTC,        SET_RTC,     nullptr),
+    NM_RADIO (TXT_HW_MOUSE_SENS, SET_MOUSE_SENS, opt_mouse_sens, nullptr),
 };
 
 // ── Video > TFT panel ──────────────────────────────────────────────────────────
@@ -1025,6 +1086,20 @@ static const Option opt_pref48[] = {
     { TXT_ROM_LAST,    4 },
 #endif
 };
+// Values are indices into UiStage's kPref128, so a conditional row shifts every row
+// below it. Two build switches can do that here, which is four spellings of the same
+// list if the numbers are written out — they are derived instead, so the two tables
+// cannot drift apart the way the Scorpion pair once threatened to.
+#if !NO_SPAIN_ROM_128k
+#  define P128_P3 5
+#else
+#  define P128_P3 1
+#endif
+#if PLUS3DIV_IN_FLASH
+#  define P128_CS (P128_P3 + 3)
+#else
+#  define P128_CS (P128_P3 + 2)
+#endif
 static const Option opt_pref128[] = {
     { TXT_ROM_128K,     0 },
 #if !NO_SPAIN_ROM_128k
@@ -1032,17 +1107,17 @@ static const Option opt_pref128[] = {
     { TXT_ROM_PLUS2,    2 },
     { TXT_ROM_PLUS2_ES, 3 },
     { TXT_ROM_ZX81P,    4 },
-    { TXT_ROM_P3,       5 },
-    { TXT_ROM_P3E,      6 },
-    { TXT_ROM_CUSTOM,   7 },
-    { TXT_ROM_LAST,     8 },
-#else
-    { TXT_ROM_P3,       1 },
-    { TXT_ROM_P3E,      2 },
-    { TXT_ROM_CUSTOM,   3 },
-    { TXT_ROM_LAST,     4 },
 #endif
+    { TXT_ROM_P3,       P128_P3     },
+    { TXT_ROM_P3E,      P128_P3 + 1 },
+#if PLUS3DIV_IN_FLASH
+    { TXT_ROM_P3DIV,    P128_P3 + 2 },
+#endif
+    { TXT_ROM_CUSTOM,   P128_CS     },
+    { TXT_ROM_LAST,     P128_CS + 1 },
 };
+#undef P128_P3
+#undef P128_CS
 static const Option opt_pref_pent[] = {
     { TXT_ROM_PENT_ORIG, 0 },
     { TXT_ROM_CUSTOM,    1 },

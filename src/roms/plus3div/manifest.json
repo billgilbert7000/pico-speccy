@@ -1,0 +1,31 @@
+{
+  "id": "plus3div",
+  "banks": [
+    {
+      "bank": "rom0",
+      "kind": "shared",
+      "base": "gb_overlay_plus3e_rom0"
+    },
+    {
+      "bank": "rom1",
+      "kind": "overlay",
+      "base": "gb_rom_1_plus3",
+      "len": 12768,
+      "runs": 446,
+      "diff_bytes": 10080
+    },
+    {
+      "bank": "rom2",
+      "kind": "overlay",
+      "base": "gb_rom_2_plus3e",
+      "len": 6215,
+      "runs": 175,
+      "diff_bytes": 5153
+    },
+    {
+      "bank": "rom3",
+      "kind": "shared",
+      "base": "gb_overlay_plus3_rom3"
+    }
+  ]
+}

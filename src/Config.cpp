@@ -75,6 +75,7 @@ uint16_t Config::mem_pg_cnt = 64;      // Murmuzavr off; the live count is MEM_P
 uint16_t Config::tsconf_ram = 256;     // TS-Conf 4 MB default (64/128/256 pages)
 uint8_t  Config::tsconf_clk_cap = 2;   // ZCLK cap: 14 MHz allowed
 bool     Config::rtc_enabled = false;
+uint16_t Config::mouse_sens = 64;        // Q8: 64 = x1/4, the historical divisor
 bool     Config::psram_enabled = true;   // Debug > PSRAM (runtime set(PSRAM OFF) twin)
 bool     Config::dbg_uart = false;       // Debug > UART console
 bool     Config::flashload = true;
@@ -445,6 +446,12 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
     }
     case A_128K: {
         romSet = (newRomSet == R_NONE) ? R_128K : newRomSet;
+#if !PLUS3DIV_IN_FLASH
+        // This build carries no +3 divIDE ROM (see CMakeLists / tools/rom_pack.py
+        // plus3div) — an NVS card written by a build that did picks the stock +3,
+        // which is the same machine without IDEDOS.
+        if (romSet == R_P3DIV) romSet = R_P3;
+#endif
         romSet128 = romSet;
         switch (romSet128) {
         case R_128K_CS:
@@ -493,6 +500,10 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
             break;
         case R_P3:
         case R_P3E:
+#if PLUS3DIV_IN_FLASH
+        case R_P3DIV:
+#endif
+        {
             // +2A/+3: FOUR ROMs, selected by (1FFD.D2 << 1) | 7FFD.D4 —
             //   0 editor/menu   1 syntax checker   2 +3DOS   3 48 BASIC
             // ROM 3 is the only one close enough to anything already in flash to
@@ -507,16 +518,45 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
             // branches set the overlay for EVERY base they assign — the registry is
             // keyed by base pointer and persists across romset switches, so a missing
             // nullptr would leave the +3e patch live on a plain +3.
+            //
+            // The +3 (divIDE) romset is that same IDEDOS ROM built for a divIDE card
+            // (`div` in p3eroms). Which of its four banks are its own and which ride
+            // the +3/+3e ones is NOT hardcoded here: the packer measures it and emits
+            // the PLUS3DIV_* macros (plus3div_roms.h), so a rebuild against another
+            // p3eroms revision cannot leave a stale assumption behind.
+            const uint8_t* rom2 = gb_rom_2_plus3;
+            const uint8_t* ovl0 = nullptr;
+            const uint8_t* ovl1 = nullptr;
+            const uint8_t* ovl2 = nullptr;
+            const uint8_t* ovl3 = gb_overlay_plus3_rom3;
+            if (romSet128 == R_P3E) {
+                rom2 = gb_rom_2_plus3e;
+                ovl0 = gb_overlay_plus3e_rom0;
+                ovl1 = gb_overlay_plus3e_rom1;
+            }
+#if PLUS3DIV_IN_FLASH
+            else if (romSet128 == R_P3DIV) {
+                rom2 = PLUS3DIV_ROM2_BASE;
+                ovl0 = PLUS3DIV_ROM0_OVL;
+                ovl1 = PLUS3DIV_ROM1_OVL;
+                ovl2 = PLUS3DIV_ROM2_OVL;
+                ovl3 = PLUS3DIV_ROM3_OVL;
+            }
+#endif
             MemESP::rom[0].assign_rom(gb_rom_0_plus3);
             MemESP::rom[1].assign_rom(gb_rom_1_plus3);
-            MemESP::rom[2].assign_rom(romSet128 == R_P3E ? gb_rom_2_plus3e : gb_rom_2_plus3);
+            MemESP::rom[2].assign_rom(rom2);
             MemESP::rom[3].assign_rom(gb_rom_1_sinclair_128k);
-            MemESP::registerOverlay(gb_rom_0_plus3,
-                romSet128 == R_P3E ? gb_overlay_plus3e_rom0 : nullptr);
-            MemESP::registerOverlay(gb_rom_1_plus3,
-                romSet128 == R_P3E ? gb_overlay_plus3e_rom1 : nullptr);
-            MemESP::registerOverlay(gb_rom_1_sinclair_128k, gb_overlay_plus3_rom3);
+            MemESP::registerOverlay(gb_rom_0_plus3, ovl0);
+            MemESP::registerOverlay(gb_rom_1_plus3, ovl1);
+            // Bank 2 is the only base that is not shared by all three romsets, so it
+            // is registered through the variable: whichever array this romset put at
+            // rom[2] is the one whose overlay must be (re)set — including to nullptr,
+            // or the divIDE patch would stay live on the plain +3e bank.
+            MemESP::registerOverlay(rom2, ovl2);
+            MemESP::registerOverlay(gb_rom_1_sinclair_128k, ovl3);
             break;
+        }
         default:
             MemESP::rom[0].assign_rom(gb_rom_0_pentagon_128k);
             MemESP::registerOverlay(gb_rom_0_pentagon_128k, gb_overlay_pentagon_sinclair_128k_0);
@@ -1176,6 +1216,8 @@ void Config::load() {
         }
         nvs_get_b("Issue2", Issue2, sts);
         nvs_get_b("rtc_enabled", rtc_enabled, sts);
+        nvs_get_u16("mouse_sens", mouse_sens, sts);
+        if (mouse_sens < 8 || mouse_sens > 1024) mouse_sens = 64;   // a stale/foreign NVS value
         nvs_get_b("psram_enabled", psram_enabled, sts);
         nvs_get_b("dbg_uart", dbg_uart, sts);
         nvs_get_b("debug_log", Debug::log_enabled, sts);
@@ -1656,6 +1698,7 @@ void Config::save(const char* path, const char* profileName) {
     nvs_set_u8(buf,"ngs_clock", Config::ngs_clock);
     nvs_set_str(buf,"Issue2", Issue2 ? "true" : "false");
     nvs_set_str(buf,"rtc_enabled", rtc_enabled ? "true" : "false");
+    nvs_set_i(buf,"mouse_sens", mouse_sens);
     nvs_set_str(buf,"psram_enabled", psram_enabled ? "true" : "false");
     nvs_set_str(buf,"dbg_uart", dbg_uart ? "true" : "false");
     nvs_set_str(buf,"debug_log", Debug::log_enabled ? "true" : "false");

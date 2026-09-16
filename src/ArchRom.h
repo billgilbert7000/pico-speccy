@@ -63,7 +63,8 @@
     X(R_SCORP_PROF,     "ScorpProf",        "ZS-1024 + ProfROM")          \
     X(R_ALF1,           "ALF1",             "ALF cartridge")      \
     X(R_P3,             "P3",               "+3 v4.0")             \
-    X(R_P3E,            "P3e",              "+3 (IDEDOS)")      \
+    X(R_P3E,            "P3e",              "+3 (IDEDOS)")           \
+    X(R_P3DIV,          "P3div",            "+3 (DivIDE)")      \
     X(R_TSCONF,         "TS-Conf",          "TS-BIOS + 128")              \
     X(R_TSCONF_GLUK,    "TS-Gluk",          "TS-BIOS + Mr Gluk")
 
@@ -172,13 +173,23 @@ inline bool isTc2068Romset(RomsetIdx r) { return r == R_TC2068; }
 inline bool isTimexRomset(RomsetIdx r) { return r == R_TC2048 || r == R_TC2068; }
 
 inline bool isPlus3Romset(RomsetIdx r) {
-    return r == R_P3 || r == R_P3E;
+    return r == R_P3 || r == R_P3E || r == R_P3DIV;
 }
 // The +3e (Garry Lancaster's replacement ROM) is the same +3 hardware with IDEDOS in
 // ROM, so it is a romset of the romset: everything above stays true, and on top of it
 // the machine carries the "simple 8-bit" IDE interface on #xxEF (see Ports.cpp).
 inline bool isPlus3eRomset(RomsetIdx r) {
     return r == R_P3E;
+}
+// The SAME IDEDOS ROM built for a divIDE card instead (the `div` build of p3eroms):
+// still a +3 in every other respect, but the disk is reached over divIDE's #A3..#BF
+// taskfile (DivideIde.h) on a 16-BIT bus — so its .hdf images are full-sector ones,
+// where the +3e's 8-bit interface wants half-sector images. Kept separate from
+// isPlus3eRomset() because the two differ in exactly that: which interface is fitted,
+// and therefore which ports are claimed (the +3e's window collides with ZiFi, divIDE's
+// with General Sound and the Profi CP/M FDC).
+inline bool isPlus3DivRomset(RomsetIdx r) {
+    return r == R_P3DIV;
 }
 
 // The ZX-Evo BIOS images are one romset family over the same machine: pages 0 and 1

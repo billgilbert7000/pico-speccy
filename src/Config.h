@@ -192,6 +192,11 @@ public:
         return n;
     }
     static bool     rtc_enabled;  // Pentagon/Profi Mr Gluk MC146818 RTC + CMOS NVRAM (RP2350)
+    // Devices > Mouse sensitivity: a Q8 multiplier on the raw HID counts before they
+    // reach the Kempston X/Y counters (256 = 1 count per count). 64 — a quarter — is
+    // what the divisor in mouse_apply() always was, so it is the default. The serial
+    // (COM) mouse has its own scaling at packet-build time and is not affected.
+    static uint16_t mouse_sens;
     // Debug > PSRAM. Read once at boot (ESPectrum::setup, right after load()): false
     // makes the firmware behave as if the board had no PSRAM — the runtime twin of the
     // CMake set(PSRAM OFF) kill-switch. See board_psram_disable() in main.cpp.
@@ -318,6 +323,9 @@ public:
     static bool isTc2068() { return arch == A_48K && isTc2068Romset(romSet); }
     // ...either Timex, i.e. "the SCLD is this machine's ULA".
     static bool isTimex() { return arch == A_48K && isTimexRomset(romSet); }
+    // ...or the +3 (divIDE): the same IDEDOS ROM built for a divIDE card, so the disk
+    // is on divIDE's #A3..#BF taskfile and the bus is 16 bits (DivideIde.h).
+    static bool isPlus3Div() { return arch == A_128K && isPlus3DivRomset(romSet); }
     static uint8_t  covox;
     // CPU turbo picked by the user (0..3 = 3.5/7/14/28 MHz), NVS-persisted.
     // Feeds ESPectrum::multUser at setup; the live speed may differ (EFF7 D4).
@@ -500,7 +508,7 @@ public:
     // divider for a 378 MHz TMDS clock.
     static const uint16_t VM_FAST_CPU_MHZ = 378;
 
-    static bool isFastVideoMode(uint8_t vm) { return vm >= VM_640x480_90 && vm <= VM_LAST; }
+    static constexpr bool isFastVideoMode(uint8_t vm) { return vm >= VM_640x480_90 && vm <= VM_LAST; }
     // The 25.2 MHz twin of a fast mode (identity for the standard ones): what a
     // fast pick degrades to when the CPU clock is not 378 MHz.
     static uint8_t baseVideoMode(uint8_t vm) {

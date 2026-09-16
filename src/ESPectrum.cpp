@@ -314,7 +314,11 @@ int32_t ESPectrum::mouseY = 0;
 bool ESPectrum::mouseButtonL = 0;
 bool ESPectrum::mouseButtonR = 0;
 bool ESPectrum::mouseButtonM = 0;
-uint8_t ESPectrum::mouseWheel = 0;
+// Powers up at 0x0F so an untouched wheel mouse answers #FADF with exactly the
+// 0xFF a two-button Kempston mouse idles at — the value classic software tests
+// for (see Ports::input). The counter is free-running and every driver reads
+// deltas, so its start value is ours to choose.
+uint8_t ESPectrum::mouseWheel = 0x0F;
 bool ESPectrum::mouseSeen = false;
 int32_t ESPectrum::mouseDX = 0;
 int32_t ESPectrum::mouseDY = 0;
@@ -909,6 +913,15 @@ void ESPectrum::setup() {
       }
     } else if (Config::ide_scheme == IDE::PLUS3E) {
       Config::ide_scheme = IDE::OFF;   // the +3e interface without the +3e ROM
+    }
+    // The +3 (divIDE) romset's own interface, same rule. No ZiFi clause: divIDE lives
+    // on #A3..#BF, nowhere near the NIC's #xxEF — what it does share is General Sound's
+    // #B3/#BB, and that is settled by the decode order in Ports.cpp.
+    if (Config::isPlus3Div()) {
+      if (Config::ide_scheme != IDE::OFF && Config::ide_scheme != IDE::DIVIDE)
+        Config::ide_scheme = IDE::DIVIDE;
+    } else if (Config::ide_scheme == IDE::DIVIDE) {
+      Config::ide_scheme = IDE::OFF;
     }
     if (Config::esxdos || Config::zcontroller) {
       Debug::log("setup: +3 — DivMMC/Z-Controller off (they automap over the +3 ROMs)");
@@ -1565,6 +1578,11 @@ void ESPectrum::reset(uint8_t romInUse) {
   else if (Config::joystick == JOY_FULLER)
     Ports::port[0x7f] = 0xff; // Fuller
   Ports::portAFF7 = 0;
+  // Kempston wheel counter back to its power-up 0x0F, i.e. #FADF idles at 0xFF
+  // again — the way out for software that reads any other value as a pressed
+  // button, and the same way out the DIY interface's RESET line gives (DonNews
+  // #19). X/Y are left alone: they are position, and no reset re-centres a mouse.
+  mouseWheel = 0x0F;
   // The #FE latch: a machine reset must leave the machine as a cold boot does, and
   // at cold boot this is 0. It is not just the border colour — on Scorpion GMX its
   // low three bits are read BACK as BRD0/1/2 in bit 7 of the #7AFD / #78FD / #7EFD

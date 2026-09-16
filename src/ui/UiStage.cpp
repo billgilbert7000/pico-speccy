@@ -72,6 +72,7 @@ NM_INT_ACCESS (throtling, throtling)
 NM_BOOL_ACCESS(ledInd,    ledIndicators)
 NM_BOOL_ACCESS(sdLed,     sdLedBlink)
 NM_BOOL_ACCESS(rtc,       rtc_enabled)
+NM_INT_ACCESS (mouseSens, mouse_sens)
 NM_BOOL_ACCESS(p3Fast,    p3_fastdisk)
 NM_BOOL_ACCESS(p3Slock,   p3_speedlock)
 NM_BOOL_ACCESS(psramOn,   psram_enabled)
@@ -259,7 +260,11 @@ static const RomsetIdx kPref128[]  = {
 #if !NO_SPAIN_ROM_128k
     R_128K_ES, R_PLUS2, R_PLUS2_ES, R_ZX81P,
 #endif
-    R_P3, R_P3E, R_128K_CS, R_LAST };
+    R_P3, R_P3E,
+#if PLUS3DIV_IN_FLASH
+    R_P3DIV,
+#endif
+    R_128K_CS, R_LAST };
 // Pentagon-class preferences offer Original / Custom / Last only — the classic menu has
 // no way to pin 128Kpg either (MENU_ROM_PREF_PENT). Kept as is.
 static const RomsetIdx kPrefPent[] = { R_PENT, R_128K_CS, R_LAST };
@@ -883,6 +888,11 @@ static bool stagedIsPlus3e() {
     if (m >= 0) return isPlus3eRomset((RomsetIdx)(m & 0xFF));
     return Config::isPlus3e();
 }
+static bool stagedIsPlus3Div() {
+    const int32_t m = staged(SET_MACHINE);
+    if (m >= 0) return isPlus3DivRomset((RomsetIdx)(m & 0xFF));
+    return Config::isPlus3Div();
+}
 static bool stagedIsTsconf() { return stagedArchIs(A_TSCONF); }
 static bool stagedIsTimex() {
     const int32_t m = staged(SET_MACHINE);
@@ -1010,6 +1020,29 @@ static void resolveConstraints(CommitReport& rep) {
             changed |= force(SET_IDE_SCHEME, IDE::OFF, rep, "IDE off: the +3e interface needs the +3e ROM");
         }
 
+        // The +3 (divIDE) romset is the same story one interface over: its ROM drives a
+        // divIDE card (#A3..#BF), so on that machine every other scheme becomes DivIDE,
+        // and DivIDE goes away everywhere else. It has to go away, not merely idle: the
+        // decode sits ahead of General Sound in Ports.cpp and #B3/#BB are two of its
+        // registers, so a scheme left behind on a Pentagon would take the GS host ports
+        // with it. (A real divIDE with its own EPROM and automap is a different thing
+        // and already exists here — Devices -> esxDOS -> DivIDE.)
+        if (stagedIsPlus3Div()) {
+            if (staged(SET_IDE_SCHEME) != IDE::OFF && staged(SET_IDE_SCHEME) != IDE::DIVIDE)
+                changed |= force(SET_IDE_SCHEME, IDE::DIVIDE, rep, "IDE set to the divIDE interface");
+        } else if (staged(SET_IDE_SCHEME) == IDE::DIVIDE) {
+            changed |= force(SET_IDE_SCHEME, IDE::OFF, rep, "IDE off: DivIDE needs the +3 (divIDE) ROM");
+        }
+
+        // EDGE: switching TO the +3 (divIDE), same shape (and same g_seq tie-break) as
+        // the +3e edge below.
+        if (bmGet(g_dirty, SET_MACHINE) && stagedIsPlus3Div()
+            && !isPlus3DivRomset((RomsetIdx)(g_base[SET_MACHINE] & 0xFF))
+            && staged(SET_IDE_SCHEME) == IDE::OFF
+            && g_seq[SET_IDE_SCHEME] <= g_seq[SET_MACHINE]) {
+            changed |= force(SET_IDE_SCHEME, IDE::DIVIDE, rep, "IDE set to the divIDE interface");
+        }
+
         // EDGE: this commit switches TO the +3e, so give it its interface — that is what
         // makes a freshly picked +3e find its hard disk without a trip to Devices. It
         // fires only on the transition (the machine is dirty and was not a +3e before),
@@ -1083,6 +1116,13 @@ static void resolveConstraints(CommitReport& rep) {
         // fractional divider whose phase pattern no longer repeats per pixel.
         // Mutually constrained with the CPU clock, so it resolves by g_seq like the
         // SAA/Timex pair: whichever of the two the user edited last wins.
+        //
+        // In practice only ONE of those two branches is reachable from the menu:
+        // video_modeOpts() lists the 90/75 Hz rows only while the staged clock is
+        // already 378, so a fast mode can be PICKED only at 378 and the "bump the
+        // CPU clock" branch is left as the backstop for a config that arrives here
+        // some other way. Lowering the clock afterwards is the live case, and it
+        // takes the second branch.
         if (Config::isFastVideoMode((uint8_t)staged(SET_VIDEO_MODE))) {
 #if !defined(VGA_HDMI) && !defined(HDMI)
             // SOFTTV / TV / TFT drive their own panel timing — there is no TMDS or

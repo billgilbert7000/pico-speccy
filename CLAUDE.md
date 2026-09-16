@@ -1480,7 +1480,7 @@ diffed against the image byte for byte — 132 of 132 matched on the first check
 turned every one of these into a data question instead of a firmware one. Do that
 first.
 
-### The Kempston mouse buttons byte idles at 0xFF — the wheel layout is Karabas-only (hw-confirmed 2026-09-14)
+### The Kempston mouse buttons byte must idle at 0xFF — the wheel counter powers up at 0x0F (hw-confirmed 2026-09-15)
 
 `#FADF` used to answer the **Karabas-Pro wheel mouse** on EVERY machine —
 `(wheel & 0x0F) << 4 | 0x08 | M | L | R`, i.e. **0x0F when nothing is pressed**.
@@ -1493,12 +1493,99 @@ button is down", so the whole GUI sat with a permanently pressed button and
 nothing in it responded. X/Y were fine the whole time (the dump had
 `(#ED9E)=27`, `(#ED9D)=79` and a live pointer at `(#ED9B/#ED9C)`), which is why it
 read as "the mouse does not work" rather than "the pointer does not move".
-`Ports.cpp` now keeps the wheel/middle-button layout for `Z80Ops::isProfi` only.
-ZEsarUX agrees (`operaciones.c`: `acumulado = 255`, only bits 0/1 cleared, high
-nibble masked to the wheel **on TBBLUE alone**; its comment spells out
-"D2-D7 - not used"). The decode itself was never wrong — non-Profi matches
-`address & 0x05FF` against 0x01DF/0x05DF/0x00DF, which is `#FBDF`/`#FFDF`/`#FADF`.
-Consequence to know: on a +3e the wheel is gone, as it should be.
+The first fix (2026-09-14) kept the wheel/middle-button layout for `Z80Ops::isProfi`
+only. ZEsarUX agrees about the classic byte (`operaciones.c`: `acumulado = 255`,
+only bits 0/1 cleared, high nibble masked to the wheel **on TBBLUE alone**; its
+comment spells out "D2-D7 - not used"). The decode itself was never wrong —
+non-Profi matches `address & 0x05FF` against 0x01DF/0x05DF/0x00DF, which is
+`#FBDF`/`#FFDF`/`#FADF`.
+
+**The wheel is now available on EVERY machine (2026-09-15) without giving that
+0xFF back up, because the counter's START VALUE is ours to choose.** The layout is
+one standard — Karabas-Pro manual p.25, the DIY interface in DonNews #19
+(zxpress.ru, "Bit/XXL", 2003) and the ZX Next all agree: bit0 R, bit1 L, bit2 M
+(active low), **bit3 tied to 1**, bits 4-7 a 4-bit up/down wheel counter (+1 per
+notch scrolled up), with the X/Y ports 8-bit free-running counters read as deltas.
+`ESPectrum::mouseWheel` therefore powers up at **0x0F**, so an untouched wheel
+mouse answers `#FADF` with exactly `0xFF` — bit-identical to the two-button mouse,
+Workbench's `CP #FF` included — and only a wheel that has actually been turned, or
+a middle click, can be mistaken for a pressed button. That is a legal state for a
+free-running counter (every driver reads deltas), and it is what real hardware does
+too: the DonNews author reports the same fault in 2003 ("some programs do not
+detect this device") and answered it with a RESET line to his counter, which only
+moves the problem to "after the first scroll".
+
+- **A machine reset (F11) re-centres the counter to 0x0F**, so a GUI whose pointer
+  moves while its buttons look stuck heals in one keypress — deliberately the SAME
+  way out real hardware has, and the reason there is no setting for this. X/Y are
+  left alone: they are position, and no reset re-centres a mouse.
+- **There is deliberately no menu row.** A toggle was written and dropped (owner,
+  2026-09-15): with the counter idling at 0x0F it would only ever differ from the
+  strict two-button mouse after the user had scrolled, which the reset already
+  answers, and the wheel layout is what the hardware being emulated does.
+### ...and a boot-protocol mouse has no wheel to give (hw-confirmed 2026-09-15)
+
+Putting the wheel in `#FADF` changed nothing on hardware, and the emulator was not
+the reason: **TinyUSB puts every boot-capable HID interface into BOOT protocol during
+enumeration** (`CFG_TUH_HID_SET_PROTOCOL_ON_ENUM`, `_hidh_default_protocol =
+HID_PROTOCOL_BOOT`), and a boot mouse report is buttons/X/Y and nothing else. The
+wheel exists only in the device's OWN report, which it sends in REPORT protocol. The
+signature is on the OSD's HID devices page: **`last len = 3`** (Dell 413C:301D — the
+report descriptor declares report id 1, 5 buttons, X, Y, Wheel, i.e. a 5-byte report
+the host never asked for). `process_mouse_report`'s `if (len >= 4)` guard, which was
+there to stop a 3-byte report's non-existent wheel byte being read past the buffer,
+was silently doing all the work.
+
+- **`src/HidMouseLayout.h`** is a minimal HID report-descriptor walker: report id,
+  bit offset and size of buttons / X / Y / Wheel, taken ONLY from the application
+  collection whose usage is Desktop/Mouse (a combo device's joystick or consumer
+  collection cannot donate an "X"). `hid_app.cpp` parses it at mount and asks for
+  REPORT protocol **only when the descriptor really carries a wheel** — a device we
+  cannot parse keeps boot protocol and the boot layout, because movement and buttons
+  are hw-proven there and a wheel is not worth risking them for.
+- **The decoder re-checks report id and length on every report**, so the boot-format
+  reports still arriving while SET_PROTOCOL is in flight are refused and fall through
+  to the boot path. On a boot-mouse interface a LONGER unmatched report is dropped,
+  never passed to the boot cast: its first byte is a report id, which that cast would
+  read as the button mask (id 1 = a left button held down for ever, X/Y from the
+  wrong bytes). An `itf_protocol NONE` interface is never dropped from — there the
+  other report ids are the device's own keyboard and consumer keys.
+- It also fixes **16-bit X/Y** mice (high-DPI), which the boot-layout cast in
+  `process_generic_report` has always read as noise.
+- **Host test `tools/hid_mouse_layout_test.cpp`** (`g++ -O2 -Wall -Wextra -Isrc -o
+  /tmp/hml tools/hid_mouse_layout_test.cpp && /tmp/hml`): report-id and id-less mice,
+  16-bit axes, composite keyboard+mouse and joystick+mouse descriptors, gamepad and
+  wheel-less mice rejected, truncated/long items rejected, sign extension, and the
+  two refusals the fallback depends on. **Re-run after ANY change there** — six
+  hand-applied mutations each fail it. A mis-parse does not misbehave by degrees: it
+  silences the pointer or decodes garbage, and neither is visible without hardware.
+- The HID devices page now prints `wheel rpt id=/len=/proto=` with the parsed
+  offsets, or **`wheel: none (boot mouse)`** — that line is the one-glance answer to
+  "why does the wheel do nothing" (`proto=boot` there means the SET_PROTOCOL did not
+  take), and `foreign rpts` counts what the drop rule discarded.
+### Mouse sensitivity, and the truncation that made a slow hand drift (2026-09-15, NOT hw-tested)
+
+**Devices > "Mouse sensitivity"** — `Config::mouse_sens` (NVS `mouse_sens`,
+`SET_MOUSE_SENS`, AC_PURE), a **Q8 multiplier** on the raw HID counts before they
+reach the Kempston X/Y counters: 256 = one counter step per count, and the default 64
+(x1/4) is exactly the `>> 2` that `mouse_apply()` always had. Menu steps x1/8 .. x4.
+A foreign or stale NVS value falls back to 64 in `Config::load`.
+
+- **The fraction is now KEPT** (`mouse_frac_x/y`), which is a behaviour change even
+  at the default: `dx >> 2` dropped every movement under four counts, and dropped it
+  ASYMMETRICALLY — an arithmetic shift rounds toward minus infinity, so -1 counted as
+  -1 while +1 counted as nothing, and a slow hand crept left and up. Eight +1 reports
+  used to move the pointer by 0 and eight -1 reports by -8; both now give +-2 at
+  x1/4. The serial-mouse packet builder has kept its remainder like this all along.
+- **The serial (COM) mouse is deliberately NOT scaled by this**: it consumes
+  `mouseDX/DY` (raw counts) and halves them at packet-build time, a figure tuned on
+  hardware ("÷4 felt sluggish"). Only the Kempston counters follow the setting.
+- The wheel is not scaled either — one notch is one step of the 4-bit counter, which
+  is what the counting-cascade hardware does.
+
+- **Hw 2026-09-15 (DVp2, Dell 413C:301D): the wheel scrolls Z-Player 5.** What that
+  run does NOT cover: Workbench +3e still idling at 0xFF with a wheel mouse attached,
+  any other mouse's descriptor, and a `NONE`-interface mouse taking the parsed path.
 
 - **`ESPectrum::mouseSeen` is the only presence gate and there is no `Config::mouse`
   and no keyboard fallback** — without a real USB mouse `#FADF` answers 0xFF
@@ -1536,11 +1623,10 @@ an 8-bit one.
   same in every build): `pe8` **479 bytes in one bank**, `p16` 6795 in banks 1+2,
   `div` 6794, `pcf` 6794, `zxc` 6891, `zxa` 7798, `dvm`/`mmc` 9504. The
   TAP-loading `-mod` build of sm8 differs by ~13.7 KB across all four banks.
-- **If a 16-bit disk is ever wanted, `div` is the cheap route, not `p16`.** We
-  already emulate divIDE — `Ports.cpp` decodes its ATA registers as
-  `(lo & 0xE3) == 0xA3` plus control at `0xE3`, and `DivMMC.cpp`'s `divide_mode`
-  opens .hdf and reads **full 512-byte sectors**. Missing: the `div` ROM banks and
-  letting divIDE be enabled on a +3. `p16` would additionally need a whole new
+- **The 16-bit route is `div`, not `p16`, and it is IMPLEMENTED as of 2026-09-15**
+  — see "The +3 (divIDE) romset" below. Everything but the ROM image is in the
+  tree: `IDE::DIVIDE` (scheme 5) puts the existing 16-bit ATA engine behind
+  divIDE's own taskfile, so a full-sector .hdf works. `p16` would additionally need a whole new
   decode — it abandons the `#xxEF` family for `#69`/`#6B`/`#6F`/`#79`/`#7F`.
 - `Workbench2.3_4Gb_8Bits.hdf` (octocom.speccy.org, 1 998 581 888 B, 7745/16/63,
   62 partitions) **boots and runs on the shipped sm8 ROM** (hw 2026-09-14). Its
@@ -1550,6 +1636,94 @@ an 8-bit one.
 - **`tools/idedos_audit.py` reads the partition table from ONE sector**, which is
   4 entries on a half-sector image — it showed 3 partitions of Workbench's 62.
   Unfixed.
+
+### The +3 (divIDE) romset — `R_P3DIV` + `IDE::DIVIDE` (2026-09-15, NOT hw-tested)
+
+The SAME IDEDOS ROM as the +3e, built for a **divIDE** card (the `div` build of
+p3eroms) instead of the simple 8-bit interface — which is the configuration the
+Workbench author's own setup guide targets ("replace the machine ROMs with
+dives3e0..3.rom and tick DivIDE interface") and therefore the one that reads the
+**16-bit** IDEDOS disks. It is a romset of the +3 exactly the way `R_P3E` is:
+`isPlus3Romset()` covers it, so every +3 rule already written applies unchanged,
+and `isPlus3DivRomset()` / `Config::isPlus3Div()` add the card on top.
+
+- **Fuse is the specification here, not a ROM disassembly** (`peripherals/ide/divide.c`,
+  via the libretro/fuse-libretro mirror — worldofspectrum and octocom.speccy.org are
+  both behind this environment's egress policy, GitHub is not). It registers exactly
+  two windows over the FULL port word: `{0x00e3, 0x00a3}` for the taskfile and
+  `{0x00ff, 0x00e3}` write-only for the control register. So the HIGH BYTE IS NOT
+  DECODED and the register is A2..A4 of the low byte — `#A3` data, `#A7` error/features,
+  `#AB` count, `#AF` sector, `#B3` cyl lo, `#B7` cyl hi, `#BB` device/head, `#BF`
+  command/status. `src/DivideIde.h` is that arithmetic and `tools/divide_ide_test.cpp`
+  checks it against Fuse's own switch over all 65536 addresses (mutation-checked: a
+  wrong mask, a wrong shift and a wrong control port each fail it).
+- **The bus is 16 bits** (libspectrum `LIBSPECTRUM_IDE_DATA16`): the card holds the
+  high-byte latch, so a sector is **512 consecutive accesses to the one data port**,
+  low/high/low..., which is `IDE::read8(0)` with `eight_bit` FALSE — the default path,
+  nothing new. Consequence for the user: a +3div wants a **full-sector** .hdf, where
+  the +3e's 8-bit interface wants a half-sector one (HDF flags bit 0). Mount the wrong
+  edition and IDEDOS sees garbage; that is faithful, not a bug.
+- **No EPROM, no automap, deliberately.** A real divIDE also pages 8 KB of EPROM plus
+  32 KB of RAM over 0x0000-0x3FFF — and Fuse models it, but `divxxx_refresh_page_state`
+  acts on the automap flag ONLY when CONMEM is set or the EPROM is write-protected, and
+  `divide_wp` defaults to 0 (settings.dat) exactly as the physical jumper leaves it. The
+  ROM never writes the control port, so in this configuration the card is nothing but the
+  taskfile. Paging it in would be actively wrong: the driver lives in the machine's own
+  ROM and divIDE's romcs would replace the banks it runs from. (The FULL card — EPROM,
+  RAM, CONMEM/MAPRAM, the entry-point automap — does exist here: Devices -> esxDOS ->
+  DivIDE, `DivMMC.cpp`. The two decode the same ports, which is why only one may be live;
+  the existing "enabling esxDOS turns the IDE scheme off" rule already covers it.)
+- **`IDE::DIVIDE` is scheme 5, and the value IS the NVS `ide_scheme` byte** (the +3e
+  section's warning applies: every table that names a scheme — the `opt_ide_scheme`
+  radio, Hardware Info's name list — must use the enum, not a literal).
+- **The scheme is tied to the romset in both directions**, like `PLUS3E`:
+  `resolveConstraints` (menu), `MachineSwitch::commit` (live switch) and
+  `ESPectrum::setup` + `CPU::reset` (the paths that never see a menu). It has to go away
+  on other machines, not merely idle: **General Sound's host ports #B3/#BB ARE divIDE's
+  cyl-lo and device/head registers**, and the decode sits ahead of the GS one in
+  Ports.cpp. That is the same precedence the full divIDE card has always had (`GS::enabled
+  && !DivMMC::divide_mode`), and the host test asserts the collision so the comment cannot
+  rot. The Profi CP/M shifted FDC (#83/#A3/#C3/#E3) is the other reason.
+- No ZiFi clause, unlike the +3e: divIDE is nowhere near the NIC's `#xxEF`.
+- **The ROM is IN the tree** — `src/roms/plus3div/src/rom{0,1,2,3}.bin`, the `div`
+  build of p3eroms v1.43, **English** (`diven3e0..3`), from the `ROMS_original.rar` the
+  owner supplied (neither octocom nor worldofspectrum is reachable from this
+  environment, and **fuse ships only the `sm8` banks**: its `plus3e-{0,1,2,3}.rom` are
+  byte-identical to our +3e banks and to the +3's bank 3, md5 `bc123f62…`, `61736426…`,
+  `c363e95d…`, `a148bcc5…` — measured, so "it works in Fuse" never implied the div
+  build). CRC32 checked against the archive's own headers on extraction. The Spanish
+  set (`dives3e`, which the Workbench author's Fuse guide names) is one file copy plus
+  a re-pack away; English matches the +3/+3e romsets beside it.
+  `PLUS3DIV_IN_FLASH` stays as the escape hatch: CMake derives it from the presence of
+  the generated header (the `CONFIGURE_DEPENDS` glob re-configures by itself when the
+  .c appears), and without it the Machine row, the preferred-ROM row and the binding
+  all vanish while a persisted pick falls back to the stock +3.
+- **The packer MEASURES the layout instead of assuming it** and publishes it as
+  `PLUS3DIV_*` macros that `Config::requestMachine` binds through, so a different
+  p3eroms revision moves the macros and not the firmware. Measured on this image:
+  bank 0 is byte-identical to the +3e's (reuses `gb_overlay_plus3e_rom0`, ships
+  nothing), bank 1 overlays the stock +3 bank 1 in **12768 B**, bank 2 overlays the
+  +3e's RAW bank 2 in **6215 B**, bank 3 is the +3's 48 BASIC (reuses
+  `gb_overlay_plus3_rom3`). **18.5 KB of flash**, and banks 1+2 differ from `sm8` by
+  exactly **6794** bytes — the archive readme's own figure for `div`, which is the
+  cross-check that these are the right files. The raw-bank-2 and own-bank-3 branches
+  are not exercised by this image; they were checked with synthetic banks, and the
+  emitted C arrays verified to reconstruct all four banks through the macros.
+- **The ROM confirms the port map independently.** Bank 2 carries **30 `LD BC,nn`
+  setups whose low byte is in the taskfile**, covering all eight registers
+  (#A3 data x5, #A7 x2, #AB x3, #AF x3, #B3 x3, #B7 x3, #BB x3, #BF cmd/status x8),
+  with high bytes 0x00/0x01 — i.e. not decoded, as Fuse says. Zero `#xxEF` accesses,
+  against 34 in the `sm8` bank 2 that has zero divIDE ones: the two builds are exact
+  mirrors of each other over the two interfaces. `tools/divide_ide_test.cpp` scans the
+  shipped bank and asserts every one of those decodes the way Fuse's table does.
+- **Bank 2's overlay base is `gb_rom_2_plus3e`, which makes the registry discipline
+  matter again**: MemESP keys ONE overlay per base pointer, so the +3/+3e/+3div branch
+  now registers bank 2's overlay through the variable that named the array it just
+  assigned — including `nullptr` — or the divIDE patch would stay live on a plain +3e.
+- **`pack_plus3e_raw()` was called but never defined** — `rom_pack.py plus3e`, and the
+  no-argument run that packs everything, died with a NameError after emitting the +3e
+  overlays. It exists now, as the verification its name always implied: the raw bank 2
+  array compiled into the firmware is compared against `src/rom2.bin`.
 
 ### The three uPD765 behaviours that are hangs, not wrong bytes
 
@@ -8331,6 +8505,72 @@ caused by exactly this). `opt_video_mode` became `NM_RADIO_D` + `video_modeOpts`
   **18.938, not the 19.0 its own comment in graphics.c claims** — 378e6/19894737 is
   a hair UNDER 19, and the truncate-then-mask loses a whole 1/16 step. 0.33% fast,
   harmless on a monitor, but the comment is aspirational and the menu is not.
+
+### The 90/75 Hz video modes: a second pixel clock, and why they are 378-only (hw-confirmed DVp2, 2026-09-15)
+
+`VM_640x480_90 / _75 / VM_720x480_90 / VM_720x576_75` (Config.h, values 4..7) are
+the four standard modes at a **37.8 MHz pixel clock instead of 25.2** — i.e. the
+HDMI PIO at a 378 MHz TMDS rate with a **divider of exactly 1.0**, no fractional
+divider at all. `graphics.c` holds them at `[0]..[7] + VMODE_FAST_OFFSET` (9),
+byte-for-byte copies of their twins with `pixel_clk`, `freq`, `pio_clk_div` and the
+new `tmds_mhz` field changed: **same h_total (800 px), same v_total**, so the line
+rate is 47.25 kHz and every refresh is exactly x1.5 (90.17 / 73.37 Pentagon /
+75.24 48K / 75.12 128K). `graphics_fast_mode()` resolves the twin for
+`VIDEO::Reset()`; `graphics_set_sys_clk_mhz()` re-derives every mode's divider from
+its own `tmds_mhz` when the Overclock row moves, which is what keeps the standard
+set pinned at 25.2 MHz across 252/1.0, 378/1.5 and 504/2.0.
+
+- **378 MHz is the only CPU clock that works, and it is arithmetic, not policy**:
+  252 cannot reach a 378 MHz TMDS rate at all (a PIO divider below 1 does not
+  exist) and 504 would need 1.333 — a fractional divider whose phase pattern no
+  longer repeats per pixel, which is the thing the half-integer rule exists to
+  avoid. `Config::isFastVideoMode()` / `VM_FAST_CPU_MHZ` are the test; backstops
+  live in `Config::load()` (degrade to `baseVideoMode()` when the clock is not 378)
+  and in `VIDEO::Reset()` (the `useFast` gate), because a config can arrive from
+  another board.
+- **V-Sync is forced OFF with them, as a constraint and not a preference**: the
+  pacing is one emulated frame per DISPLAY frame (`ESPectrum::loop`), so at 90/75 Hz
+  the Spectrum would simply run 50% fast.
+- **The rows are HIDDEN at any other clock** (owner's call, 2026-09-15) rather than
+  listed and then refused — `video_modeOpts()` filters on the STAGED
+  `SET_CPU_MHZ`. **The staged value is the one exception and it is not cosmetic**:
+  `nodeValueLabel()` looks the value up in that same list, so a value with no row
+  of its own blanks the collapsed `Mode` row AND leaves the pane with nothing
+  marked. The pair (fast mode + non-378 clock) is reachable for as long as one menu
+  session lasts, since lowering the clock with a fast mode staged only resolves at
+  commit. Consequence: `resolveConstraints`' "bump the CPU clock to 378" branch is
+  now unreachable from the menu and survives only as the backstop; the live branch
+  is the other one.
+- **Hiding is done by TRUNCATING the option table**, so the four entries must stay
+  last and contiguous — three `static_assert`s in UiTree.cpp pin that (which is why
+  `opt_video_mode` is `constexpr` and `isFastVideoMode` had to become `constexpr`
+  too). The SOFTTV/TFT branch, which has no divider labels to build, reuses the
+  same truncation with no table of its own.
+- **`S.rcount` must be refreshed after a radio pick** (UiNav.cpp): the renderer
+  bounds the right pane by it, `rebuildKeepingSelection()` only rebuilds the LEFT
+  level, and picking a standard mode drops the staged fast row — a stale count left
+  a highlightable row with nothing in it. General to any `dopts` list that shrinks.
+- **The costs, measured**: the eight extra `video_mode[]` entries are **+772 B of
+  .data**, i.e. RAM as well as flash — that table is deliberately non-const because
+  the VGA ISR reads it through `graphics_get_video_mode()` every line, so it must
+  not sit in flash. Total for the feature was +4096 B of flash on DVp2, most of it
+  the 4 KB section-alignment step rather than code.
+- **What the hardware runs cover, exactly**: the owner's verdict on the MENU
+  filtering is "works" (DVp2, 2026-09-15), not itemised — so the list at 378 vs
+  252/504, and the firmware coming up with it. **There is no verdict on record for
+  a 90/75 Hz PICTURE**: the divider-label section above was confirmed the same day,
+  which proves the modes shipped, not that one was ever selected and displayed.
+  Also NOT covered: whether a monitor accepts 90.17 Hz vs
+  73-75 Hz at all (per-panel, and the 15 s `videoModeConfirm` auto-rollback is the
+  safety net), the **VGA** path at 37.8 MHz (divider 10.0, clean, but unexercised),
+  and HDMI AUDIO at the shorter line period — the line ISR fires every **21.16 µs**
+  instead of 31.75 with a worst measured `dur` of 19 µs, so if anything breaks here
+  first it is the audio, and `HDMIAU: dur/gap/skip/dup` is the meter.
+- Dead ends from the design round, so they are not re-derived: keeping the refresh
+  by stretching `v_total` x1.5 (line period still 21.16 µs — the ISR budget is what
+  makes it a dead end) and keeping the line rate by growing `line_bytes` 400 -> 600
+  (h_total 1200 at 37.8 MHz: refresh and ISR budget intact, but +50% DMA on the
+  top-priority channel and a timing no CEA/DMT sink knows).
 
 ### On-chip network transport = lwIP under the ZiFi facades (2026-09-06; hw-confirmed on m1p2w: WiFi join + FTP server work)
 

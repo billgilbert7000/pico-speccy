@@ -2715,8 +2715,9 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
                 else if (ext == "mmc" || ext == "hdf") {
                     // On a +3e the hard disk hangs off the machine's OWN IDE interface
                     // (DivMMC is forced off there), so an .hdf goes to hd0 of that —
-                    // this is the IDEDOS disk the +3e ROM boots from.
-                    if (Config::isPlus3e() && ext == "hdf") {
+                    // this is the IDEDOS disk the +3e ROM boots from. Same for the
+                    // +3 (divIDE), whose ROM reaches its disk over the divIDE taskfile.
+                    if ((Config::isPlus3e() || Config::isPlus3Div()) && ext == "hdf") {
                         FileUtils::IMG_Path = FileUtils::ALL_Path;
                         if (forcePopup) {
                             nm::runDiskSlots(IFACE_IDE, fname.c_str());
@@ -6317,10 +6318,11 @@ static void buildEmulatorInfoText() {
             pos += infoAppend(buf, pos, bufsz,
                 " Z-Controller   : On (#77/#57)\n");
 
-        // IDE/HDD (NEMO/PROFI/SMUC/IDEDOS) — indexed by IDE::Scheme
+        // IDE/HDD (NEMO/PROFI/SMUC/IDEDOS/DivIDE) — indexed by IDE::Scheme
         if (Config::ide_scheme != 0) {
-            static const char* idesc[] = { "Off", "NEMO", "PROFI", "SMUC", "IDEDOS" };
-            int si = Config::ide_scheme; if (si > 4) si = 0;
+            static const char* idesc[] = { "Off", "NEMO", "PROFI", "SMUC", "IDEDOS", "DivIDE" };
+            int si = Config::ide_scheme;
+            if (si >= (int)(sizeof(idesc) / sizeof(idesc[0]))) si = 0;
             pos += infoAppend(buf, pos, bufsz, " IDE/HDD        : %s\n", idesc[si]);
             pos += infoAppend(buf, pos, bufsz, "  hd0           : ");
             pos += appendFilename(buf, pos, bufsz, Config::ide_image[0], 19);

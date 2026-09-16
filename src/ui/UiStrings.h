@@ -180,6 +180,7 @@
 // files (swap, .idx) are deliberately not indicated. Not an on-screen indicator.
 #define TXT_HW_SDLED        "Board LED on SD access"
 #define TXT_HW_RTC          "CMOS + NVRAM"
+#define TXT_HW_MOUSE_SENS   "Mouse sensitivity"
 #define TXT_HW_OVERCLOCK    "Overclock"
 
 // ── Joystick ───────────────────────────────────────────────────────────────────
@@ -240,8 +241,10 @@
 #define TXT_ROM_PLUS2_ES_S  "+2 ESP"
 #define TXT_ROM_ZX81P       "ZX81+"
 #define TXT_ROM_P3          "+3"
-#define TXT_ROM_P3E         "+3 (IDEDOS)"
-#define TXT_ROM_P3E_S       "+3 (IDE)"
+#define TXT_ROM_P3E         "+3 IDEDOS"
+#define TXT_ROM_P3E_S       "+3 IDEDOS"
+#define TXT_ROM_P3DIV       "+3 DivIDE"
+#define TXT_ROM_P3DIV_S     "+3 DivIDE"
 #define TXT_ROM_PENT        "128K"
 #define TXT_ROM_PENT_S      "128K"
 #define TXT_ROM_PENT_GLUK   "128K + Mr Gluk"

@@ -229,15 +229,31 @@ bool commit(ArchIdx arch, RomsetIdx romset) {
             // Entering the +3e gives it its interface, so a freshly picked machine finds
             // its hard disk — but an explicit Off is the user's choice and is not undone
             // (the menu's own edge does the same, see resolveConstraints).
-            const bool isP3e = isPlus3eRomset(romset);
-            const bool wasP3e = Config::isPlus3e();
+            const bool isP3e    = isPlus3eRomset(romset);
+            const bool wasP3e   = Config::isPlus3e();
+            // The +3 (divIDE) is the same deal one interface over (IDE::DIVIDE), and the
+            // two are handled together because a switch from one to the other must HAND
+            // the scheme over rather than turn it off and on again: each "off" branch
+            // stands down when the incoming romset is the other one, so such a switch
+            // shows one toast, not two 1.5 s ones back to back.
+            const bool isP3div  = isPlus3DivRomset(romset);
+            const bool wasP3div = Config::isPlus3Div();
             if (isP3e && !wasP3e && Config::ide_scheme != IDE::PLUS3E) {
                 Config::ide_scheme = IDE::PLUS3E;
                 IDE::init();
                 OSD::osdCenteredMsg("IDEDOS enabled", LEVEL_WARN, 1500);
-            } else if (!isP3e && Config::ide_scheme == IDE::PLUS3E) {
+            } else if (!isP3e && !isP3div && Config::ide_scheme == IDE::PLUS3E) {
                 Config::ide_scheme = IDE::OFF;
                 IDE::init();   // closes the images and frees the buffers
+                OSD::osdCenteredMsg("IDE disabled", LEVEL_WARN, 1500);
+            }
+            if (isP3div && !wasP3div && Config::ide_scheme != IDE::DIVIDE) {
+                Config::ide_scheme = IDE::DIVIDE;
+                IDE::init();
+                OSD::osdCenteredMsg("DivIDE enabled", LEVEL_WARN, 1500);
+            } else if (!isP3div && !isP3e && Config::ide_scheme == IDE::DIVIDE) {
+                Config::ide_scheme = IDE::OFF;
+                IDE::init();
                 OSD::osdCenteredMsg("IDE disabled", LEVEL_WARN, 1500);
             }
             if (isP3e && Config::ide_scheme == IDE::PLUS3E && Config::zifi_enabled) {
