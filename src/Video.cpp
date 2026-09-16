@@ -2147,6 +2147,30 @@ static const uint8_t ts_pwm[32] = {
     162, 177, 190, 203, 215, 226, 236, 246, 255, 255, 255, 255, 255, 255, 255, 255,
 };
 
+// Snap each channel to the NEAREST of the VGA DAC's four levels (0/85/170/255).
+// The driver's own vga6_of() TRUNCATES (/85), which is biased dark by up to 84
+// units. In the ZX palette TS-BIOS loads into CRAM (zx555[] in TsSpg.cpp) EVERY
+// non-BRIGHT channel is 5-bit 16 = ts_pwm[16] = 162, which truncates to level 1 =
+// 85 — half brightness — while Pentagon's own 0xCD = 205 makes level 2 = 170. So
+// all seven normal colours were halved, not just white; white is simply the only
+// one with a large flat area on the 128 menu. Every BRIGHT channel is 5-bit 24 =
+// 255 and was always exact, which is why the fault looked BRIGHT-specific.
+// Rounding here fixes that WITHOUT dithering, which these 16 flat
+// colours must not do: a full screen of ZX paper (the 128 menu) is the worst case
+// for an ordered dither, and every other machine keeps its ZX 16 solid.
+//
+// vga6_of() itself is deliberately NOT changed: it is shared with the scanline-dim
+// and CRT-mask walk (vga_crt_subpixels on dim_rgb888), where rounding up would make
+// a dimmed line as bright as an undimmed one at scanline level 4, and it would move
+// the hw-proven look of every other machine's 16 ZX colours (Pulsar is unaffected,
+// but "Alone" NN=0xA0 and the Mars/Ocean matrices all cross a level boundary).
+static inline uint32_t vgaGridSnapChan(uint32_t v) { return ((v * 3 + 127) / 255) * 85; }
+static inline uint32_t vgaGridSnap(uint32_t rgb) {
+    return (vgaGridSnapChan((rgb >> 16) & 0xFF) << 16)
+         | (vgaGridSnapChan((rgb >>  8) & 0xFF) <<  8)
+         |  vgaGridSnapChan(rgb & 0xFF);
+}
+
 uint32_t VIDEO::tsCramToRgb(uint16_t t) {
     return ((uint32_t)ts_pwm[(t >> 10) & 0x1F] << 16) |
            ((uint32_t)ts_pwm[(t >> 5) & 0x1F] << 8) |
@@ -2469,15 +2493,11 @@ void VIDEO::tsPaletteFlush() {
     for (int i = 0; i < 16; i++) {
         uint32_t c = paletteFinal(tsCramToRgb(TsConf::cram[gpal | i]));
         graphics_set_palette(i, c);
-        // CRAM colours again, not the ZX 16 — same rule as ts256ProgramBank().
-        // This is what made "white looks grey on TS-Conf VGA, Pentagon is fine"
-        // (hw 2026-09-16): the ZX palette's NORMAL white is CRAM 5-bit 16, i.e.
-        // ts_pwm[16] = 162, and vga6_of() truncates (/85) — 162 lands on level 1
-        // = 85, HALF the brightness, while Pentagon's own 0xCD = 205 makes
-        // level 2 = 170. The Bayer path quantises by /21 with a sub-level, so
-        // the same 162 comes out at 149 on average. Every colour built on the
-        // "normal" 5-bit 16 (cyan, yellow, ...) was halved with it.
-        if (!Config::vga_dither) vga_set_palette_entry_solid(i, c);
+        // ZX mode: these ARE the standard flat Spectrum 16 (TS-BIOS loads them into
+        // CRAM), so they stay SOLID on VGA like every other machine's — Video > VGA
+        // > Colour depth governs the 16c/256c artwork palettes, not this. What was
+        // wrong here is the ROUNDING, not the lack of a dither: see vgaGridSnap().
+        vga_set_palette_entry_solid(i, vgaGridSnap(c));
     }
 }
 
