@@ -2667,6 +2667,55 @@ top and bottom) nor the ts256 map (stable — 16 distinct colours every frame) w
   in its log), Digger intro (16c — now through the remap), Bruce Lee, Ninja Gaiden, fishbone,
   TS-BIOS Setup (TEXT mode goes through the pair path, untouched), and a VGA board.
 
+### The TS-Conf palette was the one place that turned the VGA dither OFF (hw-confirmed 2026-09-16)
+
+Two reports, one line of code: "можно цвета получше?" on a 256c TMNT screen, and
+"на TS-Conf белый выглядит серым, на Pentagon нормально". Both were
+`vga_set_palette_entry_solid` in `ts256ProgramBank` (Video.cpp) and in the ZX/16c
+`tsPaletteFlush` beside it.
+
+- **The VGA DAC is 2 bits per channel** (levels 0/85/170/255 = 64 colours) and the
+  driver has an ordered **Bayer 2x2** for everything off that grid (`vga_bayer4`,
+  vga.c): `/21` -> 13 levels per channel, ~2197 perceived colours. It costs NO
+  sharpness here — a 320x240 fb pixel is exactly a 2x2 output block at 640x480, so
+  the whole dither lives inside one source pixel. `vga_set_palette_entry_solid`
+  bypasses it and snaps to the 4-level grid; that is right for the 16 flat ZX
+  colours (they would shimmer — the three call sites at `applyPalette` /
+  `ulaPlusDisable` / `tsPaletteRestore` KEEP it) and was copy-pasted onto the
+  arbitrary CRAM palette, where it is wrong. **The tell that it was an oversight:
+  TS TEXT mode already dithered** — it goes through the pair path, whose
+  `vga_crt_subpixels(..., solid=false)`.
+- **`vga6_of` truncates (`/85`), so the error is brutal and asymmetric**, and that
+  is the whole "grey white". The ZX palette's NORMAL white is CRAM 5-bit 16 =
+  `ts_pwm[16]` = **162**, which lands on level 1 = **85, exactly half**, while
+  Pentagon's own Pulsar `NN=0xCD` = 205 makes level 2 = 170. Every colour built on
+  5-bit 16 (cyan, yellow, ...) was halved with it. Measured, target vs solid vs
+  dither average: 162 -> 85 / 149; 205 -> 170 / 191; 75 -> **0** / 64 (dark greys
+  went to pure BLACK, which is where the 256c artwork lost its shadows); 215 ->
+  170 / 212. Solid errs by up to -77, the dither never worse than ~-14.
+- **Do NOT "fix" `vga6_of` to round to nearest instead.** It is shared by the
+  scanline-dim and CRT-mask walk (`vga_crt_subpixels` on `dim_rgb888`), where
+  rounding up makes the dimmed scanline as bright as the undimmed one at
+  `vga_scanline_level` 4 — and it would change the hw-proven look of every other
+  machine's 16 ZX colours (Pulsar is unaffected, but "Alone" `NN=0xA0` and the
+  Mars/Ocean matrices all cross a level boundary). The dither gets it right by
+  construction; leave the solid path alone.
+- **Video > VGA > Colour depth** (`Config::vga_dither`, NVS `vga_dither`, default
+  Dithered; `SET_VGA_DITHER`, AC_LIVE + `F_PREVIEW | F_PALETTE`) is the switch, and
+  the submenu is the twin of Video > HDMI behind the same `p_vgaOut()` the Interface
+  menu-palette row already used. The hook is `hook_hdmiSnap`'s body —
+  `applyCrtFilter()` -> `applyPalette()` re-flushes the whole ts256 remap with a
+  fresh shadow and `tsCramDirty` re-arms the 16-colour path.
+- Residual, and it is faithful rather than a bug: TS-Conf white comes out ~149
+  against Pentagon's 170, because the palettes really do differ (162 vs 205).
+- **Still on the table, deliberately NOT done in the same build so the hw verdict
+  stayed clean: the ts256 pool is 184 slots only because 184..199 and 216..255 are
+  HDMI Data-Island words.** VGA reserves NOTHING (`palette_vga16[]` is a full
+  256-entry LUT and blanking goes through `bg_color[]`, not a palette index), so on
+  VGA the pool could be **240** — only the nm:: UI block 152..167 has to stay out.
+  +30% slots, i.e. fewer CRAM cells merged to their nearest neighbour and more
+  palette banks available to `ts256PickBanks`.
+
 ### TS-Conf DRAM model: CPU/video vs DMA contention + 14 MHz wait states (2026-09-13; hw-confirmed: Bomberman AND fishbone run on the final build)
 
 Found by **Bomberman Evolution** (`prods.tslabs.info/files/bomber_evo.zip`, .spg), which

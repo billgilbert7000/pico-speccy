@@ -879,9 +879,33 @@ static const Node kHdmi[] = {
     NM_BOOL (TXT_VID_SNAP,       SET_HDMI_SNAP,   nullptr),
 };
 
+// True while the VGA output is the live one. Shared by Video > VGA and by the
+// Interface menu-palette row further down — on HDMI (and the non-VGA builds)
+// neither has anything to say.
+static bool p_vgaOut() {
+#if defined(VGA_HDMI)
+    return SELECT_VGA;
+#else
+    return false;
+#endif
+}
+
+// Video > VGA — the analogue of Video > HDMI. The DAC is 2 bits per channel, so
+// anything off that 64-colour grid is either dithered or snapped; the 16 flat ZX
+// colours are always snapped (they would shimmer), this row is about the
+// arbitrary guest palettes (TS-Conf CRAM).
+static const Option opt_vga_dither[] = {
+    { "Dithered (2197 colours)",  1, "Dithered" },
+    { "Solid 2:2:2 (64 colours)", 0, "Solid" },
+};
+static const Node kVga[] = {
+    NM_RADIO(TXT_VID_VGA_DITHER, SET_VGA_DITHER, opt_vga_dither, nullptr),
+};
+
 static const Node kVideo[] = {
     NM_RADIO_D(TXT_VID_MODE,     SET_VIDEO_MODE, video_modeOpts, nullptr),
     NM_SUB  (TXT_VID_HDMI,       kHdmi,          p_hdmiOut),
+    NM_SUB  (TXT_VID_VGA,        kVga,           p_vgaOut),
     NM_RADIO(TXT_VID_PALETTE,    SET_PALETTE,    opt_palette,    nullptr),
     NM_RADIO(TXT_VID_RENDER,     SET_RENDER,     opt_render,     nullptr),
     NM_RADIO(TXT_VID_SCANLINES,  SET_SCANLINES,  opt_scanlines,  nullptr),
@@ -1172,15 +1196,6 @@ static const Node kReplaceRom[] = {
     NM_ACTION_ARG(TXT_ROM_SLOT_PENT1,   act_replaceRom, 8, nullptr),
 };
 
-// The VGA menu-palette row only means something while the VGA output is live —
-// on HDMI (and the non-VGA builds) the menu always shows the full-depth palette.
-static bool p_vgaOut() {
-#if defined(VGA_HDMI)
-    return SELECT_VGA;
-#else
-    return false;
-#endif
-}
 static const Option opt_ui_theme[] = {
     { "Slate",       0 },     // the cool neutral scheme
     { "ZX Spectrum", 1 },     // the classic pico-spec menu colours (white/cyan/black)

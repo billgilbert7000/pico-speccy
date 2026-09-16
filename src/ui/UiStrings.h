@@ -74,6 +74,8 @@
 #define TXT_VID_HDMI        "HDMI"
 #define TXT_VID_CLKDRV      "Clock drive"
 #define TXT_VID_SNAP        "Capture card compatibility"
+#define TXT_VID_VGA         "VGA"
+#define TXT_VID_VGA_DITHER  "Colour depth"
 
 // ── Audio ──────────────────────────────────────────────────────────────────────
 #define TXT_AUD_DRIVER      "Audio driver"

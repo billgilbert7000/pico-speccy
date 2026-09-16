@@ -2376,7 +2376,11 @@ static void ts256ProgramBank(int b) {
             const uint32_t col = paletteFinal(VIDEO::tsCramToRgb(ts256_slot_col[off]));
             const uint8_t slot = ts256_pool[b * ts256_bs + off];
             graphics_set_palette(slot, col);
-            vga_set_palette_entry_solid(slot, col);
+            // graphics_set_palette() has already written the DITHERED VGA entry.
+            // These are arbitrary CRAM colours, not the 16 flat ZX ones, so the
+            // 2x2 Bayer path is what they want: it fits inside one source pixel
+            // (320x240 -> 640x480) and buys 13 levels/channel instead of 4.
+            if (!Config::vga_dither) vga_set_palette_entry_solid(slot, col);
         }
         ts256_dirty_b[b][w] = keep;
     }
@@ -2465,7 +2469,15 @@ void VIDEO::tsPaletteFlush() {
     for (int i = 0; i < 16; i++) {
         uint32_t c = paletteFinal(tsCramToRgb(TsConf::cram[gpal | i]));
         graphics_set_palette(i, c);
-        vga_set_palette_entry_solid(i, c);
+        // CRAM colours again, not the ZX 16 — same rule as ts256ProgramBank().
+        // This is what made "white looks grey on TS-Conf VGA, Pentagon is fine"
+        // (hw 2026-09-16): the ZX palette's NORMAL white is CRAM 5-bit 16, i.e.
+        // ts_pwm[16] = 162, and vga6_of() truncates (/85) — 162 lands on level 1
+        // = 85, HALF the brightness, while Pentagon's own 0xCD = 205 makes
+        // level 2 = 170. The Bayer path quantises by /21 with a sub-level, so
+        // the same 162 comes out at 149 on average. Every colour built on the
+        // "normal" 5-bit 16 (cyan, yellow, ...) was halved with it.
+        if (!Config::vga_dither) vga_set_palette_entry_solid(i, c);
     }
 }
 

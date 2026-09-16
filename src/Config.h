@@ -535,6 +535,13 @@ public:
     // pair is one repeated symbol — what a USB capture card needs (monitors do not
     // care). <= 5 code units of error per channel (112 of 256 levels qualify after the clamp). HDMI only.
     static bool hdmi_snap;
+    // Video > VGA > Guest palette. The VGA DAC is 2 bits per channel (0/85/170/255 =
+    // 64 colours); vga_bayer4() dithers an off-grid colour inside its own 2x2 output
+    // block, which at 320x240 -> 640x480 is exactly one source pixel, for 13 levels
+    // per channel (~2197 perceived colours) at no cost in sharpness. true = arbitrary
+    // GUEST palettes (TS-Conf CRAM) take that path; false = they are snapped to the
+    // 2:2:2 grid like the 16 flat ZX colours, which never dither. VGA only.
+    static bool vga_dither;
     // New-menu look preferences. ui_vga_solid: on VGA output the menu uses its on-grid
     // 2:2:2 palette twin (solid fills, no Bayer texture); off = the full-depth scheme,
     // dithered. ui_rounded: window/dialog corners rounded vs square.

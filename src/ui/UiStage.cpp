@@ -86,6 +86,7 @@ NM_INT_ACCESS (crtFilter, crt_filter)
 NM_BOOL_ACCESS(vsync,     v_sync_enabled)
 NM_BOOL_ACCESS(dither,    hdmi_dither)
 NM_BOOL_ACCESS(hdmiSnap,  hdmi_snap)
+NM_BOOL_ACCESS(vgaDither, vga_dither)
 NM_BOOL_ACCESS(flashload, flashload)
 NM_BOOL_ACCESS(tapeRG,    tape_timing_rg)
 NM_BOOL_ACCESS(tapeAuto,  tape_autostart)
@@ -423,6 +424,15 @@ static bool hook_hdmiSnap(int32_t, int32_t) {
     // paletteFinal() reads Config::hdmi_snap; applyCrtFilter re-runs every palette
     // through it (standard ramp + ZX solids now, ULA+/Gigascreen via their deferred
     // paths) and the TS-Conf CRAM flush is re-armed for the next EndFrame.
+    VIDEO::applyCrtFilter();
+    VIDEO::tsCramDirty = true;
+    return true;
+}
+static bool hook_vgaDither(int32_t, int32_t) {
+    // The TS-Conf CRAM slots are the only arbitrary GUEST palette on VGA, and they
+    // are programmed from ts256ProgramBank()/tsPaletteFlush(). applyCrtFilter() ->
+    // applyPalette() re-flushes the whole ts256 remap with a fresh shadow, and
+    // tsCramDirty re-arms the 16-colour ZX/16c path for the next EndFrame.
     VIDEO::applyCrtFilter();
     VIDEO::tsCramDirty = true;
     return true;
