@@ -2,7 +2,7 @@
 // Scorpion GMX boot ROM "GMX Boot Rom 1.3 V5.00" (MAME gmx13500.rom, CRC32
 // 47c9df88), 8 ProfROM planes x 4 x 16K banks, deduplicated and partly
 // expressed as overlays over ROMs the firmware already ships — see the
-// pack_gmx comment in tools/rom_pack.py. 345267 B in flash instead of 524288.
+// pack_gmx comment in tools/rom_pack.py. 296553 B in flash instead of 524288.
 // Regenerate: python3 tools/rom_pack.py gmx
 // Include via romScorpion.h only (needs the base ROM symbols in scope).
 #pragma once
@@ -25,13 +25,13 @@ extern const unsigned char gb_rom_scorpion_gmx_p6b1[];
 extern const unsigned char gb_rom_scorpion_gmx_p6b2[];
 extern const unsigned char gb_rom_scorpion_gmx_p6b3[];
 extern const unsigned char gb_rom_scorpion_gmx_p7b0[];
-extern const unsigned char gb_rom_scorpion_gmx_p7b1[];
-extern const unsigned char gb_rom_scorpion_gmx_p7b2[];
-extern const unsigned char gb_rom_scorpion_gmx_p7b3[];
 extern const unsigned char gb_overlay_scorpion_gmx_p1b1[];
 extern const unsigned char gb_overlay_scorpion_gmx_p1b2[];
 extern const unsigned char gb_overlay_scorpion_gmx_p4b0[];
 extern const unsigned char gb_overlay_scorpion_gmx_p4b1[];
+extern const unsigned char gb_overlay_scorpion_gmx_p7b1[];
+extern const unsigned char gb_overlay_scorpion_gmx_p7b2[];
+extern const unsigned char gb_overlay_scorpion_gmx_p7b3[];
 }
 
 typedef struct { const unsigned char* data; const unsigned char* overlay; } scorpion_gmx_bank_t;
@@ -69,7 +69,7 @@ static const scorpion_gmx_bank_t gb_rom_scorpion_gmx_banks[32] = {
     { gb_rom_scorpion_gmx_p6b2, nullptr },   // plane 6 bank 2
     { gb_rom_scorpion_gmx_p6b3, nullptr },   // plane 6 bank 3
     { gb_rom_scorpion_gmx_p7b0, nullptr },   // plane 7 bank 0
-    { gb_rom_scorpion_gmx_p7b1, nullptr },   // plane 7 bank 1
-    { gb_rom_scorpion_gmx_p7b2, nullptr },   // plane 7 bank 2
-    { gb_rom_scorpion_gmx_p7b3, nullptr },   // plane 7 bank 3
+    { gb_rom_scorpion_gmx_p7b0, gb_overlay_scorpion_gmx_p7b1 },   // plane 7 bank 1
+    { gb_rom_scorpion_gmx_p7b0, gb_overlay_scorpion_gmx_p7b2 },   // plane 7 bank 2
+    { gb_rom_scorpion_gmx_p7b0, gb_overlay_scorpion_gmx_p7b3 },   // plane 7 bank 3
 };

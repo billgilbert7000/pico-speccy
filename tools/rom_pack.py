@@ -558,7 +558,12 @@ def pack_gmx():
     sinc_blob = open(os.path.join('src', 'roms', 'pentagon',
                                   'pentagon_sinclair_128k_0.ovl'), 'rb').read()
 
-    # (base symbol, base bytes, optional already-shipped overlay reusable verbatim)
+    # (base symbol, base bytes, optional already-shipped overlay reusable verbatim).
+    # Grows as GMX's own banks are emitted raw (self-referential dedup, the same
+    # rule pack_prof uses): plane 7's near-empty stub banks differ from each other
+    # by ~100 bytes, which is 48 KB of flash if they are not folded. A base is only
+    # ever a RAW bank — MemESP's overlay registry is keyed by base pointer and does
+    # NOT chain, so an overlay may never sit on top of another overlay.
     bases = [
         ('gb_rom_0_pentagon_128k', pent,
          ('gb_overlay_pentagon_sinclair_128k_0', sinc_blob, apply_overlay(pent, sinc_blob))),
@@ -607,6 +612,7 @@ def pack_gmx():
             rsym = 'gb_rom_scorpion_gmx_%s' % tag
             descs[i] = (rsym, None, bk, None)
             raws.append((rsym, bk))
+            bases.append((rsym, bk, None))   # later banks may overlay this one
 
     # hard verification: the table must reproduce the image byte for byte
     for i in range(GMX_BANKS):

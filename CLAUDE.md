@@ -4793,6 +4793,49 @@ re-provisions every user's wavetable bank from SD):
   over PICO_DV VGA-HDMI; SOFTTV/TFT are ~20-30 KB slimmer. Headroom after this:
   ~66 KB on DVp2, ~47 KB on the fattest.
 
+### ...and the next overflow was paid for by pack_gmx's missing self-dedup (2026-09-16)
+
+DVp2 VGA-HDMI overflowed by **9416 B** (`__flash_binary_end` 0x102624c8 against
+`__gm_bank_start` 0x10260000) once the +3div ROM and the 90/75 Hz video modes
+landed; ZERO2-PIOUSB was ~30 KB over. Nothing was wrong with the usual suspects
+and it is worth not re-checking them: the archive-member list is clean (~20 KB of
+libc/libstdc++ all told, nothing fat), and a hash of every flash symbol >= 2 KB
+found **zero** byte-identical blobs — the packers already fold exact duplicates.
+
+The 48.7 KB came from a one-line gap: **`pack_gmx` only ever compared a bank
+against the three EXTERNAL bases** (Pentagon ROM0, Sinclair 128K half 1, TR-DOS
+504T) and never against a GMX bank it had already emitted raw, while `pack_prof`
+has done exactly that since it was written (`bases.append((rsym, bk))`, its
+"self-referential dedup" comment). GMX plane 7 is four near-empty stub banks that
+differ from each other by 114/137/187 bytes, so p7b1-b3 now overlay p7b0:
+**345267 -> 296553 B**, and the firmware lands at 2451076 on DVp2 (39 KB clear)
+and 2471556 on ZERO2-PIOUSB (18 KB clear). No machine, romset or ROM byte was
+given up, and `__gm_bank_size` did NOT move — the GM.DLS partition keeps its
+35910 B of margin over the stock converted bank.
+
+- **A base must always be a RAW bank.** MemESP's registry is keyed by base
+  pointer and does NOT chain, so only entries from `raws` may be appended to
+  `bases` — an overlay over an overlay would reconstruct silently wrong.
+- **Four rom[] slots now share one pointer with DIFFERENT content**, which the
+  duplicate-bank sharing before it never did. It is safe for the same reason the
+  p4b0-over-Pentagon-ROM0 overlay is: `gmxTapUpdate` re-registers the LIVE page-0
+  bank on every romInUse change, `registerOverlay(base, nullptr)` unregisters (so
+  p7b0 itself reads raw), `flatLookup` is keyed on (base, overlay) so alternating
+  overlays on one base cannot serve a stale flat page, and `romPeek` applies
+  overlays at page 0 only — which is the only place a GMX ROM bank is ever mapped.
+- **Verify at the ELF, not just in the packer.** The packer's own check compares
+  against the arrays it is holding in memory, so it cannot catch an emitter or
+  binding mistake. Reconstructing all 32 banks from the linked ELF through
+  `scorpion_gmx_banks.h` and diffing against `gmx13500.bin` does (it came back
+  byte-identical). NB the Sinclair bases are internal-linkage C++ arrays, so in
+  `nm` output they are `_ZL22gb_rom_1_sinclair_128k`, not the plain name.
+- Still on the table if this recurs, in descending order of ugliness: the TR-DOS
+  pair `504t`/`custom` differ by 276 bytes (16 KB, same family, no build-switch
+  coupling); `gmx_p4b3` ~ `prof_p0b3` differ by 14 and `profi_bank_ff` ~
+  `gmx_p2b1` by 45, but those are the cross-romset folds CLAUDE.md deliberately
+  refuses, since one romset's flash layout must not depend on another's build
+  switch.
+
 ## A GM.DLS bank bigger than the flash partition is still playable in PSRAM (hw-confirmed 2026-09-09)
 
 "The picker does not see DLSbyXG.bin, not even the one it converted itself." Nothing
