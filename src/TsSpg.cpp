@@ -92,6 +92,37 @@ bool FileSPG::load(const string& fn) {
     // if the program runs in the standard ZX mode.)
     ESPectrum::resetForLoad();
 
+    // Every page the file does not carry must be BLANK, or the previous program
+    // shows through. An .spg names only the blocks it needs; a reset does not
+    // touch RAM (deliberately — see ESPectrum::reset), so launching demos one
+    // after another left the earlier one's bitmap in every page the new one does
+    // not write, which in 256c/TSU is simply displayed: garbage in the lower part
+    // of the screen that survived F11 and cleared only on F12, where setup()'s
+    // powerOnDramFill happens to lay down 0x00/0xFF stripes that usually map to
+    // dark CRAM cells. The snapshot loaders already zero their void pages
+    // (Snapshot.cpp cleanup() calls); this is the same rule for .spg.
+    // cleanup() is the per-page zero and handles every backing; TS-Conf pages ARE
+    // MemESP::ram[] (TsConf::pagePtr indexes it), and they are POINTER-backed
+    // after the boot residency self-heal, so this is a straight memset of
+    // MEM_PG_CNT x 16 KB (1-4 MB by Config::tsconf_ram) into butter PSRAM.
+    {
+        const uint64_t t0 = esp_timer_get_time();
+        for (int i = 0; i < MEM_PG_CNT; i++) MemESP::ram[i].cleanup();
+        Debug::log("[SPG] %d RAM pages cleared in %u us",
+                   (int)MEM_PG_CNT, (unsigned)(esp_timer_get_time() - t0));
+    }
+    // Same rule for the video register file, which leaks the same way: TsConf::reset
+    // clears CRAM and SFILE only on a COLD reset (`if (cold)`, i.e. the first TS
+    // reset of the session), so a warm one — F11, and this load — leaves the
+    // previous program's 256 palette cells and its 85 sprite descriptors standing.
+    // A demo that programs only part of either inherits the rest: stale CRAM cells
+    // recolour whatever uses them, stale SFILE entries put the previous demo's
+    // sprites on top of the new one's picture. The ZX bank right below is written
+    // again immediately, so only 0x00..0xEF is cleared here.
+    for (int i = 0; i <= 0xEF; i++) TsConf::cram[i] = 0;
+    for (int i = 0; i < 256; i++)   TsConf::sfile[i] = 0;
+    TsConf::sfileGen++;
+
     // Blocks: descriptor = {addr:5 (x512 in page) .. last:7, size:5 (x512 - 1)
     // .. comp:6-7, page}. Compressed input is at most 16 KB; output is bounded
     // by the page end.
