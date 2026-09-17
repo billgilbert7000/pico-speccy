@@ -96,6 +96,8 @@ public:
         uint8_t  border;       // full 8-bit CRAM index
         uint16_t g_xoffs, g_yoffs;
         bool     g_yoffs_updated; // GYOffs written since the last rendered line (Unreal g_yoffs_updated)
+        uint16_t g_yoffs_wline;   // raster line (vcount) of that write — the crop path needs to know
+                                  // whether it landed in the cropped picture lines (Video.cpp tsRenderLine)
         uint16_t t0_xoffs, t0_yoffs, t1_xoffs, t1_yoffs;
         uint8_t  tmpage, t0gpage, t1gpage, sgpage;
         // -- dma (stored only in this phase) --

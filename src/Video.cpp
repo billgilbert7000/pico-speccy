@@ -6034,7 +6034,22 @@ void VIDEO::tsRenderLine(uint32_t curline) {
     ts_last_curline = curline;
 
     if (curline == 0) {
-        ts_ygctr = ((uint32_t)TsConf::r.g_yoffs + ts_crop_top) & 0x1FF;
+        // Hardware (video_sync.v cnt_row): reloaded from GYOffs at the start of
+        // the visible raster and at the line AFTER any GYOffs write, +1 on every
+        // picture line. With the top of the picture CROPPED (RRES 288 on a
+        // 240-row fb) the first rendered line is picture line ts_crop_top, and a
+        // write that landed INSIDE the cropped lines must count only the lines
+        // after it — borntro12 writes GYOffs from a raster split at vcount 43
+        // (picture line 11) and got g_yoffs + 24 here instead of g_yoffs + 12:
+        // a 12-row shift of that band and its tail reading past the artwork
+        // (hw 2026-09-17, "garbage under the letters at 640x480 only").
+        uint32_t add = ts_crop_top;
+        if (TsConf::r.g_yoffs_updated && ts_crop_top) {
+            const uint32_t v0 = (uint32_t)tStatesScreen / (uint32_t)tStatesPerLine;   // raster line of curline 0
+            const uint32_t wl = TsConf::r.g_yoffs_wline;
+            if (wl < v0 && wl + ts_crop_top >= v0) add = v0 - wl - 1;
+        }
+        ts_ygctr = ((uint32_t)TsConf::r.g_yoffs + add) & 0x1FF;
         TsConf::r.g_yoffs_updated = false;
     } else if (TsConf::r.g_yoffs_updated) {
         ts_ygctr = TsConf::r.g_yoffs & 0x1FF;

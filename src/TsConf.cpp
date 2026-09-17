@@ -585,8 +585,10 @@ TS_HOT void TsConf::portWrite(uint8_t reg, uint8_t val) {
             break;
         case TSW_GXOFFSL: r.g_xoffs = (r.g_xoffs & 0x100) | val; break;
         case TSW_GXOFFSH: r.g_xoffs = (r.g_xoffs & 0xFF) | ((uint16_t)(val & 1) << 8); break;
-        case TSW_GYOFFSL: r.g_yoffs = (r.g_yoffs & 0x100) | val; r.g_yoffs_updated = true; break;
-        case TSW_GYOFFSH: r.g_yoffs = (r.g_yoffs & 0xFF) | ((uint16_t)(val & 1) << 8); r.g_yoffs_updated = true; break;
+        case TSW_GYOFFSL: { const uint16_t o = r.g_yoffs; r.g_yoffs = (r.g_yoffs & 0x100) | val; r.g_yoffs_updated = true;
+                            r.g_yoffs_wline = (uint16_t)(CPU::tstates / tsLineT()); TSVT_CHG("GY", o, r.g_yoffs); break; }
+        case TSW_GYOFFSH: { const uint16_t o = r.g_yoffs; r.g_yoffs = (r.g_yoffs & 0xFF) | ((uint16_t)(val & 1) << 8); r.g_yoffs_updated = true;
+                            r.g_yoffs_wline = (uint16_t)(CPU::tstates / tsLineT()); TSVT_CHG("GY", o, r.g_yoffs); break; }
         case TSW_T0XOFFSL: { r.t0_xoffs = (r.t0_xoffs & 0x100) | val; TSVT("T0X=%03X", (unsigned)r.t0_xoffs); break; }
         case TSW_T0XOFFSH: { r.t0_xoffs = (r.t0_xoffs & 0xFF) | ((uint16_t)(val & 1) << 8); TSVT("T0XH=%03X", (unsigned)r.t0_xoffs); break; }
         case TSW_T0YOFFSL: { const uint16_t o = r.t0_yoffs; r.t0_yoffs = (r.t0_yoffs & 0x100) | val; TSVT_CHG("T0Y", o, r.t0_yoffs); break; }
@@ -1417,6 +1419,7 @@ void TsConf::reset(bool cold) {
     r.border = 0xF0;
     r.g_xoffs = r.g_yoffs = 0;
     r.g_yoffs_updated = false;
+    r.g_yoffs_wline = 0;
     r.t0_xoffs = r.t0_yoffs = r.t1_xoffs = r.t1_yoffs = 0;
     r.tmpage = r.t0gpage = r.t1gpage = r.sgpage = 0;
     r.dmalen = r.dmanum = r.dmactrl = 0;

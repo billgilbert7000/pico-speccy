@@ -2745,6 +2745,27 @@ took eleven hardware rounds; the mechanisms, in the order they were peeled:
   per pending WINDOW, not since the last flush. Rule for anything that suspends
   rendering: it needs an owner that clears it and a clock that bounds it.
 
+### The Y counter must count the CROPPED picture lines too — borntro12 (hw-confirmed 2026-09-17)
+
+"Garbage under the FISHBONE letters at 640x480, clean at 720x576." Not the demo:
+borntro12 is 16c RRES 360x288, no TSU, and does SEVEN raster splits a frame
+(`frmInt=420/60f`) whose handlers (table-driven, INT vector 0x60BF) write VPAGE
+**and GYOffs** per band — vcount 6: page 0x50 + a sine Y, vcount 43: page 0x21 +
+`GYOffs=0x20`, 99: 0x50, 126: 0x40 + 0, 286: 0x50. On a 240-row fb RRES 288 crops
+the top 24 picture lines (vcount 32..55), which are never rendered, and the
+vcount-43 write lands INSIDE them. `tsRenderLine` then reloaded `ts_ygctr =
+g_yoffs + crop` at curline 0 — but the RTL (`video_sync.v` `cnt_row`) reloads at
+the line AFTER the write and counts +1 only on picture lines, so the right value
+was `g_yoffs + 12`: the band sat 12 rows off and its tail read bitmap rows past
+the artwork. Fix: `TsConf::r.g_yoffs_wline` records the write's raster line and
+the curline-0 reload adds `v0 - wl - 1` for a write inside the cropped lines
+(`v0 = tStatesScreen / tStatesPerLine`); crop 0 is byte-identical to before. The
+TSVT trace prints `GY=` on GYOffs changes now. Rule this leaves: **any per-frame
+counter the renderer keeps must be advanced across lines the crop skips** — the
+crop removes fb rows, not raster time. `tools`-less unpacker for an .spg lives in
+the session scratch (TsSpgDepack.h + 40 lines); `tools/z80disasm.py` on the
+unpacked page is what read the split table out.
+
 ### The TS-Conf palette on VGA: dither the 256c artwork, ROUND the flat ZX 16 (hw 2026-09-16)
 
 Two reports, one line of code: "можно цвета получше?" on a 256c TMNT screen, and
