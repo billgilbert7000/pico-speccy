@@ -94,6 +94,10 @@ over the 2x2 block -> **13 levels per channel, 13^3 = 2197 perceived colours**.
 
 ### HDMI word format
 
+In variant B this raw form carries the CONTROL and Data-Island words (sync, porches,
+preambles, guard bands, TERC4 packets); the active pixels go through the hardware
+encoder as XRGB8888. Both share the same `bit[]` map and the same wire order.
+
 `CSR: SHIFT=2, N_SHIFTS=5, CLKDIV=5`, `clk_hstx = 126 MHz` -> 252 Mbps/pin, 25.2 MHz
 pixel — the same pixel clock the PIO path produces today, so the whole video-mode
 table is unchanged. `126 = 252/2 = 378/3 = 504/4`: **an exact integer divider at every
@@ -111,7 +115,7 @@ GP14/15 = ch0 (blue, carries sync), GP16/17 = ch1, GP18/19 = ch2, the **even** p
 each pair inverted, clock on GP12/13. In HSTX that is `bit[2..7]` with `SEL_P/SEL_N` as
 above and `INV` on the even pin, `bit[0] = CLK|INV`, `bit[1] = CLK`. Wire-identical to
 what ships today — which is the point: the port cannot introduce a new pinout or
-polarity bug, and that is provable offline (see "Verification").
+polarity bug, and that is provable offline (step 0 of the work plan).
 
 ### VGA word format — 4-phase PWM
 
@@ -140,97 +144,201 @@ an average over a 2x2 block, which is why:
 With PWM every pixel carries its own level, so the ZX palette and TS-Conf artwork are
 both exact, and the whole solid / dither / grid-snap fork disappears.
 
-## The design: one backend, both outputs
+## The design: one backend, both outputs, command expander
 
-The two outputs turn out to be **the same mechanism with different table contents**:
-one 32-bit word per output pixel, looked up from a 256-entry x 2-word palette, driven
-by a stream of index bytes. Both are 800 output pixels per line = 400 indices, 2 output
-pixels per index. So the existing HDMI plumbing serves both:
+**Decision (owner, 2026-09-17): variant B — the HSTX command expander.** We are paying
+for HSTX anyway, so take the version that also returns the palette slots. Variant A
+(raw TMDS words on the existing index-byte stream) is kept only as the fallback in
+"Rejected / considered" below.
+
+### Why B is the one that frees palette slots
+
+The 256-slot ceiling comes from the 8bpp framebuffer and cannot be raised by any
+backend. But **72 of those 256 are not colours today**, and the reason is
+architectural rather than electrical: sync, porches, preambles, guard bands and the
+Data-Island packets all travel on the SAME index-byte stream as the pixels, so each
+one has to BE a palette entry. See the palette section below for the full ledger.
+
+To get non-pixel words into the stream without spending indices, the line has to be a
+buffer of WORDS with a command list, which is exactly what the expander is for:
 
 ```
-line of 400 index BYTES -> dma_chan -> PIO conv (unchanged, 8 instr on pio2)
-   -> dma_chan_pal_conv_ctrl -> dma_chan_pal_conv (2 words) -> HSTX FIFO
+[HSTX_CMD_RAW_REPEAT | front_porch] [sync word]
+[HSTX_CMD_RAW_REPEAT | hsync]       [sync word]
+[HSTX_CMD_RAW_REPEAT | back_porch]  [sync word]        (+ island block when audio)
+[HSTX_CMD_RAW_REPEAT | 8]           [video preamble]
+[HSTX_CMD_RAW_REPEAT | 2]           [video guard]
+[HSTX_CMD_TMDS | active]            -> the pixel words
 ```
 
-Per output, only three things differ:
+and the consequence is that **the index -> word expansion moves to the CPU**. The PIO
+converter and its DMA chain retire completely. That is how quakegeneric does it
+(`drivers/dvi_hstx/linebuf_cb/index8.S`, a hand-written inner loop of
+`ldrb` / `ldr [pal, idx lsl 2]` / `str`, three instructions per pixel).
 
-| | HDMI | VGA |
+### Shape
+
+- **Line buffer = words.** Two ping-pong buffers, each a prebuilt template whose
+  blanking command words are constant per line TYPE; the ISR only fills the active
+  region (and, with audio, the island block). Blanking-only lines and the scanline
+  line are whole static buffers, the way `lines_pattern[0/1]` and `hdmi_scanline_buf`
+  already are.
+- **Pixels are XRGB8888 through the hardware TMDS encoder**
+  (`EXPAND_TMDS` L2/L1/L0 NBITS=7, ROT 16/8/0 — quakegeneric's `DVI_HSTX_MODE_XRGB8888`),
+  so full 8 bits per channel and **hardware running disparity**.
+- **`pix_rep` is unusable here.** The reference doubles pixels in the expander
+  (`ENC_N_SHIFTS = pix_rep`, one word per source pixel); our two output pixels must be
+  able to DIFFER — the CRT aperture grille and the DS80/GMX/Timex pair modes are built
+  on exactly that. So `pix_rep = 1` and two words per source pixel. The lever if DMA or
+  ISR ever bite: RGB565 with `ENC_N_SHIFTS=2, ENC_SHIFT=16` puts two different pixels in
+  ONE word (back to 320 words per line, ~41 MB/s), at 5/6/5 — rejected for now because
+  these palettes are tuned to the code unit.
+- **The LUT becomes an ordinary array**: 256 x 8 bytes per grille page. No 4 KB
+  alignment, no `.hdmi_lut` section, no SCRATCH_Y page-B placement — those exist only
+  because the PIO address converter reconstructs `(page << 12) | (byte << 4)`.
+- **VGA rides the same structure** (the owner's "do not split"): same word line buffer,
+  same command list, `vga_sync_word[]` in place of the TMDS control symbols, and each
+  LUT entry holding the 4-phase PWM words instead of colour. One `hstx_start(mode,
+  is_vga)` branching like quakegeneric's `hstx_init()`.
+
+### What it costs and buys, measured against today
+
+| | today (PIO) | A (raw) | **B (expander)** |
+|---|---|---|---|
+| palette slots for colour | 184 | 184 | **239**, regardless of HDMI audio |
+| DMA transfers per line | 2400 | 1600 | **~680** |
+| DMA bytes per line | 6400 | 3200 | ~2700 |
+| DMA channels | 4 | 4 | **2** |
+| PIO | 2 SM, 18 instr | 1 SM, 8 instr | **none** |
+| ISR, audio off | 9 us | 9 us | ~10.5 us |
+| ISR, audio on | 18-19 us | ~18.5 us | **about unchanged** |
+| running disparity | software | software | **hardware** |
+| 90/75 Hz modes | yes | no | no |
+
+Three results worth keeping:
+
+- **B is cheaper on DMA than A**, by 3.5x rather than 2x: the byte-feeder channel, the
+  converter ctrl channel and the per-index `read_addr` ping-pong all disappear. One
+  line becomes one transfer.
+- **The lookup loop costs ~+1.5 us per pass** (~+0.4 ms/frame on core1), not the 2-3x I
+  first assumed: on M33 it is `ldrb` + `ldrd` (the 8-byte LUT entry) + `strd`, the same
+  three instructions per pixel the reference uses. The `^2` source swizzle is handled
+  the way the DS80 fast path already does it — read four source bytes as one word and
+  rotate.
+- **With audio it is roughly self-cancelling**: `hdmi_di_load` copies 2 pages x 32
+  uint64 = 512 B per line today; in B it writes ~36 words = 144 B into the line buffer.
+  Islands get 3.5x cheaper.
+
+### Hardware disparity retires a whole layer
+
+`tmds_pair.h`, the balanced-pair construction, `HDMI_TMDS_LEVEL_CLAMP` and the
+capture-safe single-symbol snapping (`Config::hdmi_snap`) all exist because we encode
+TMDS in software with no running-disparity state. The encoder in HSTX keeps it in
+hardware, so those go away — and the capture-card artifact they were fighting (a solid
+colour returning as two alternating colours) goes with them: it was caused by our pair
+carrying v and v+-1, two different VALUES. Hardware TMDS sends two symbols that both
+decode to exactly v.
+
+## Palette slots: the ledger, and what is free without HSTX
+
+The motivation for B, and the one number a user sees. `ts256PoolInit()` (Video.cpp)
+skips `152..167`, `184..199` and everything from `216`:
+
+| range | slots | actually needed when |
 |---|---|---|
-| LUT content | 30-bit raw TMDS triple | 4 PWM phases |
-| `clk_hstx` | 126 MHz (`sys/2,3,4`) | `clk_sys`, stretched by `N_SHIFTS` (5 bits, so halve the divider while it would exceed 31 — quakegeneric does exactly this) |
-| `CSR` / `bit[]` | `SHIFT=2 N_SHIFTS=5 CLKDIV=5`, lane pairs + `INV`, `CLK` on 12/13 | `SHIFT=16 N_SHIFTS=rept CLKDIV=4`, `SEL_P=k SEL_N=k+8` |
-| pad drive | 12 mA data, clock from Video > HDMI > Clock drive | 4 mA (quakegeneric's choice for the ladder) |
-| sync | control symbols in indices 240..243 | the same four indices hold the four {HS,VS} phase words |
-| Data Islands | indices 184..199 / 216..239 | unused |
+| 152..167 UI palette | 16 | menu and `OSD::notify` — always |
+| 184..199 DI set 1 | 16 | HDMI **and** HDMI audio |
+| 216..239 preambles, guards, DI set 0 | 24 | HDMI **and** HDMI audio |
+| 240..243 sync | 4 | HDMI only (VGA blanks through `bg_color[]`) |
+| 244 scanline | 1 | only with scanlines on |
+| **245..254** | **10** | **nothing at all** |
+| 255 border | 1 | HDMI |
 
-Consequences worth stating up front:
+72 reserved, pool 184; only the 16 UI slots are structurally unavoidable.
 
-- **The HDMI ISR does not change at all.** It writes indices; only the words behind
-  them and the sink change. Everything hw-tuned in it survives untouched: the
-  Data-Island pacing and its 45 us guard, scanlines, DS80 pair path, dither, the CRT
-  grille and its second palette page, `hdmi_vsync_line`/`hdmi_beam_row` (TS-Conf), the
-  mode table and `hdmi_update_mode_timing`.
-- **VGA gains more than it loses.** Moving it onto the converter chain removes its
-  per-pixel CPU palette lookup, and its line buffers become 400 index bytes instead of
-  `line_size` colour bytes — so the naive "+15..22 KB of SRAM for 4-byte pixels" cost
-  of a PWM line buffer **does not apply**; the 32-bit words live in the 2 KB LUT.
-- Its ISR converges with the HDMI one (both become "render indices, hand them to the
-  chain"). If merging them proves too invasive in one go, the fallback shape is: keep
-  both ISRs, share only the output stage — same result on the wire, more duplication.
-- **In a VGA session of an HSTX build the PIO is not used at all**, and in an HDMI
-  session only the 8-instruction converter is. `BoardPins::auxPio()` ("the block the
-  display does not use") therefore stops being accurate — it feeds the radio, I2S and
-  NESPAD placement on the W boards. Plain m2p2 never calls it; fix it under
-  `HDMI_HSTX` anyway so m2p2w cannot inherit a silent wrong answer.
+**Available today, with no HSTX at all** (worth doing as its own small commit — the
+owner has deferred it, not declined it):
 
-### What it buys
+1. **+10**: `245..254` are caught by a blanket `i >= BASE_HDMI_CTRL_INX` in
+   `hdmi_palette_slot_writable()` and `if (i >= 216) continue;` in the pool. Nothing
+   uses them. Narrow both to `240..244`, initialise the ten to black at init (an
+   unprogrammed slot would emit a zero word).
+2. **+40** when HDMI audio is off or the output is VGA. The neighbouring code already
+   knows how: `init_profi_pair_lookup()` computes
+   `reserve_di = !SELECT_VGA && Config::audio_driver == 4`. `ts256PoolInit()` is static
+   and reserves the DI ranges even in a VGA session, where Data Islands do not exist.
+   Needs the same predicate plus a pool rebuild on the audio-driver edge
+   (`applyPalette()` already re-flushes the whole map).
+3. **+6 on VGA**: sync, scanline and border go through `bg_color[]` / prebuilt sync
+   lines, not palette indices.
 
-- Video DMA **201 -> ~100 MB/s** on HDMI (4 bytes per output pixel instead of 8;
-  50.4 -> 25.2 M transfers/s). On a firmware whose whole performance story is bus and
-  XIP contention this is the measurable win — read `[PERF] 60f` `cpu=`/`c1=`/IDL.
-- Frees a PIO SM and 10 instructions (HDMI), and the whole VGA SM.
-- Per-pixel colour on VGA (above).
-- Exact integer video clock at 252/378/504 instead of a half-integer PIO divider.
-- Small SRAM: DI blobs 6 x 256 B -> 6 x 128 B; optionally another ~2 KB, see below.
+| configuration | now | after the free fixes | after B |
+|---|---|---|---|
+| HDMI + HDMI audio | 184 | 194 | **239** |
+| HDMI + I2S/PWM/Covox | 184 | 234 | **239** |
+| VGA | 184 | 240 | **239** |
 
-### What it does not buy
+Second beneficiary of B: `init_profi_pair_lookup()` drops from 250 usable pairs to 210
+with HDMI audio and compensates with 40 extra bright-ink x bright-paper merges — so
+DS80/GMX/Timex colours are measurably less faithful with HDMI sound than without. B
+removes that trade too.
 
-- No new resolutions, and no extra colour on HDMI (the symbols are the ones we send
-  today, 8 bits per channel).
-- **The 90/75 Hz "fast" modes are out of spec on HSTX**: 37.8 MHz pixel = 378 Mbps per
-  pin against the datasheet's 300. Hide them in an HSTX build
-  (`video_modeOpts` already filters by CPU clock; add the backend to the test). Trying
-  them anyway is survivable — `videoModeConfirm` rolls back after 15 s — but it is an
-  overclock, not a feature.
+Second-order: `ts256PickBanks()` splits the pool into 2-4 palette-version banks. At 184
+slots four banks are 46 each; at 239 they are 59. More slots means fewer nearest-colour
+merges AND versioning available to more titles (the RobFgift case).
+
+## The other two findings from the design discussion
+
+**PIO fractional-divider jitter at 378 MHz.** `PIO_DIV = CPU_MHZ / 252`, so the default
+clock runs the TMDS SM at divider **1.5** — and a fractional PIO divider is a
+clock-enable counter, so the state machine advances at intervals of 1, 2, 1, 2 system
+cycles. At 378 MHz (2.6455 ns) the bit boundaries inside a character land at cycles
+0,1,3,4,6,7,9,10,12,13 of 15. A receiver sampling on the uniform grid recovered from
+the (exact) 25.2 MHz character clock still hits every bit, but **the margin on the
+narrow bits is 0.25 cycle = 0.66 ns instead of 1.98 ns — the data eye is squeezed
+threefold**, before rise time and cable. 252 (div 1.0) and 504 (div 2.0) are clean.
+Consequence: the comment in `graphics.c` — *"must be integer or half-integer (n/2) for
+clean TMDS pixel clock"* — is wrong about the half-integer case. HSTX removes this
+(`clk_hstx` = 126 MHz, an integer divide of all three CPU clocks, and no clock-enable
+counter). **Checkable today without any code**: a marginal sink at 378 versus 252/504.
+
+**CPU offload is a VGA story, not an HDMI one.** Neither PIO nor HSTX spends CPU on
+pixels, so on HDMI the direct saving is zero (B's numbers above are the lookup loop
+against the island copies). On VGA it is real and large: `vga.c` applies the palette on
+the CPU *and* runs the full conversion on **every output line** (480 per frame), not
+once per pair like HDMI (240), because `palette_vga16[screen_line & 1]` is the Bayer row
+phase. Today's 2197 VGA colours are paid for by doubling the ISR. With 4-phase PWM the
+row phase disappears, the pair renders once, and the estimate is ~2.5 ms/frame ->
+~0.7 ms/frame of core1. That is an estimate from instruction counts: **VGA has no ISR
+duration counter at all** (HDMI has `hdmi_irq_max_gap_us`/`hdmi_irq_max_dur_us`) —
+adding the twin is ten lines and gives both the before and the after.
 
 ## Work plan
 
 Land as one feature on one branch; the numbered steps are an order of work, not
 separate releases.
 
-0. **Host test `tools/hdmi_hstx_test.c`** — the equivalence proof, and the only part
-   that can be verified in a container without the SDK. For all 256 palette values and
-   the four control symbols, show that (raw word + `bit[]` map) produces the **same bit
-   sequence on each of the 8 pins** as (64-bit differential word + `out pins,6` +
-   side-set). Extend it to the VGA side: level -> 4 phases -> mean code value against
-   the intended RGB888, and the 13-level ladder. Precedent:
-   `tools/hdmi_tmds_pair_test.c`. Re-run after any change to the packing.
-1. **Word layer.** `hdmi_word_t`, `HDMI_PACK3()`, `nf_copy_words()` replacing the
-   `uint64_t` / `get_ser_diff_data` / `nf_copy64` trio at its ~40 sites in `hdmi.c`
-   (all of the form "build a word from three 10-bit symbols" or "copy N of them").
-   `hdmi_ser_one_arg`'s TERC LUT trick works unchanged and gets simpler (`<< lane*10`).
-   Under `#if HDMI_HSTX`; PIO builds stay bit-identical.
-2. **`drivers/hstx/`** — the backend: per-board lane table, `hstx_start(mode, is_vga)`
-   branching like quakegeneric's `hstx_init()`, `clk_hstx` configuration, pad drive.
-   `hdmi_init()` skips the TMDS program/SM and points `dma_chan_pal_conv` at
-   `&hstx_fifo_hw->fifo` with `DREQ_HSTX` and count 2. One line elsewhere:
-   `hdmi_audio_hw_init()` derives the pixel clock as `clock_get_hz(clk_hstx)/5`
-   instead of `clk_sys/(pio_div*10)`.
-3. **VGA side** — PWM LUT (`vga_pwm_xlat`-equivalent built from our existing colour
-   maths), VGA sync in indices 240..243, VGA geometry from the mode's `vga_*` fields,
-   and the renderer switched to emitting index bytes into the shared chain. Delete
-   (under the same guard) `vga_bayer4`, the solid/dither fork and `vgaGridSnap` — with
-   PWM they have nothing left to do.
+0. **Host tests.** The only part that can be verified in a container without the SDK.
+   `tools/hstx_word_test.c`: for all 256 palette values, that the XRGB8888 LUT entry
+   fed through the documented `EXPAND_TMDS` field extraction yields the colour we
+   intended, and that the command words (`RAW_REPEAT | n`, `TMDS | n`) and the four
+   control symbols are laid out as the expander reads them. On the VGA side: level ->
+   4 phases -> mean code value against the intended RGB888, and the 13-level ladder.
+   Precedent: `tools/hdmi_tmds_pair_test.c`. Re-run after any change to the packing.
+1. **Line model.** Word line buffers, the per-line-type command templates, and the
+   index -> word inner loop (`ldrb` / `ldrd` / `strd`, four source bytes read as one
+   word for the `^2` swizzle, two grille pages alternating by pixel parity). The ISR
+   keeps its structure — what changes is where it writes and what a "palette entry" is.
+2. **`drivers/hstx/`** — per-board lane table, `hstx_start(mode, is_vga)` branching like
+   quakegeneric's `hstx_init()`, `clk_hstx`, expander configuration, pad drive. Retire
+   the PIO converter, the byte-feeder and the converter ctrl channel; two DMA channels
+   remain. `hdmi_audio_hw_init()` derives the pixel clock from `clock_get_hz(clk_hstx)`.
+3. **Structural words leave the palette**: sync/porch/preamble/guard into the line
+   templates, `hdmi_di_load` writing island words into the line buffer instead of LUT
+   slots, and `ts256PoolInit()` / `hdmi_palette_slot_writable()` / `init_profi_pair_lookup()`
+   widened to the freed range. Retire `tmds_pair.h`, the balanced pair, LEVEL_CLAMP and
+   `hdmi_snap` (hardware disparity). VGA side: PWM LUT, sync words, and the
+   render-once-per-pair change the disappearing Bayer row phase allows.
 4. **Build** — five lines, no matrix change:
    ```cmake
    option(HDMI_HSTX "..." OFF)            # engineering A/B only, not in the matrix
@@ -276,15 +384,18 @@ separate releases.
 - **Separate `-HSTX` firmware or a display target beside `VGA_HDMI`** — the owner wants
   one image, as in the original.
 - **Landing HDMI and VGA as two phases** — same instruction: not split.
-- **HSTX's hardware TMDS encoder for HDMI** (`EXPAND_TMDS` + command expander, which is
-  what quakegeneric's `dvi_hstx` does for DVI): gives hardware running disparity and
-  would retire `tmds_pair.h` / balanced pairs / the capture-safe snap, but the pixel
-  would have to be fed as RGB565 (1 word per 2 pixels) — a real loss for palettes this
-  project has tuned to the code unit — or RGB888 at 3 words per index, which is *more*
-  DMA than the raw path. Worth revisiting only as a later experiment; if it is, the
-  shape to copy is `HSTX_CMD_RAW_REPEAT` for porches/sync, `HSTX_CMD_RAW | len` for the
-  island, `HSTX_CMD_TMDS_REPEAT` for active video, and it would also take the sync
-  memsets out of the ISR entirely.
+- **Variant A — raw TMDS words on the existing index-byte stream.** Keeps the ISR and
+  the PIO converter untouched and is provable offline pin for pin, but it frees no
+  palette slots (the structural words still have to be palette entries) and costs more
+  DMA than B. Kept as the fallback if B's lookup loop turns out to hurt a core1-bound
+  title more than the measurement suggests; the word layer is shared, so A is a
+  retreat, not a rewrite.
+- **Commands inside the index stream** (structural indices whose 2-word LUT entry holds
+  `[CMD_RAW_REPEAT | n][sync]`, with the guard band arranged so the `CMD_TMDS` word
+  lands on a slot boundary). It works for blanking, but the island's 32 packet words
+  still need LUT entries — so it frees almost nothing and buys the complexity for free.
+- **`pix_rep` in the expander** — see the design section: our two output pixels must be
+  able to differ.
 - **Moving VGA to HSTX "for more bits"** — the ladder is 2 bits per channel and HSTX
   drives the same 8 pins; the gain is PWM, not depth. HSTX is also strictly less
   flexible for VGA (8 fixed pins, so no wider ladder is ever possible on it).
