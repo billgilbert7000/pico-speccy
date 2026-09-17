@@ -1538,8 +1538,14 @@ void OSD::drawNotify() {
         if (px0 < 0) px0 = 0;
         if (px1 > (int)VIDEO::vga.xres) px1 = (int)VIDEO::vga.xres;
         if (px1 - px0 < textw) { cancelNotify(); return; }
-        if (carve) VIDEO::setNoticeCarve(px0, y, px1, y + NOTIFY_BAND_H);
-        else       VIDEO::clearNoticeCarve();
+        // Reserve the rows in EITHER case on TS-Conf: the band is repainted ROW
+        // BY ROW now (tsBandRow, so a per-line Border register shows as bands),
+        // which would erase a banner sitting in it. Both band rows and content
+        // rows read this rect at render time, which is also what erases the
+        // banner authoritatively when the rect is cleared. GMX ignores it — it
+        // has no whole-line renderer and gmxBorderFrame still owns its bands.
+        if (carve || VIDEO::ts_render_live) VIDEO::setNoticeCarve(px0, y, px1, y + NOTIFY_BAND_H);
+        else                               VIDEO::clearNoticeCarve();
     } else {
         VIDEO::setNoticeBand(y, y + NOTIFY_BAND_H - 1, px0, px1);
         if (px1 - px0 < textw) { cancelNotify(); return; }

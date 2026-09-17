@@ -1561,6 +1561,23 @@ static void hdmi_rebuild_page_b(void) {
     }
 }
 
+// The page-A twin of the above, and the reason the ~5 KB snapshot is OPTIONAL:
+// palette[] describes exactly the slots hdmi_palette_slot_writable() allows, so
+// both pages can be re-derived from it and the structural slots (sync, border,
+// the Data-Island range while audio is live) are skipped by both — which is
+// precisely what the snapshot restore below skips as well. With the snapshot
+// mandatory, DS80/TEXT REFUSED TO START on a thin heap (720x576 + TS-Conf), and
+// a TS-Conf frame that mixes a TEXT band with graphics then lost the whole band.
+static void hdmi_rebuild_page_a(void) {
+    if (!conv_color) return;
+    uint64_t *cca = (uint64_t *)conv_color;
+    for (int i = 0; i < 256; i++) {
+        if (!hdmi_palette_slot_writable((uint8_t)i)) continue;
+        const uint32_t c = hdmi_tmds_level888(palette[i]);
+        hdmi_write_pair(cca, (uint8_t)i, c, hdmi_crt_tap(c, hdmi_crt_tap1));
+    }
+}
+
 #define RGB888(r, g, b) ((r<<16) | (g << 8 ) | b )
 
 // Profi DS80 "packed nibble" mode:
@@ -1611,9 +1628,15 @@ void hdmi_set_profi_ds80_mode(bool active,
             extern void* tryMalloc(size_t n);
             if (!conv_color_std_snapshot)
                 conv_color_std_snapshot = (uint32_t *) tryMalloc(1240 * sizeof(uint32_t));
-            if (!conv_color_std_snapshot) return;
-            for (int i = 0; i < 1240; i++) conv_color_std_snapshot[i] = conv_color[i];
-            conv_color_std_snapshot_valid = true;
+            // No snapshot is no longer a refusal: the exit path re-derives page A
+            // from palette[] exactly as it already does page B. Refusing instead
+            // cost the TEXT band of a mixed TS-Conf frame at 720x576, where the
+            // heap is a few KB (hw 2026-09-17) — and it was STICKY, because
+            // Video.cpp latches the refusal until the guest leaves TEXT.
+            if (conv_color_std_snapshot) {
+                for (int i = 0; i < 1240; i++) conv_color_std_snapshot[i] = conv_color[i];
+                conv_color_std_snapshot_valid = true;
+            }
         }
 
         // Per-channel TMDS values (10-bit) and per-channel disparity (ones×2 - 10).
@@ -1708,7 +1731,9 @@ void hdmi_set_profi_ds80_mode(bool active,
         __dmb(); // ensure all conv_color writes are visible to core1 before flag is set
         profi_ds80_active = true;
     } else {
-        if (conv_color_std_snapshot_valid && conv_color_std_snapshot) {
+        if (!conv_color_std_snapshot_valid || !conv_color_std_snapshot) {
+            hdmi_rebuild_page_a();
+        } else {
             for (int i = 0; i < 1240; i++) {
                 // With audio live, the core1 ISR owns the DI slots: data sets are
                 // rewritten every line (a stale snapshot word restored mid-scan =

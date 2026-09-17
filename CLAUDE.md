@@ -2832,6 +2832,174 @@ took eleven hardware rounds; the mechanisms, in the order they were peeled:
   per pending WINDOW, not since the last flush. Rule for anything that suspends
   rendering: it needs an owner that clears it and a clock that bounds it.
 
+### Demorama: VConfig is per LINE, and a per-line palette effect must not be HELD (hw-confirmed 2026-09-17)
+
+"Part of the graphics is missing, and in one place the FPS drops to 25." Both came
+out of the guest's OWN tables in a Ctrl+Alt+D dump — read them before theorising,
+they are unambiguous. The demo (TS-Conf, 14 MHz, `intmask=03`) runs a **LINE INT on
+every one of the 320 lines** (handler at card-side ZX `#815C`) that, per line:
+`OUT (#FB),A` a sound sample, `OUT (#0FAF)` the **border** (`(sample & 3) | 0xFC` —
+an oscilloscope in the border), `OUT (#00AF)` a **VCONFIG byte out of a 320-entry
+table**, `OUT (#07AF)` **PalSel 0x0F / 0x0E alternating by line parity**, and one
+CRAM cell via the FMAddr window (`LD (0x01E0),BC` = cell 0xF0 on odd lines,
+`LD (0x01C0),BC` = 0xE0 on even) — plus `OUT (#13AF)` to page the sample bank. The
+tables are double-buffered (`(0x80E1)` XORs bit 2 of its high byte per frame:
+0xB000 / 0xB400 sets, border table at base, VCONFIG at base+0x200, CRAM words at
+base-0x1000/+0x100), and three FRAME INT windows a frame (`frmInt=180/60f`) move
+VPage/GYOffs. The live VCONFIG table read out of the dump:
+
+    lines   0.. 84: 82   (RRES 320x240, 256c)
+    lines  85..113: A2   (+NOGFX — a band whose height ANIMATES: 88..117 in the other buffer)
+    lines 114..125: 82
+    lines 126..253: 83   (TEXT — 80x30 hires, in the middle of a 256c screen)
+    lines 254..319: 82
+
+- **`frmMiss=60 ei=60 halted=60` is a FALSE POSITIVE of that counter here, not a
+  lost window**: the frame's last handler arms VSINT=0, i.e. the NEXT frame's
+  line-0 window, whose IntStart is behind `now` — `nextIntEvent` cannot schedule a
+  window in the past and neither can hardware. Do not chase it.
+- **Fix 1 — the frame mode comes from every mode the frame USED** (`TsConf::vmSeen`,
+  a bitmask set by the VCONF write and consumed by `tsVideoApplyPending` exactly
+  like `tsuSeen`). Sampling the register at EndFrame picked whatever the LAST line
+  wrote, so the whole screen flipped to NOGFX for a frame roughly once a second
+  (`[TSV] mode 4` in the log, and `mode 3` never appeared at all). The pick is
+  256c > 16c > ZX > TEXT > NOGFX: what cannot be switched per line is the PAIR
+  DRIVER (TEXT is hires, 2 px per fb byte, global conv_color tables), the ts256
+  remap and the raster geometry — so TEXT only wins a frame it owns alone, and a
+  frame mixing ZX with anything else now takes the whole-line renderer
+  (`vmMixed`). The `[TSV] mode` line prints `(seen XX)`.
+- **Fix 2 — `tsRenderExec` renders each line in the line's OWN mode** (`lvm`, from
+  `j.l.vconf`, which the job already carried for GFXOVR): ZX / 16c / 256c / NOGFX
+  all paint the same 8bpp framebuffer, so any of them may appear on any line, and
+  a NOGFX line is a border fill end to end (unless the TSU is up — video_render.v
+  keeps tiles and sprites visible over the border).
+- **Fix 3 — and a TEXT band renders TOGETHER with them. "Pair bytes and palette
+  indices cannot coexist" was WRONG** (my own claim, corrected the same day by the
+  owner pointing at Unreal): **a pair slot and a palette index are the same 8-bit
+  index into the SAME driver LUT.** hdmi.c's `conv_color` and vga.c's
+  `palette_vga16` hold TWO output pixels per entry either way — a solid entry
+  simply puts the same colour in both — and each ISR's "DS80 fast path" is a
+  32-bit rewrite of the identical byte loop, not a second pipeline (vga.c's two
+  loops differ only in which table they read). What a pair frame genuinely cannot
+  offer is more than 16 base colours, because a pair slot is addressed as
+  (4-bit, 4-bit). So `tsVideoApplyPending` gives the frame to the pair driver
+  whenever ANY line asked for TEXT — the asymmetry runs that way: a pair frame can
+  render a graphics line, a graphics frame cannot render a text line (80 hires
+  columns do not fit 320 lores bytes) — and a graphics line goes through
+  **`s_pairmap`** (built in `tsPairPaletteLoad`): CRAM index -> nearest of the
+  frame's 16 gpal colours -> that colour's pair DIAGONAL, i.e. one lores pixel
+  doubled, exactly what the standard path emits. It is a pure `map[]` swap, so
+  `tsFast256` / `tsFast16` and the generic compose path all work unchanged.
+  **ZX, 16c and NOGFX lines are EXACT** (their pixels are `{gpal, n}` by
+  construction); a 256c band is exact inside its own gpal bank and approximated
+  to 16 colours otherwise. Known limits of the mixed frame, all in the pair
+  half: the TSU is dropped (`wantTsu` excludes TEXT — no known title mixes them),
+  TEXT itself ignores the per-line PalSel (the pair palette is one bank per apply,
+  and the two this demo alternates are identical), and `profiPaletteApplyPending`
+  applies at v_sync, which on TS-Conf leads blanking by `TS_VSYNC_LEAD_LINES` —
+  so a palette animated every frame tears at a fixed raster position near the
+  bottom instead of taking the beam rule the ts256 path has.
+- **Fix 4 — the nb==1 re-index HOLD must require a BURST** (`TS_PAL_BURST_PER_ROW`,
+  tsCramChanged). ~100 CRAM writes a frame spread one per line is just as "wide"
+  as a whole-palette upload, so the `>= 32 cells` trigger fired on EVERY frame
+  (`wide=50 rel=48` per 60 frames): the hold then threw away every per-line
+  register the rest of the frame would have carried — `tsReindexRelease` renders
+  all 240 lines from ONE register set, so the border oscilloscope, the PalSel
+  interlace, the three raster splits and the NOGFX band were all flattened — and
+  it halved the update rate ("25 FPS"). The discriminator is DENSITY, not span or
+  position: a palette upload is >= 4 cells per row it touches (a CRAM DMA writes
+  all of them on one row; Kolbass' 72-cell change is a DMA too), a per-line effect
+  one or two. `ts_pal_ncells` now also counts per FRAME rather than per unflushed
+  window, which is what its own comment always claimed. `[TSPAL] hold:` gained
+  `spread=` — climbing with `hold=0` is this rule working.
+- **Fix 5 — the top/bottom border BANDS are painted row by row, at their own
+  raster lines** (`VIDEO::tsBandRow`, from `tsDrawTick`). They are raster lines
+  like any other and this demo writes the Border register on every one of the
+  320 (an oscilloscope driven by the sound sample), while `gmxBorderFrame` fills
+  a whole band with ONE colour sampled at EndFrame — i.e. with whatever audio
+  sample line 319 happened to carry, so the bands flickered in colours unrelated
+  to the picture instead of showing fine stripes. The per-line clock therefore
+  starts at the first VISIBLE line (`tStatesScreen - lin_end * tStatesPerLine`)
+  instead of the first content one, and `ts_row_idx` (the fb row) drives the
+  loop while `ts_line_idx` keeps its old "next content line" meaning for
+  everything that reads it. Two consequences worth knowing: the bands only exist
+  at all where `lin_end > 0` (RRES 320x240 on a 240-row fb has none, which is
+  why this only showed at 720x576), and **a banner in the band now needs the
+  notice carve** — `OSD::notify` sets it in `bandBorderMode()` on TS-Conf
+  whether or not the banner is on content rows, because a row-by-row painter
+  would otherwise erase it (it used to be safe purely because gmxBorderFrame
+  painted the bands once per frame, BEFORE drawNotify).
+- **Fix 6 — ...and `gmxBorderFrame`'s flat fill has to be UNDONE, not
+  suppressed** (hw 2026-09-17, two rounds: "top fixed, bottom not", then
+  "bad fix, the picture broke in the middle"). EndFrame runs
+  `TS_VSYNC_LEAD_LINES` = 100 display lines = **50 fb rows** before blanking,
+  i.e. while the beam is still ABOVE the BOTTOM band of the sweep now running —
+  so gmxBorderFrame's one-colour fill was the last writer there on every frame,
+  while the TOP band got away with it because the next frame's tick repaints
+  rows `0..lin_end-1` in the first milliseconds, before the beam wraps to them.
+  **The general shape: with the v-sync lead, what EndFrame writes into the
+  BOTTOM rows is displayed in the sweep already running, while the same write to
+  the TOP rows is superseded by the next frame's renderer. "Top works, bottom
+  does not" is that asymmetry.**
+  - **hw-REFUTED: gating gmxBorderFrame off for TS frames** (paint only on
+    `gmx_border_dirty || brdnextframe`). It broke the picture and the only side
+    effect it has is on the FLAGS — the early return leaves `brdnextframe`
+    standing, and that function owns it together with `gmx_border_dirty` and the
+    forced repaints (mode change, menu exit, `RedrawPausedFrame`). Do not try to
+    make that function conditional; it is a flag owner, not just a painter.
+  - **In: `VIDEO::tsBandReplay()`**, called right after it in EndFrame and
+    before `drawNotify`. `tsBandRow` records the slot it painted each band row
+    with (`ts_band_slot[]`, in the TS overlay window) and the replay writes them
+    back — same carve-outs, nothing but band pixels, no flag touched. It runs
+    only while `ts_band_valid`, set when the tick walks the WHOLE raster and
+    cleared by the geometry block of `tsVideoApplyPending`: after a mode change
+    the record does not describe the new bands, and the flat fill is then the
+    right thing to leave standing for one frame. It cannot test `ts_row_idx`
+    instead — EndFrame re-arms that to 0 before the border block runs, and the
+    question is about the frame that just ENDED.
+- **Fix 7 — the pair driver's ~5 KB snapshot is OPTIONAL, and refusing over it
+  cost the whole TEXT band** (hw 2026-09-17: border fixed, "the picture in the
+  middle is gone"). `hdmi_set_profi_ds80_mode` took a 1240-word snapshot of
+  conv_color page A to restore on exit and **returned** when the `tryMalloc`
+  failed; at 720x576 + TS-Conf the heap is a few KB, so TEXT never started —
+  and the refusal is LATCHED in `tsVideoApplyPending` (`s_text_refused`) until
+  the guest leaves TEXT, which in a mixed frame it never does. The snapshot was
+  never necessary: `palette[]` describes exactly the slots
+  `hdmi_palette_slot_writable()` allows, which is why page B has always been
+  re-derived from it on exit — so `hdmi_rebuild_page_a()` is its twin, the
+  allocation is now best-effort, and the exit path re-derives page A when there
+  is no snapshot. On a board where the malloc succeeds the behaviour is
+  byte-identical. Diagnostic for the next round of this: `[TSV] VM seen XX ->
+  want N` fires whenever the per-line mode MIX changes, not only on a mode
+  change like the `[TSV] mode` line — bit 3 in `seen` is TEXT, and `want 3` with
+  `pair=0` in the following line is a driver refusal.
+- **Hw verdict (2026-09-17, DVp2 at 720x576), and what it covers.** The owner's
+  final "everything works" came after three rounds, and the decisive log lines
+  are the ones Fix 7 added: `[TSV] VM seen 0D -> want 3 (live 0, rres 2)` then
+  `[TSV] mode 3 (seen 0D) rres 2 tsu=0: lin_end=24..264 pair=1 pal256=0`, with
+  NO `pair driver refused` anywhere — i.e. `seen` really carries ZX+256c+TEXT,
+  the frame goes to the pair driver, and the following `VM seen 1C -> want 3
+  (live 3)` prints WITHOUT a new `[TSV] mode` line, so the frame mode is stable
+  and the driver is not re-entered per frame. Beside it: `hold: blit=0 wide=0
+  spread=0 hold=0`, `realFPS` 48.7-48.8 with `cpu` 16-18 ms, `c1=13.2ms/288l
+  wait=0.0ms`, `hdmiDurMax=9us` / `gap<=41us`, `und=0 skip=0 dup=0`, no panic.
+  **NOT covered by that run and still owed**: Kolbass and the other `nb=1`
+  titles against the new density gate (the case the hold exists for); RobFgift /
+  Ninja Gaiden (the `nb=4` version banks); TMNT / Digger / Bruce Lee / Lode
+  Runner (plain 256c/16c — the per-line dispatch and `s_pairmap` must NOT
+  engage); TS-BIOS Setup (a TEXT-only frame, and the entry that used to panic at
+  576p); GMX 640x200 and Profi DS80 (they share `gmxBorderFrame` and the pair
+  driver, so Fix 7 touches them); VGA (its own pair path, no snapshot); and
+  640x480, where RRES 320x240 has `lin_end = 0` and therefore no bands at all.
+- **Still not representable, and worth a design round if it matters: a cell whose
+  VALUE changes per line.** Only cells 0xE0/0xF0 vary here (~100 writes a frame),
+  and with one global palette only one of those values can be on screen — the band
+  that is a vertical gradient on hardware comes out flat. The palette-VERSION banks
+  are the existing answer but they are all-or-nothing (a whole 184-slot bank per
+  version, so `nb=1` here at 123-125 live colours). The cheap generalisation is to
+  version only the cells that actually vary: one map per version differing in those
+  few entries, costing `versions x varying cells` slots instead of a whole bank.
+
 ### The Y counter must count the CROPPED picture lines too — borntro12 (hw-confirmed 2026-09-17)
 
 "Garbage under the FISHBONE letters at 640x480, clean at 720x576." Not the demo:

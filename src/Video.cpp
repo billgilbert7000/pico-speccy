@@ -476,6 +476,14 @@ uint8_t  VIDEO::ts_render_live = 0;
 // TsDraw / TsFastMem.h state (see the TS-Conf fast video path further down)
 uint32_t VIDEO::ts_line_t   = 0xFFFFFFFFu;   // T-state at which the next content line renders
 static uint32_t ts_line_idx = 0;             // that line, 0..(lin_end2 - lin_end - 1)
+// ...and the fb ROW the per-line clock is on, 0..yres. The top/bottom border
+// bands are raster lines like any other and a guest may drive the Border
+// register on every one of them (Demorama runs a LINE INT per line and writes
+// #0FAF from its sound sample — an oscilloscope that covers the bands too), so
+// the tick starts at the first VISIBLE line rather than the first content one
+// and paints those rows as it passes them. gmxBorderFrame's whole-band fill is
+// still the painter for GMX and for every non-per-line case.
+static uint32_t ts_row_idx = 0;
 static bool     ts_fast_armed = false;       // TsDraw armed for this frame (EndFrame)
 // Beam-scheduled palette apply (tsPalettePoll): the fb row the pending CRAM
 // change lands on (-1 = none / "from the top"), and how many applies this
@@ -2185,12 +2193,48 @@ uint32_t VIDEO::tsCramToRgb(uint16_t t) {
            ts_pwm[t & 0x1F];
 }
 
+// ── Graphics lines inside a TEXT (pair-slot) frame ──────────────────────────
+// A per-line VConfig table may put a 256c / 16c / ZX band and a TEXT band on
+// one screen (Demorama). Both CAN share the framebuffer: a pair slot and a
+// palette index are the same 8-bit index into the SAME driver LUT — hdmi.c's
+// conv_color / vga.c's palette_vga16 hold two output pixels per entry either
+// way, and the pair tables simply put two DIFFERENT colours in them (the
+// "DS80 fast path" in both ISRs is a 32-bit copy of the same byte loop, not a
+// second pipeline). What a pair frame cannot offer is more than 16 base
+// colours, because a pair slot is addressed as (4-bit, 4-bit). So a graphics
+// line renders through this map: CRAM index -> the nearest of the frame's 16
+// gpal colours, as that colour's pair DIAGONAL (both halves the same, i.e. one
+// lores pixel doubled — exactly what the standard path does). ZX, 16c and
+// NOGFX lines are EXACT (their pixels are {gpal, n} by construction); a 256c
+// band is exact while it stays inside its own gpal bank and approximated to
+// 16 colours otherwise, which is the honest limit of a 4-bit slot address.
+static uint8_t TS_OVL_BSS s_pairmap[256];
+
 // Fill profi_palette_live[] (the pair-slot driver palette) from the gpal CRAM
 // bank — TEXT mode's 16 colours. Applied by profiPaletteApplyPending (vblank).
 static void tsPairPaletteLoad() {
     const uint8_t gpal = (TsConf::r.palsel & 0x0F) << 4;
     for (int i = 0; i < 16; i++)
         VIDEO::profi_palette_live[i] = VIDEO::tsCramToRgb(TsConf::cram[gpal | i]) & 0x00FFFFFF;
+    // ...and the CRAM -> pair-diagonal map for graphics lines in this frame.
+    // Nearest neighbour in 5-bit RGB, the same rule tsBorderSlotFor uses for
+    // the border. 256 x 16 distances per palette apply, on the cold path.
+    uint16_t bank[16];
+    for (int i = 0; i < 16; i++) bank[i] = TsConf::cram[gpal | i];
+    for (int c = 0; c < 256; c++) {
+        const uint16_t want = TsConf::cram[c];
+        uint8_t best = 0;
+        uint32_t bestd = 0xFFFFFFFFu;
+        for (int i = 0; i < 16; i++) {
+            if (bank[i] == want) { best = (uint8_t)i; break; }
+            const int dr = (int)((bank[i] >> 10) & 31) - (int)((want >> 10) & 31);
+            const int dg = (int)((bank[i] >> 5) & 31) - (int)((want >> 5) & 31);
+            const int db = (int)(bank[i] & 31) - (int)(want & 31);
+            const uint32_t d = (uint32_t)(dr * dr + dg * dg + db * db);
+            if (d < bestd) { bestd = d; best = (uint8_t)i; }
+        }
+        s_pairmap[c] = VIDEO::profi_pair_lookup[best][best];
+    }
 }
 
 // ── 256c: CRAM → hardware palette slots ─────────────────────────────────────
@@ -2267,14 +2311,30 @@ static constexpr uint32_t TS_REINDEX_MIN_BYTES = 2048;
 // everything from the (now complete) VRAM at its own start, in one go, and
 // tsPalettePoll flushes in the blanking after that. Costs one display frame of
 // latency — the demo that needs this updates 12 times a second.
-static uint16_t ts_pal_ncells = 0;             // CRAM cells written since the pending window opened
+static uint16_t ts_pal_ncells = 0;             // CRAM cells written in THIS frame's pending window
 static constexpr uint16_t TS_REINDEX_MIN_CELLS = 32;   // a change this wide is a whole-palette change wherever it lands
+// ...but only when those cells arrived as a BURST. A whole-palette change is
+// written at one raster position — a CRAM DMA is instantaneous, and even a
+// 256-cell FMAddr upload is ~7 T-state lines at ZCLK 14 — while a PER-LINE
+// palette effect writes a cell or two per line for the whole picture and is
+// just as wide. Holding that is catastrophic: the hold throws away every
+// per-line register the rest of the frame would have carried (VPage, GYOffs,
+// PalSel, Border — tsReindexRelease renders all 240 lines from ONE register
+// set), and it halves the update rate. Found on Demorama (TS-Conf, hw
+// 2026-09-17): a LINE INT per line writing one CRAM cell, `chg≈100/frame`,
+// `wide=50 rel=48` per 60 frames — the 3 raster splits and the border
+// oscilloscope were gone and the picture updated every other frame.
+// Density, not span: a palette upload is at least this many cells per row it
+// touches (a CRAM DMA writes all of them on ONE row), a per-line effect one or
+// two. Demorama: 32 cells over 32 rows = 1/row; Kolbass: 256 (DMA) or 72 on one.
+static constexpr uint32_t TS_PAL_BURST_PER_ROW = 4;
+static int32_t  ts_pal_row0 = 0;               // fb row of this frame's first CRAM change
 static bool     ts_reindex_hold = false;       // skip posting lines while set
 static bool     ts_reindex_held_prev = false;  // a release happened this frame: no new hold until EndFrame
 static uint32_t ts_last_curline = 0xFFFFFFFFu; // tsRenderLine's repeat filter (reset by the release)
 static bool     ts_reindex_ready_seen = false;  // tsReindexReady was already up at the previous EndFrame
 #if TSPAL_DBG
-static uint32_t ts_dbg_rel = 0, ts_dbg_rel_dirty = 0, ts_dbg_rel_forced = 0, ts_dbg_hold_blit = 0, ts_dbg_hold_wide = 0;
+static uint32_t ts_dbg_rel = 0, ts_dbg_rel_dirty = 0, ts_dbg_rel_forced = 0, ts_dbg_hold_blit = 0, ts_dbg_hold_wide = 0, ts_dbg_hold_spread = 0;
 #endif
 // Forget any held re-index. On every path that leaves or rebuilds the mode
 // (tsVideoApplyPending's real change, tsVideoForceOff, Reset): a hold that
@@ -2810,9 +2870,24 @@ void VIDEO::tsPaletteRestore() {
 // guest line (tsDrawTick), at EndFrame and from the frame-pacing waits.
 void VIDEO::tsCramChanged() {
     tsCramDirty = true;
-    if (ts_pal_row < 0) ts_pal_ncells = 0;    // a new pending window: count ITS cells (the flush resets too, but a window
-                                              // that never flushed must not make every later single-cell write "wide")
+    // The fb row this change first shows on (the next line to render), computed
+    // up front: the width test below needs the SPREAD of the cells, and the
+    // second and later changes of a frame return early before reaching the
+    // ts_pal_row bookkeeping at the bottom.
+    // ...and a change made in the BOTTOM border band counts as "next frame's
+    // top" exactly as one made after the tick finished: the band rows below it
+    // are the only thing left in this sweep. Before tsBandRow extended the tick
+    // past the content, ts_line_t was already UINT32_MAX there.
+    const bool palTopOfFrame = (!ts_fast_armed || ts_line_t == 0xFFFFFFFFu || ts_row_idx >= lin_end2);
+    const int32_t palRow = palTopOfFrame ? (int32_t)lin_end : (int32_t)(lin_end + ts_line_idx);
+    // Count per FRAME, not per unflushed window: a window that never flushed
+    // must not make every later single-cell write "wide" (its own comment said
+    // so; the `ts_pal_row < 0` test alone did not, because ts_pal_row stays >= 0
+    // across frames until a flush).
+    if (ts_pal_row < 0 || ts_pal_seq != ts_frame_seq) { ts_pal_ncells = 0; ts_pal_row0 = palRow; }
     if (ts_pal_ncells < 0xFFFF) ts_pal_ncells++;
+    const int32_t palSpan = palRow > ts_pal_row0 ? palRow - ts_pal_row0 : 0;
+    const bool palBurst = (uint32_t)palSpan * TS_PAL_BURST_PER_ROW < (uint32_t)ts_pal_ncells;
     // A change this wide is a whole-palette change wherever it lands in the
     // frame; with a single bank it is held and flipped with the picture. The
     // earlier `want == top` test missed Kolbass' static picture, whose palette
@@ -2821,13 +2896,19 @@ void VIDEO::tsCramChanged() {
     // merges=0` in one window, hw 2026-09-17 — 72 cells left on their old
     // colours for a frame, the "full negative" at the scene cut.
     if (ts_pal256_live && ts256_nb == 1 && !tsReindexReady &&
-        (ts_reindex_hint || ts_pal_ncells >= TS_REINDEX_MIN_CELLS)) {
+        (ts_reindex_hint || (ts_pal_ncells >= TS_REINDEX_MIN_CELLS && palBurst))) {
 #if TSPAL_DBG
         if (!ts_reindex_hold) ts_dbg_hold_wide++;
 #endif
         ts_reindex_hint = true;
         ts_reindex_hold = true;
     }
+#if TSPAL_DBG
+    // A wide change REFUSED as a per-line effect: `spread` climbing with hold=0
+    // is this rule working (Demorama); spread=0 with wide>0 is a burst upload.
+    else if (ts_pal256_live && ts256_nb == 1 && ts_pal_ncells == TS_REINDEX_MIN_CELLS && !palBurst)
+        ts_dbg_hold_spread++;
+#endif
     if (ts_pal_row >= 0) {
         // Already pending. A change from an EARLIER frame is superseded: the
         // pixels the renderer will show are the latest ones, so the apply must
@@ -2836,13 +2917,12 @@ void VIDEO::tsCramChanged() {
         if (ts_pal_seq == ts_frame_seq) return;
         ts_pal_row = -1;
     }
-    if (!ts_fast_armed || ts_line_t == 0xFFFFFFFFu) {
+    ts_pal_row = palRow;
+    if (palTopOfFrame) {
         // Before the first / after the last content line: it is the NEXT frame's
         // top that first shows the new colours.
-        ts_pal_row = (int32_t)lin_end;
         ts_pal_seq = (uint8_t)(ts_frame_seq + (ts_fast_armed ? 1 : 0));
     } else {
-        ts_pal_row = (int32_t)(lin_end + ts_line_idx);   // the next line to render
         ts_pal_seq = ts_frame_seq;
     }
     // A WHOLE-FRAME palette change (landed before the first content line) with
@@ -2892,11 +2972,11 @@ static void tsPalDbgPrint() {
                (unsigned long)ts_inv_viol, (unsigned long)ts_inv_dirty, (unsigned long)ts_inv_near, (unsigned long)ts_inv_moved,
                (unsigned long)ts_inv_live, (unsigned)ts256_bs, (unsigned long)ts_inv_checks, (int)ts256_exhausted,
                (unsigned long)ts_inv_merges, (unsigned long)ts_inv_mergemax);
-    Debug::log("[TSPAL] late=%lu rows rendered behind the beam (max %lu rows behind) | hold: blit=%lu wide=%lu rel=%lu relDirty=%lu relForced=%lu ready=%d hold=%d",
-               (unsigned long)ts_late_rows, (unsigned long)ts_late_max, (unsigned long)ts_dbg_hold_blit, (unsigned long)ts_dbg_hold_wide,
+    Debug::log("[TSPAL] late=%lu rows rendered behind the beam (max %lu rows behind) | hold: blit=%lu wide=%lu spread=%lu rel=%lu relDirty=%lu relForced=%lu ready=%d hold=%d",
+               (unsigned long)ts_late_rows, (unsigned long)ts_late_max, (unsigned long)ts_dbg_hold_blit, (unsigned long)ts_dbg_hold_wide, (unsigned long)ts_dbg_hold_spread,
                (unsigned long)ts_dbg_rel, (unsigned long)ts_dbg_rel_dirty, (unsigned long)ts_dbg_rel_forced, (int)VIDEO::tsReindexReady, (int)ts_reindex_hold);
     ts_late_rows = 0; ts_late_max = 0;
-    ts_dbg_hold_blit = ts_dbg_hold_wide = ts_dbg_rel = ts_dbg_rel_dirty = ts_dbg_rel_forced = 0;
+    ts_dbg_hold_blit = ts_dbg_hold_wide = ts_dbg_hold_spread = ts_dbg_rel = ts_dbg_rel_dirty = ts_dbg_rel_forced = 0;
     ts_scan_bad = ts_scan_bad_max = ts_scan_sweeps = 0;
     ts_inv_viol = ts_inv_dirty = ts_inv_near = ts_inv_moved = ts_inv_checks = ts_inv_merges = ts_inv_mergemax = 0;
     ts_pal_dbg.changes = ts_pal_dbg.applies = ts_pal_dbg.p_force = ts_pal_dbg.p_nobeam = ts_pal_dbg.p_norow = ts_pal_dbg.p_bank = 0;
@@ -5701,17 +5781,99 @@ void VIDEO::tsFastMemRecalc() {
     }
 }
 
+// OSD::notify over a TS-Conf mode whose content starts at fb row 0 (RRES
+// 320x240 and 360x288 have NO top band at all): the banner is painted on the
+// first content rows and tsRenderLine skips them, the same carve-out the F8
+// stats rectangle already gets there. Without it the renderer overwrote the
+// banner on every frame and it flickered at frame rate (hw 2026-09-10).
+static int ts_notice_x0 = 0, ts_notice_x1 = 0, ts_notice_y0 = 0, ts_notice_y1 = -1;
+
+// One fb row of the top/bottom border band, painted at the raster line it
+// belongs to so a per-line Border register shows as bands of colour (hardware:
+// the border is just the beam outside the pixel area, one colour per line).
+// The two carve-outs are the same ones tsRenderExec honours: the F8 stats /
+// F9-F10 volume rectangle, which lands INSIDE the bottom band in the short
+// RRES modes, and the OSD::notify banner, which lives in the top band — both
+// are repainted only on their own events, so a band row must leave them alone
+// (before this the banner survived because gmxBorderFrame painted the bands
+// once per frame, BEFORE drawNotify).
+static uint8_t TS_OVL_BSS ts_band_slot[FB_MAX_LINES];   // the slot each band row was painted with
+// ...and whether that record covers the whole raster. Set when the tick walks
+// every row, cleared by the mode/geometry changes that move the bands. NOT
+// cleared by EndFrame's re-arming: the replay runs after it and asks about the
+// frame that just ENDED, and ts_row_idx is already 0 by then.
+static bool TS_OVL_BSS ts_band_valid = false;
+
+static IRAM_ATTR void tsBandPaint(uint32_t row, uint8_t slot) {
+    uint8_t* fb = (uint8_t*)VIDEO::vga.frameBuffer[row];
+    if (!fb) return;
+    const int xres = (int)VIDEO::vga.xres;
+    int cx0 = 0, cx1 = 0;
+    const int cy0 = ((int)VIDEO::vga.yres >= 288) ? 268 : 220;
+    if ((VIDEO::OSD & 0x07) && (int)row >= cy0 && (int)row < cy0 + 16) {
+        cx0 = (xres >= 360) ? 188 : 168; cx1 = cx0 + 24 * 6;
+    } else if ((int)row >= ts_notice_y0 && (int)row < ts_notice_y1) {
+        cx0 = ts_notice_x0; cx1 = ts_notice_x1;
+    }
+    if (cx1 > cx0 && cx1 <= xres) {
+        if (cx0 > 0) memset(fb, slot, (size_t)cx0);
+        memset(fb + cx1, slot, (size_t)(xres - cx1));
+    } else {
+        memset(fb, slot, (size_t)xres);
+    }
+}
+
+IRAM_ATTR void VIDEO::tsBandRow(uint32_t row) {
+    if (!vga.frameBuffer || row >= (uint32_t)vga.yres) return;
+    const uint8_t slot = tsBorderSlot();
+    ts_band_slot[row] = slot;
+    tsBandPaint(row, slot);
+}
+
+// Put the per-line band colours back after gmxBorderFrame flattened them.
+//
+// gmxBorderFrame HAS to keep painting: it owns brdnextframe / gmx_border_dirty
+// and the forced repaints (mode change, menu exit, paused redraw), and an
+// earlier attempt to gate it off for TS-Conf broke the picture (hw 2026-09-17).
+// But its fill is one colour for the whole band, and it runs at EndFrame —
+// TS_VSYNC_LEAD_LINES = 100 display lines = 50 fb rows before blanking, i.e.
+// while the beam is still ABOVE the BOTTOM band of the sweep now running. So
+// the flat fill was the last writer there on every frame, while the top band
+// got away with it because the next frame's tick repaints rows 0..lin_end-1 in
+// the first milliseconds, before the beam wraps to them. Hence the report
+// "top fixed, bottom not". This runs right after it, before drawNotify, and
+// touches nothing but the band pixels.
+//
+// Only when the tick actually walked the whole raster this frame: otherwise
+// ts_band_slot[] is stale (a mode change, a held re-index, a skipped frame) and
+// the flat fill is the right thing to leave standing.
+void VIDEO::tsBandReplay() {
+    if (!vga.frameBuffer || !ts_band_valid) return;
+    for (uint32_t row = 0; row < (uint32_t)vga.yres; row++) {
+        if (row >= lin_end && row < lin_end2) continue;
+        tsBandPaint(row, ts_band_slot[row]);
+    }
+}
+
 IRAM_ATTR void VIDEO::tsDrawTick() {
-    const uint32_t lines = lin_end2 - lin_end;
+    const uint32_t rows = vga.yres;
     TsConf::dmaLineTick();   // a queued DMA whose DMA_ACT has dropped must be complete before the guest goes on
     if (__builtin_expect(tsCramDirty, 0)) tsPalettePoll(false);   // beam-scheduled palette apply, once per line
     do {
-        linedraw_cnt = lin_end + ts_line_idx;   // keep the shared counters coherent
-        curline = ts_line_idx;
-        tsRenderLine(ts_line_idx);
+        const uint32_t row = ts_row_idx;
+        if (row >= lin_end && row < lin_end2) {
+            ts_line_idx = row - lin_end;
+            linedraw_cnt = row;               // keep the shared counters coherent
+            curline = ts_line_idx;
+            tsRenderLine(ts_line_idx);
+            ts_line_idx = row - lin_end + 1;  // "the next line to render" (tsCramChanged reads it)
+        } else {
+            tsBandRow(row);                   // a border band row, at ITS raster line
+        }
         ts_line_t += tStatesPerLine << ESPectrum::multiplicator;   // CPU::tstates are turbo-scaled, the raster constants are not
-        if (++ts_line_idx >= lines) {
+        if (++ts_row_idx >= rows) {
             linedraw_cnt = lin_end2;
+            ts_band_valid = true;             // every band row now carries this frame's colour
             ts_line_t = 0xFFFFFFFFu;          // tsFastTick == Blank from here on
             Draw = &Blank;
             Draw_Opcode = &Blank_Opcode;
@@ -5753,6 +5915,7 @@ void VIDEO::gmxApplyPending() {
         linedraw_cnt = lin_end;
         DrawBorder = &Border_Blank;   // bands are painted frame-granular instead
         gmx_border_dirty = true;
+        ts_band_valid = false;        // the bands moved: gmxBorderFrame's fill stands for one frame
         if (vga.frameBuffer) {
             for (int _y = 0; _y < (int)vga.yres; _y++)
                 if (vga.frameBuffer[_y]) memset(vga.frameBuffer[_y], 0, vga.xres);
@@ -5789,12 +5952,6 @@ int VIDEO::gmxTopBandRows() { return (gmx_ext_live || ts_render_live) ? (int)lin
 // height is lin_end — which can be ZERO, unlike the border machine's 24/48.
 bool VIDEO::bandBorderMode() { return gmx_ext_live || ts_render_live; }
 
-// OSD::notify over a TS-Conf mode whose content starts at fb row 0 (RRES
-// 320x240 and 360x288 have NO top band at all): the banner is painted on the
-// first content rows and tsRenderLine skips them, the same carve-out the F8
-// stats rectangle already gets there. Without it the renderer overwrote the
-// banner on every frame and it flickered at frame rate (hw 2026-09-10).
-static int ts_notice_x0 = 0, ts_notice_x1 = 0, ts_notice_y0 = 0, ts_notice_y1 = -1;
 
 void VIDEO::setNoticeCarve(int x0, int y0, int x1, int y1) {
     ts_notice_x0 = x0; ts_notice_x1 = x1;
@@ -5821,8 +5978,42 @@ static const TsRres TS_RENDER_RO kTsRres[4] = {
 // Cold: runs once per mode change, from EndFrame (vblank).
 void VIDEO::tsVideoApplyPending() {
     const uint8_t vc = TsConf::r.vconf;
-    uint8_t want = (vc & 0x20) ? (uint8_t)TSV_NOGFX : (uint8_t)(vc & 0x03);
     const uint8_t rres = vc >> 6;
+    // ── The frame's mode, out of every mode the frame used ──────────────────
+    // VConfig is latched per LINE on the hardware, so one frame can carry
+    // several modes; tsRenderExec renders each line in its own (see `lvm`
+    // there). What is left frame-wide is what CANNOT be switched per line: the
+    // pair driver (TEXT is hires, 2 px per fb byte, and its conv_color tables
+    // are global), the ts256 remap, and the raster geometry. So pick the mode
+    // that lets the most lines render: any of ZX/16c/256c shares the 8bpp
+    // framebuffer with NOGFX, and TEXT only wins a frame it owns alone.
+    // Sampling the register at EndFrame instead picked whatever the LAST line
+    // wrote — Demorama (256c / NOGFX / TEXT bands, hw 2026-09-17) flipped the
+    // whole screen to NOGFX for a frame roughly once a second (`[TSV] mode 4`
+    // in the log, never `mode 3`), and its TEXT band could never be reached.
+    const uint8_t vmSeen = (uint8_t)(TsConf::vmSeen | (1u << ((vc & 0x20) ? 4 : (vc & 3))));
+    TsConf::vmSeen = 0;
+    // TEXT wins any frame that uses it, because the asymmetry runs that way: a
+    // pair frame can render a graphics line (through s_pairmap, approximated to
+    // the frame's 16 gpal colours), while a graphics frame cannot render a text
+    // line at all — 80 hires columns do not fit 320 lores bytes.
+    uint8_t want;
+    if      (vmSeen & (1u << TSV_TEXT)) want = TSV_TEXT;
+    else if (vmSeen & (1u << TSV_256C)) want = TSV_256C;
+    else if (vmSeen & (1u << TSV_16C))  want = TSV_16C;
+    else if (vmSeen & (1u << TSV_ZX))   want = TSV_ZX;
+    else                                want = TSV_NOGFX;
+    // A frame that is ZX everywhere keeps the beam-raced renderer; one that
+    // mixes ZX with anything else needs the whole-line one.
+    const bool vmMixed = (vmSeen & ~(uint8_t)(1u << TSV_ZX)) != 0;
+#if TS_VIDEO_TRACE
+    // The `[TSV] mode` line below prints `seen` too, but only on a real mode
+    // CHANGE — a frame mix that is stable prints once and a capture taken later
+    // cannot answer "was TEXT seen at all". This one fires on the mix itself.
+    { static uint8_t s_vm_last = 0xFF;
+      if (vmSeen != s_vm_last) { s_vm_last = vmSeen;
+          Debug::log("[TSV] VM seen %02X -> want %u (live %u, rres %u)", vmSeen, want, ts_vmode_live, rres); } }
+#endif
     // TSU layers: any of S_EN/T1_EN/T0_EN (TSConfig b7..b5) and not NOTSU
     // (VConfig b4). Text mode is hires and pair-slot — no TSU over it.
     // Hysteresis: layers enabled at ANY point of the frame count (TsConf::tsuSeen,
@@ -5832,8 +6023,8 @@ void VIDEO::tsVideoApplyPending() {
     const uint8_t seen = (uint8_t)(TsConf::r.tsconf | TsConf::tsuSeen);
     TsConf::tsuSeen = 0;
     const bool wantTsu = (seen & 0xE0) != 0 && !(vc & 0x10) && want != TSV_TEXT;
-    const uint8_t wantRender = (want != TSV_ZX || wantTsu) ? 1 : 0;
-    if (want == ts_vmode_live && wantTsu == ts_tsu_live &&
+    const uint8_t wantRender = (want != TSV_ZX || wantTsu || vmMixed) ? 1 : 0;
+    if (want == ts_vmode_live && wantTsu == ts_tsu_live && wantRender == ts_render_live &&
         (!wantRender || rres == ts_rres_live)) return;
 
     // Only a REAL mode change needs the queue empty (the geometry, the driver
@@ -5948,8 +6139,8 @@ void VIDEO::tsVideoApplyPending() {
     }
     tstateDraw   = tStatesScreen;
     linedraw_cnt = lin_end;
-    Debug::log("[TSV] mode %u rres %u tsu=%d: lin_end=%u..%u crop=%u tsScreen=%d pair=%d pal256=%d",
-               want, rres, (int)wantTsu, lin_end, lin_end2, ts_crop_top, tStatesScreen,
+    Debug::log("[TSV] mode %u (seen %02X) rres %u tsu=%d: lin_end=%u..%u crop=%u tsScreen=%d pair=%d pal256=%d",
+               want, vmSeen, rres, (int)wantTsu, lin_end, lin_end2, ts_crop_top, tStatesScreen,
                (int)wantPair, (int)wantPal256);
 }
 
@@ -6208,7 +6399,7 @@ static uint8_t  TS_OVL_BSS s_tsline[512];
 // What the GFXOVR path needs from tsRenderExec's prologue.
 struct TsLineCtx {
     uint8_t* fb_row; int x0, w, xa, xb, cx0, cx1, xres; bool carveRow;
-    const uint8_t* map; uint8_t border_idx, gpal; bool nogfx; uint32_t curline, ygctr;
+    const uint8_t* map; uint8_t border_idx, gpal, lvm; bool nogfx; uint32_t curline, ygctr;
 };
 
 // ── GFXOVR path (VConfig b3: gfx pixels with pixv=1 win over the TSU) — the base
@@ -6220,14 +6411,14 @@ void VIDEO::tsRenderExecOvr(const TsRenderJob& j, const TsuState* st, const uint
     const int x0 = c.x0, w = c.w, xa = c.xa, xb = c.xb, cx0 = c.cx0, cx1 = c.cx1;
     const bool carveRow = c.carveRow;
     const uint8_t* map = c.map;
-    const uint8_t border_idx = c.border_idx, gpal = c.gpal;
+    const uint8_t border_idx = c.border_idx, gpal = c.gpal, lvm = c.lvm;
     const bool nogfx = c.nogfx, gfxovr = true;
     const uint32_t curline = c.curline, ygctr = c.ygctr;
     (void)c.xres;
     const uint32_t t0b = tsRenderUs();
     if (nogfx) {
         for (int x = 0; x < w; x++) s_gline[x] = border_idx;
-    } else if (ts_vmode_live == TSV_ZX) {
+    } else if (lvm == TSV_ZX) {
         // addr_zx: gfx {row[7:6], row[2:0], row[5:3], col}, attr {110, row[7:3],
         // col}, 32 columns wrapping (cnt_col[4:1]) across a wider area; colour
         // {palsel, attr[6], dot ? attr[2:0] : attr[5:3]}, FLASH swaps.
@@ -6245,7 +6436,7 @@ void VIDEO::tsRenderExecOvr(const TsRenderJob& j, const TsuState* st, const uint
             const uint8_t c = (uint8_t)(gpal | (a & 0x40) >> 3 | (dot ? (a & 7) : ((a >> 3) & 7)));
             s_gline[x] = (uint16_t)c | (dot ? 0x100 : 0);
         }
-    } else if (ts_vmode_live == TSV_16C) {
+    } else if (lvm == TSV_16C) {
         // addr_16c {vpage[7:3], row[8:0], col[6:0]}: 512x512 4 bpp, 256 B/line
         // over 8 pages (64 lines each), window at GXOffs wrapping at 512, high
         // nibble = left pixel; colour {palsel, nibble}.
@@ -6398,7 +6589,27 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
     if (x0 > 0) fillPad(0, x0);
     if (x1 < xres) fillPad(x1, xres);
 
-    if (ts_vmode_live == TSV_TEXT) {
+    // ── This LINE's video mode (video_mode.v latches VConfig per line) ──────
+    // ZX / 16c / 256c / NOGFX all paint the same 8bpp framebuffer, so a line
+    // may use any of them whatever the frame mode is — Demorama's per-line
+    // table walks 256c -> NOGFX -> 256c -> TEXT -> 256c down one screen (hw
+    // 2026-09-17). TEXT cannot join them: it is hires, two pixels per fb byte,
+    // and the driver's pair tables are global — so it renders only in a frame
+    // that is TEXT throughout (tsVideoApplyPending picks that), and the odd
+    // line out either way is painted with the border, which is at least a
+    // consistent picture rather than one mode's bytes read as another's.
+    uint8_t lvm = (j.l.vconf & 0x20) ? (uint8_t)TSV_NOGFX : (uint8_t)(j.l.vconf & 0x03);
+    const bool framePair = (ts_vmode_live == TSV_TEXT);
+    // TEXT needs the pair driver, which is a per-FRAME choice; the other way
+    // round a graphics line renders in a pair frame through s_pairmap.
+    if (lvm == TSV_TEXT && !framePair) lvm = TSV_NOGFX;
+    // A NOGFX line is border end to end, in either kind of frame — `brd` is
+    // already the right byte for both (tsBorderSlotFor). Not with the TSU up:
+    // video_render.v keeps tiles and sprites visible OVER the border there, so
+    // that case still needs the compose path below (nogfx).
+    if (lvm == TSV_NOGFX && !ts_tsu_live) { fillPad(x0, x1); return; }
+
+    if (lvm == TSV_TEXT) {
         // draw_tstx / addr_tx: 256-byte text rows (chars at +0, attrs at +0x80,
         // 128 columns max), font = page vpage^1 (8 bytes/char), row = ygctr>>3
         // (64 rows per page), char line = ygctr&7; paper = gpal|atr>>4, ink =
@@ -6433,17 +6644,24 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
     // Fast paths: 256c / 16c with no TSU layers and no stats carve on this row —
     // the RAM loops above; everything else (ZX base, TSU compose, GFXOVR, carve
     // rows) takes the generic path below.
-    if (!ts_tsu_live && !carveRow && (ts_vmode_live == TSV_256C || ts_vmode_live == TSV_16C)) {
+    // Output map: fb byte = palette slot. ts256 remap while it is live, the
+    // CRAM -> pair-diagonal map in a TEXT frame (both index the same driver
+    // LUT), else the raw low nibble.
+    const uint8_t* const outmap = ts_pal256_live ? ts256_map_b[bank]
+                                : framePair      ? s_pairmap : nullptr;
+    if (!ts_tsu_live && !carveRow && (lvm == TSV_256C || lvm == TSV_16C)) {
         const int fx0 = x0 < 0 ? 0 : x0, fx1 = x1 > xres ? x1 : xres > x1 ? x1 : xres;
         const uint32_t sx = (uint32_t)j.l.g_xoffs + (uint32_t)(fx0 - x0);
-        if (ts_vmode_live == TSV_256C) {
+        if (lvm == TSV_256C) {
             const uint8_t* ln = TsConf::pagePtr((j.l.vpage & 0xF0) + (ygctr >> 5));
-            if (ln) { tsFast256(fb_row, fx0, fx1, ln + ((ygctr & 31) << 9), sx, ts256_map_b[bank]); return; }
+            // 256c needs a map: with none (a pair frame has s_pairmap, pal256 has
+            // its bank) the byte IS the slot, which only the standard path means.
+            if (ln && outmap) { tsFast256(fb_row, fx0, fx1, ln + ((ygctr & 31) << 9), sx, outmap); return; }
         } else {
             const uint8_t* ln = TsConf::pagePtr((j.l.vpage & 0xF8) + (ygctr >> 6));
             if (ln) {
                 tsFast16(fb_row, fx0, fx1, ln + ((ygctr & 63) << 8), sx,
-                         ts_pal256_live ? ts256_map_b[bank] : nullptr, (uint8_t)((j.l.palsel & 0x0F) << 4));
+                         outmap, (uint8_t)((j.l.palsel & 0x0F) << 4));
                 return;
             }
         }
@@ -6459,7 +6677,7 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
     const int w = (int)g.w;
     const uint8_t gpal = (uint8_t)((j.l.palsel & 0x0F) << 4);
     const uint8_t border_idx = j.l.border;
-    const bool nogfx = (ts_vmode_live == TSV_NOGFX);
+    const bool nogfx = (lvm == TSV_NOGFX);
     const bool gfxovr = j.l.vconf & 0x08;
 
     // Output map (fb byte = palette slot; ts256 remap while it is live).
@@ -6468,7 +6686,7 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
     static uint8_t TS_OVL_BSS s_nibmap[256];
     static bool    TS_OVL_BSS s_nibmap_ok = false;
     if (!s_nibmap_ok) { for (int i = 0; i < 256; i++) s_nibmap[i] = (uint8_t)(i & 0x0F); s_nibmap_ok = true; }
-    const uint8_t* map = ts_pal256_live ? ts256_map_b[bank] : s_nibmap;
+    const uint8_t* map = outmap ? outmap : s_nibmap;
     const int xa = x0 < 0 ? -x0 : 0;
     const int xb = (x0 + w > xres) ? xres - x0 : w;
 
@@ -6484,7 +6702,7 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
         uint8_t* bl = s_tsline;
         if (nogfx) {
             memset(bl, border_idx, (size_t)w);
-        } else if (ts_vmode_live == TSV_ZX) {
+        } else if (lvm == TSV_ZX) {
             const uint8_t* scr = TsConf::pagePtr(j.l.vpage);
             const uint32_t row = ygctr & 0xFF;
             const uint32_t goff = ((row & 0xC0) << 5) | ((row & 7) << 8) | ((row & 0x38) << 2);
@@ -6514,7 +6732,7 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
                     bl[x] = (uint8_t)(gpal | (a & 0x40) >> 3 | (dot ? (a & 7) : ((a >> 3) & 7)));
                 }
             }
-        } else if (ts_vmode_live == TSV_16C) {
+        } else if (lvm == TSV_16C) {
             const uint8_t* ln = TsConf::pagePtr((j.l.vpage & 0xF8) + (ygctr >> 6));
             if (!ln) memset(bl, border_idx, (size_t)w);
             else {
@@ -6578,7 +6796,7 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
         return;
     }
 
-    tsRenderExecOvr(j, st, sfile, seq, TsLineCtx{ fb_row, x0, w, xa, xb, cx0, cx1, xres, carveRow, map, border_idx, gpal, nogfx, curline, ygctr });
+    tsRenderExecOvr(j, st, sfile, seq, TsLineCtx{ fb_row, x0, w, xa, xb, cx0, cx1, xres, carveRow, map, border_idx, gpal, lvm, nogfx, curline, ygctr });
 }
 #undef fillPad
 
@@ -7297,8 +7515,13 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
         // and an unscaled clock rendered the whole picture in the first quarter of
         // the frame — invisible while every frame was flushed at the HALT, torn
         // pictures once lines rendered at their own time (Ninja Gaiden, hw 2026-09-07).
-        ts_line_t = tStatesScreen << ESPectrum::multiplicator;
+        // Start at the first VISIBLE line, which is lin_end rows above the first
+        // content one: the border bands are rendered row by row too (tsBandRow).
+        int t0 = tStatesScreen - (int)lin_end * (int)tStatesPerLine;
+        if (t0 < 0) t0 = 0;
+        ts_line_t = (uint32_t)t0 << ESPectrum::multiplicator;
         ts_line_idx = 0;
+        ts_row_idx = 0;
         // A held re-index: VRAM is complete now (the blit ran inside this frame),
         // but the picture is NOT released here — the guest frame boundary has no
         // fixed relation to the display beam once V-Sync pacing is off (hw
@@ -7350,6 +7573,7 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
         // stays parked (its writers would put raw ZX indices into a pair-slot
         // framebuffer) — cold flash body in gmxBorderFrame, cheap check here.
         gmxBorderFrame(skipFrame);
+        if (ts_render_live) tsBandReplay();   // ...and put the per-line band colours back
         brdGigascreenChange = false;
         DrawBorder = &Border_Blank;
         lastBrdTstate = tStatesBorder;

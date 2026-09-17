@@ -226,6 +226,8 @@ public:
   static void TsDraw(unsigned int statestoadd, bool contended);
   static void TsDraw_Opcode(bool contended);
   static void tsDrawTick();
+  static void tsBandRow(uint32_t row);   // one border-band fb row, at its own raster line
+  static void tsBandReplay();            // ...and restore them after gmxBorderFrame's flat fill
   static uint32_t ts_line_t;        // T-state of the next line render; UINT32_MAX = no more lines (Blank)
   static void tsFastMemRecalc();    // recompute g_ts_fastmem (TsFastMem.h)
   static void Blank_Opcode(bool contended);

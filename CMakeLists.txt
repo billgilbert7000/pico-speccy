@@ -609,10 +609,12 @@ if (TSOVL_WIN_SIZE STREQUAL "AUTO")
         math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 3072")
     endif()
     # TS-Conf-only DATA rides in the window too (.tsovl_data loaded, .tsovl_bss
-    # NOLOAD): the ts256 palette-bank tables, the DRAM-cache rows/tags and the
-    # TSU line buffers — 7016 B measured 2026-09-14 (`arm-none-eabi-size -A
-    # <elf> | grep tsovl`), 8 KB here for headroom.
-    math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 8192")
+    # NOLOAD): the ts256 palette-bank tables, the DRAM-cache rows/tags, the TSU
+    # line buffers and s_pairmap — 7264 B measured 2026-09-17 (`arm-none-eabi-size
+    # -A <elf> | grep tsovl`; the whole window was 22 352 B against a 22 272 B
+    # AUTO, i.e. it overflowed by 80 — the ASSERT in rp2350-memmap.ld is what
+    # catches this, and the term below is the one to raise).
+    math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 9216")
     set(TSOVL_WIN_SIZE_EFFECTIVE ${_TSOVL_BYTES})
 else()
     set(TSOVL_WIN_SIZE_EFFECTIVE ${TSOVL_WIN_SIZE})

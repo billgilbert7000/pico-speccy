@@ -117,6 +117,12 @@ public:
     static void     wrGateRecalc();                          // recompute g_tsconf_wr / g_ts_bank_watch
     static uint32_t sfileGen;    // bumped on every SFILE write (core1 render snapshots, Video.cpp)
     static uint8_t  tsuSeen;     // TSConfig layer bits seen set since the last EndFrame (mode hysteresis)
+    // VConfig video modes seen during the frame, as 1 << (NOGFX ? 4 : VM):
+    // video_mode.v latches VConfig per LINE, so a frame can carry several —
+    // Demorama drives a 320-entry per-line table (256c / NOGFX / TEXT bands).
+    // Sampling the register once at EndFrame picked whichever band happened to
+    // own the last line; the frame mode is derived from this instead.
+    static uint8_t  vmSeen;
 
     // Machine reset (tsinit() values). Cold=true additionally raises pwr_up.
     static void reset(bool cold);

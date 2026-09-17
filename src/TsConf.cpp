@@ -59,6 +59,7 @@ static uint32_t s_vtrace_frame = 0;
 // and the EndFrame-sampled mode must not follow that window (a whole frame
 // without tiles otherwise — hw 2026-09-07). Consumed by VIDEO::tsVideoApplyPending.
 uint8_t TsConf::tsuSeen = 0;
+uint8_t TsConf::vmSeen = 0;
 
 // TSCONF_HOT_IN_RAM decides whether this code is SRAM-resident at all;
 // TSCONF_CODE_OVERLAY (CodeOverlay.h) decides WHERE that SRAM is — a fixed-VMA
@@ -654,7 +655,7 @@ TS_HOT void TsConf::portWrite(uint8_t reg, uint8_t val) {
 
         // -- video (stored; committed immediately until the phase-3
         //    rasterizer takes over the *_d line latch) --
-        case TSW_VCONF:  TSVT("VCONF=%02X", val); r.vconf  = r.vconf_d  = val; tsUpdateWrGate(); break;
+        case TSW_VCONF:  TSVT("VCONF=%02X", val); r.vconf  = r.vconf_d  = val; vmSeen |= (uint8_t)(1u << ((val & 0x20) ? 4 : (val & 3))); tsUpdateWrGate(); break;
         case TSW_VPAGE:
             TSVT("VPAGE=%02X", val);
             // The native way a TS program flips screens (the #7FFD SCR bit is the
@@ -1545,6 +1546,7 @@ void TsConf::reset(bool cold) {
     }
     s_fm_tmp = 0;
     tsuSeen = 0;
+    vmSeen = 0;
 #if TS_VIDEO_TRACE
     s_vtrace_left = 4000;  // re-arm per machine reset (an .spg load resets first); 400 went blind after ~8 s of INT acks
 #endif
