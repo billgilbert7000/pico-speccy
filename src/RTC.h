@@ -58,6 +58,12 @@ public:
     static bool    tsBiosSeed();   // TS-Conf: write TS-BIOS's own NVRAM defaults + CRC16 if the
                                    // cells would fail its CRC check; true = seeded
     static void    flushNVRAM(bool force = false); // force: skip the debounce (reboot path)
+    // One raw NVRAM cell. For TS-Conf this is how TS-BIOS's Setup is READ back:
+    // its 56-byte config block lives at #B0.. (see tsBiosSeed), and TsConf::bootRom
+    // applies the same cells the BIOS's own RESET does. Valid by construction on
+    // TS-Conf — tsBiosSeed() runs at the end of every TsConf::reset and leaves the
+    // block either the user's (CRC-checked) or TS-BIOS's own defaults.
+    static uint8_t nvByte(uint8_t cell) { return regs[cell]; }
 
 private:
     static uint8_t regs[256];     // control + NVRAM live; time regs computed on read

@@ -2190,7 +2190,8 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
                 } else if (Z80Ops::isP3) {
                     reset_menu = MENU_RESETTO_P3;
                 } else if (Z80Ops::isTsconf) {
-                    reset_menu = MENU_RESETTO_TSCONF;
+                    reset_menu = (Config::romSet == R_TSCONF_GLUK) ? MENU_RESETTO_TSGLUK
+                                                                   : MENU_RESETTO_TSCONF;
                 } else if ((Z80Ops::isPentagon || Z80Ops::isProfi)) {
                     if (Config::romSet == R_PENT_GLUK)
                         reset_menu = MENU_RESETTO_PENTGLUK;
@@ -2207,15 +2208,45 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
                     Config::last_ram_file = NO_RAM_FILE;
 
                     if (Z80Ops::isTsconf) {
-                        // TS-BIOS Setup=1, CS boot=2, Default=3. TS-BIOS reads the
-                        // keys at START (`IN (#7FFE)` bit 1 = Symbol Shift -> SETUP,
-                        // `IN (#FEFE)` bit 0 = Caps Shift -> the alternate boot
-                        // target), so hold the ZX key through the reset for it —
-                        // physically impossible from here because Ctrl+F11 IS this
-                        // dialog's hotkey.
-                        if (opt == 1)      ESPectrum::tsBootKeyArm(fabgl::VK_LCTRL);   // Symbol Shift
-                        else if (opt == 2) ESPectrum::tsBootKeyArm(fabgl::VK_LSHIFT);  // Caps Shift
-                        ESPectrum::reset();
+                        // Setup=1 is the only entry that runs the BIOS: TS-BIOS
+                        // samples Symbol Shift at START (`IN (#7FFE)` bit 1) and
+                        // holding the ZX key physically is impossible from here,
+                        // because Ctrl+F11 IS this dialog's hotkey — tsBootKeyArm
+                        // presses it for the frames it takes.
+                        //
+                        // The rest cold-boot one page of the BIOS set's ROM window
+                        // directly (TsConf::bootRom), the same way the Pentagon and
+                        // Scorpion entries pick a bank. The BIOS's own alternate
+                        // target (Caps Shift, "boot.$c from SD") is gone: it just
+                        // ended in a black screen here, and asking the BIOS for a
+                        // boot target it cannot reach is not something a menu row
+                        // can fix.
+                        if (opt <= 2) {
+                            // The two entries that run the BIOS, by holding the key
+                            // it samples at START: Symbol Shift (`IN (#7FFE)` b1) for
+                            // the Setup, Caps Shift (`IN (#FEFE)` b0) for its
+                            // alternate boot target. Holding either physically is
+                            // impossible from here, because Ctrl+F11 IS this dialog's
+                            // hotkey — tsBootKeyArm presses it for the frames it takes.
+                            ESPectrum::tsBootKeyArm(opt == 1 ? fabgl::VK_LCTRL
+                                                             : fabgl::VK_LSHIFT);
+                            ESPectrum::reset();
+                        } else {
+                            ESPectrum::reset();
+                            // Page 3 (48 BASIC) boots locked, like the 128 menu's
+                            // own "48 BASIC" pick (OUT #7FFD,#30).
+                            if (Config::romSet == R_TSCONF_GLUK) {
+                                // Mr Gluk=3, TR-DOS=4, 48K=5
+                                if (opt == 3)      TsConf::bootRom(2, false);
+                                else if (opt == 4) TsConf::bootRom(1, false);
+                                else if (opt == 5) TsConf::bootRom(3, true);
+                            } else {
+                                // TR-DOS=3, 128K=4, 48K=5
+                                if (opt == 3)      TsConf::bootRom(1, false);
+                                else if (opt == 4) TsConf::bootRom(2, false);
+                                else if (opt == 5) TsConf::bootRom(3, true);
+                            }
+                        }
                     } else
                     if (Config::arch == A_PROFI) {
                         // Service ROM=1, TR-DOS=2, 128K=3, 48K=4

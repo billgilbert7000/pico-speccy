@@ -1657,11 +1657,13 @@ void ESPectrum::reset(uint8_t romInUse) {
                (int)MEM_PG_CNT, (unsigned)(esp_timer_get_time() - _t0));
   }
   Ports::serialMouseReset();
-  // Profi SYSEN: boot into SYS ROM (bank0) with trdos=true to protect page0
-  // TS-Conf boots in RM_SYS: DOS signal set + ROM128=0 selects the Service
-  // ROM (TS-BIOS) in the mapped window 0 — reference memory.cpp:512.
-  ESPectrum::trdos = (Config::arch == A_PROFI && romInUse == 0) ||
-                     (Config::arch == A_TSCONF);
+  // Profi SYSEN: boot into SYS ROM (bank0) with trdos=true to protect page0.
+  // TS-Conf is deliberately NOT in this list: the ZX-Evo comes out of reset with
+  // `dos_r = 0` (zmem.v) and MEMCONFIG = 0x04, i.e. window 0 shows ROM page[0]
+  // LINEARLY, so TS-BIOS needs no DOS signal to be mapped. Forcing one here (as
+  // this did until 2026-09-17) put the machine in the mapped Service-ROM state
+  // instead, which looks identical until the BIOS runs code from RAM.
+  ESPectrum::trdos = (Config::arch == A_PROFI && romInUse == 0);
 
   Debug::log("[reset] arch=%s romInUse=%d trdos=%d", archToStr(Config::arch), romInUse, (int)ESPectrum::trdos);
 #if FDD_PORT_TRACE

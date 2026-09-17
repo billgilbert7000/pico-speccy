@@ -1821,9 +1821,12 @@ ZCLK turbo, ZX video with CRAM colours, TR-DOS/Beta-128, Z-Controller SD.
   top-border toast (`OSD::notify " CPU: 14 MHz "`); Alt+F2 / Menu+F11 are an
   override that lasts until the next SysConfig write and no longer re-apply ZCLK.
   It was "user pick is a floor" before. `tsconf_clk_cap` NVS caps 14 MHz on boards
-  that cannot keep it). Reset = `tsinit()` values; **`MemConfig` reset is 0 (mapped
-  mode)** — the datasheet's `!W0_MAP=1` table row is wrong, Unreal's code is
-  right. Boot in RM_SYS: `ESPectrum::trdos = true` at reset → Service ROM.
+  that cannot keep it). Reset = `tsinit()` values; **`MemConfig` reset is `0x04`,
+  i.e. W0_MAP_N — window 0 is LINEAR and shows ROM `page[0]` = 0 (TS-BIOS), and
+  the DOS signal comes out of reset CLEAR** (`z80/zports.v`: `memconf <= 8'h04;
+  // no map`, `z80/zmem.v`: `dos_r <= 1'b0`). The datasheet's `!W0_MAP=1` table
+  row was RIGHT and this file claimed the opposite until 2026-09-17 — see the
+  "Alt+F11" section below for the bug that cost.
   ROM: two BIOS sets, one byte patched (2026-09-07: the Setup footer reads
   "F11 - exit" instead of "F12 - exit", since F11 is our machine reset and F12
   reboots the RP2350), read via `TsConf::romPtr()` — **no `MemESP::rom[]` slots
@@ -2502,6 +2505,90 @@ of `aligned(4096)` padding. Free heads: DVp2 82.7 KB, z0p2 79.1, z0p2-PIOUSB 64.
   #028B and P1024 D4); bright/far-CRAM border cells approximate. Open hw
   question: does TS-BIOS Setup (SS+F12) need the ZX-Evo AVR (`slavespi`)
   keyboard path? Plain #FE should cover boot + TR-DOS.
+
+### Alt+F11 on TS-Conf: the boot paging mode was WRONG, and only the SD boot noticed (hw-confirmed 2026-09-17)
+
+The dialog used to offer the two keys TS-BIOS samples at START — Symbol Shift ->
+Setup, Caps Shift -> its alternate boot target — plus a third "Default (BIOS)" row
+that was a plain reset. **"Boot from SD (boot.$c)" gave a black screen** (owner),
+and chasing that found a defect in the boot paging model that had been there since
+Phase 1. The menu now reads (two variants, because the page a LABEL means differs
+between the BIOS sets — `MENU_RESETTO_PENT` / `PENTGLUK` all over again):
+
+| set | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| `R_TSCONF` | TS-BIOS Setup | Boot from SD | TR-DOS (page 1) | 128K (page 2) | 48K (page 3) |
+| `R_TSCONF_GLUK` | TS-BIOS Setup | Boot from SD | Mr Gluk (page 2) | TR-DOS (page 1) | 48K (page 3) |
+
+- **The bug: we booted in MAPPED mode with a forced DOS signal, where the hardware
+  boots LINEAR with no DOS signal at all.** Both put ROM page 0 in window 0, which
+  is why every other path worked and why this survived so long. They diverge the
+  instant TS-BIOS runs code from RAM: `dos_off` (any opcode fetch outside window 0
+  — `zmem.v`, and our `trdosTrap`) cleared the signal, and mapped mode then
+  re-derived window 0 as `{~dos, rom128}` = **page 2, the 128 ROM**. TS-BIOS
+  relocates `RESET2` to `res_buf` = **0x5000** and runs it there, so from that
+  moment on the BIOS ROM was gone from under it. Nothing noticed, because every
+  boot target ends `wrxta MEMCONFIG` + `jp 0` and never calls back into the ROM —
+  **except `RES_BT_BD`, whose `call start` enters the ROM-resident booter** (SD/FAT
+  driver). That call executed the 128 ROM instead: black screen, no error box.
+  Fixes, all three from the RTL: `memconf` resets to `0x04` (linear), TS-Conf is
+  out of `ESPectrum::reset`'s forced-`trdos` list, and `dos_on` gained the
+  `!w0_map_n()` term it always had in `zmem.v` (**in linear mode the #3Dxx trap
+  does not exist** — which is also what keeps a `call` into the BIOS from tripping
+  it). `dos_off` lost the `|| w0_ram()` term the RTL does not have.
+- **`TsConf::bootRom(page, lock48)` is a mini-RESET2**, and it has to be, because
+  in mapped mode window 0 is not addressed by a page number: it is DERIVED from the
+  DOS signal and #7FFD D4 (Service / TR-DOS / 128 / 48), so "boot page N" means
+  switching to mapped mode and asserting that pair — one MEMCONFIG write, exactly
+  as `RES_TRD` / `RES_48` / `RES_128` do. It then applies the same NVRAM cells the
+  BIOS's own reset does (`RTC::nvByte`, valid by construction since `tsBiosSeed()`
+  runs at the end of every `TsConf::reset`): #B8 span into LCK128, #B1/#B3 clock +
+  cache into SysConfig/CacheConfig, #B0 FDDVirt, #BC INT offset into HSINT, #B9 the
+  ZX palette. Not done, on purpose: `CLS_ZX` (all three ROMs clear their own
+  screen) and the NGS/FT8xx resets.
+- **The palette is half of why bootRom exists** (second report the same day: "reset
+  into the BIOS, then straight into 128K — the palette does not switch, the colours
+  are dim"). The BIOS `call LD_PAL`s on every start; CRAM survives a warm reset by
+  design, and **the Setup loads `pal_bb`** ("bright black" = Default with cell 8
+  moved from 0x0000 to 0x2108, so its own boxes get a shadow). A direct page boot
+  therefore inherited it: the 128 menu's title band, which is BRIGHT BLACK paper,
+  came up grey. Diagnosed in one step from the screenshot's own numbers — slot 8 =
+  (92,92,92) = `ts_pwm[8]` while every other slot was Default — which is the
+  argument for `tools/screenshot.gdb` dumping the REAL HDMI palette. All seven
+  Setup palettes are in `kBiosZxPal` + the custom one out of NVRAM #C6..#E5.
+  (`kZxCram555` is now `kBiosZxPal[0]`, and it IS `pal_puls` byte for byte.)
+- **#7FFD D4 and MEMCONFIG bit 0 are ONE latch** and both directions are now kept
+  (`zports.v` `memconf[0] <= din[4]` on a #7FFD write; the TSW_MEMCONF handler
+  already copied it back). Read-back only, but TS-BIOS's own idiom is to build a
+  MEMCONFIG value out of what it reads there.
+- The NVRAM layout is pinned by the SHIPPED image, not by master's source: 13
+  named cells #B0..#BC, **9** dummy bytes, custom palette #C6..#E5, checksum
+  #E6/#E7 (master's `nv_buf` says `defs 10`, which would move the last two — the
+  memory dump's `nv[E6]/nv[E7]` and the greyscale ramp at #C6 settle it).
+- **Hw 2026-09-17, owner: "работает", and "Boot from SD (boot.$c) — грузится"** —
+  so the row that started all this is confirmed for what it is: TS-BIOS reaches
+  its ROM-resident booter, the ZC SD driver and the FAT32 walk answer, and the
+  card's `boot.$C` runs. That is also the direct proof of the linear-mode fix,
+  since that `call start` is the one path the old model broke. The rest of the
+  verdict is NOT itemised, so read it as "the machine boots and the new entries do
+  what they say". The reset
+  state itself moved, so the things that verdict does not separately establish are
+  worth a second look if anything odd turns up: a **.spg** launch (`FileSPG::load`
+  writes `memconf = 0` itself, so it is covered by inspection), TR-DOS entered the
+  hardware way (a guest jumping to #3Dxx after the BIOS handed over — the
+  `!w0_map_n()` term is new), and the Setup's non-default ZX palettes / a Setup
+  whose "CS Boot from" is not boot.$c. For the record the booter also needs an
+  **MBR with a FAT32 partition** (type 0x05/0x0B/0x0C/0x0F — it scans the table at
+  446+4 itself), which the owner's card evidently has.
+- If SD boot still fails, the next capture is `-DZC_PORT_TRACE=ON` (CS edges +
+  command frames) plus a Ctrl+Alt+D at the black screen: `start`'s error paths all
+  end in a TEXT-mode box (`BT_ERROR` -> `TX_MODE`, and codes 2/3 then `jr nz,$`),
+  so a BLACK screen means a hang BEFORE that — the SD read loops (`jr nz,$` after
+  `cmd18`, `cp 0xFE / jr nz,$-5` after `wtdo`) are unbounded, everything else in
+  `sd_init` is not. Sources: `pentevo/rom/src/{ts-bios,booter,tsconfig}.asm`
+  (CP866 + CRLF, `grep -a`); the ZC protocol is plain SPI SD on #77 (cfg, bit1 =
+  CS for SD1) / #57 (data), SDv2 + CMD58 CCS -> sector addressing, sector reads via
+  CMD18 + CMD12.
 
 ### TS-Conf palette changes are applied on the display BEAM, not at EndFrame (2026-09-13, NOT hw-tested)
 

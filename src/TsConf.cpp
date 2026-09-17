@@ -417,6 +417,97 @@ void TsConf::setBanks() {
     refreshGrmem();
 }
 
+// TS-BIOS's seven ZX-palette options, RGB555, lifted from `ts-bios.asm`
+// (pal_puls .. pal_gsc; the 8th, "Custom", lives in NVRAM). Entry 0 —
+// `pal_puls`, "Default" in the Setup — is the standard ZX palette: non-BRIGHT
+// channels are 5-bit 16, BRIGHT ones 24. It is what a cold reset seeds into the
+// CRAM ZX bank, and `LD_PAL` is what the BIOS re-loads on EVERY start; bootRom()
+// does the same, from the same cell (#B9), because skipping the BIOS means
+// skipping that. (FileSPG::load keeps its own copy of entry 0 — load_spec_colors.)
+static const uint16_t kBiosZxPal[7][16] = {
+    { 0x0000, 0x0010, 0x4000, 0x4010, 0x0200, 0x0210, 0x4200, 0x4210,     // Default
+      0x0000, 0x0018, 0x6000, 0x6018, 0x0300, 0x0318, 0x6300, 0x6318 },  //  (pulsar)
+    { 0x0000, 0x0010, 0x4000, 0x4010, 0x0200, 0x0210, 0x4200, 0x4210,     // Bright black
+      0x2108, 0x0018, 0x6000, 0x6018, 0x0300, 0x0318, 0x6300, 0x6318 },
+    { 0x0000, 0x0014, 0x5000, 0x5014, 0x0280, 0x0294, 0x5280, 0x5294,     // Light
+      0x0000, 0x0018, 0x6000, 0x6018, 0x0300, 0x0318, 0x6300, 0x6318 },
+    { 0x2108, 0x2110, 0x4108, 0x4110, 0x2208, 0x2210, 0x4208, 0x4210,     // Pale
+      0x2108, 0x2118, 0x6108, 0x6118, 0x2308, 0x2318, 0x6308, 0x6318 },
+    { 0x0000, 0x0008, 0x2000, 0x2008, 0x0100, 0x0108, 0x2100, 0x2108,     // Dark
+      0x0000, 0x0010, 0x4000, 0x4010, 0x0200, 0x0210, 0x4200, 0x4210 },
+    { 0x0000, 0x0C63, 0x18C6, 0x2529, 0x318C, 0x4210, 0x4E73, 0x5AD6,     // Greyscale
+      0x0000, 0x1084, 0x2108, 0x2D6B, 0x39CE, 0x4631, 0x5294, 0x6318 },
+};
+#define kZxCram555 kBiosZxPal[0]
+
+// TS-BIOS NVRAM cells (nv_buf in ts-bios.asm, first cell #B0). The 9 dummy bytes
+// after #BC and the custom palette's base were read back out of the SHIPPED image
+// (the checksum sits at #E6/#E7, which is what pins the layout — master's source
+// has drifted to 10 dummy bytes and would put it at #E7/#E8).
+enum {
+    NV_FDDV = 0xB0, NV_CFRQ = 0xB1, NV_CACH = 0xB3,
+    NV_L128 = 0xB8, NV_ZPAL = 0xB9, NV_INTO = 0xBC, NV_CPAL = 0xC6,
+};
+
+// A mini-RESET2: everything the BIOS's own reset path does to hand a ROM page
+// control, minus the parts that need the BIOS itself (its SD/RS-232 boot targets,
+// the NGS/FT8xx resets and CLS_ZX — the three ROMs all clear their own screen).
+//
+// Window 0 comes out of reset LINEAR (memconf 0x04, showing ROM page[0] = 0 =
+// TS-BIOS), and in MAPPED mode it is not addressed by a page number at all but
+// DERIVED from the DOS signal and #7FFD D4 — Service / TR-DOS / 128 / 48, see
+// setBanks. So "boot page N" means switching to mapped mode and asserting exactly
+// that pair, which is what RES_TRD / RES_48 / RES_128 do with one MEMCONFIG write.
+// lock48 sets the #7FFD 48-lock (bit 5, what OUT #7FFD,#30 latches) so a 48 BASIC
+// boot cannot page itself out, the same thing the Pentagon entry does with
+// MemESP::pagingLock (which TS-Conf paging does not consult — write7ffd owns
+// the lock here).
+void TsConf::bootRom(uint8_t page, bool lock48) {
+    page &= 3;
+    ESPectrum::trdos = (page < 2);          // DOS signal: pages 0/1
+    r.p7ffd = ((page & 1) ? 0x10 : 0x00)    // ROM128 = #7FFD D4
+            | (lock48 ? 0x20 : 0x00);
+    // MEMCONFIG: mapped (b2 = 0), ROM (b3 = 0), window 0 read-only (b1 = 0),
+    // b0 = that same ROM128 latch, b7:6 = the Setup's #7FFD span. `RESET2` builds
+    // exactly this byte: `ld a,(l128) / rrca / rrca` into D, then `or 1` for a
+    // 48-ROM target and `wrxta MEMCONFIG`.
+    r.memconf = (uint8_t)(((RTC::nvByte(NV_L128) & 3) << 6) | (page & 1));
+    // SYSCONFIG = cfrq | cach << 2, and CACHECONF follows the cache bit into all
+    // four windows (the TSW_SYSCONF handler does the same copy). Reading the cells
+    // rather than assuming 3.5 MHz + cache ON matters for the DRAM model, which
+    // charges 14 MHz wait states per cache MISS.
+    {
+        const uint8_t cach = RTC::nvByte(NV_CACH) & 1;
+        r.sysconf   = (uint8_t)((cach << 2) | (RTC::nvByte(NV_CFRQ) & 3));
+        r.cacheconf = cach ? 0x0F : 0x00;
+    }
+    r.fddvirt = RTC::nvByte(NV_FDDV) & 0x8F;   // `wrxta FDDVIRT`
+    r.hsint   = RTC::nvByte(NV_INTO);          // `wrxta HSINT` — the Setup's INT offset
+    // **And the palette, which is half the reason this function exists.** The BIOS
+    // does `call LD_PAL` on every start; skipping the BIOS means skipping that, and
+    // the Setup itself loads `pal_bb` ("bright black" = Default with cell 8 changed
+    // from 0x0000 to 0x2108 so its own boxes get a shadow). So "Setup, then reset
+    // into 128K" came up with a GREY bright-black — the 128 menu's title band, i.e.
+    // "the palette did not switch and the colours are dim" (owner, 2026-09-17; the
+    // fb dump read slot 8 = 92,92,92 = ts_pwm[8] while every other slot was
+    // Default). CRAM survives a warm reset by design — TsConf::reset seeds it only
+    // when cold — so it has to be re-loaded here, from the same cell (#B9) the BIOS
+    // reads. Option 6 is the Setup's Custom palette, 16 little-endian words in the
+    // NVRAM block itself.
+    {
+        const uint8_t zpal = RTC::nvByte(NV_ZPAL);
+        for (int i = 0; i < 16; i++)
+            cram[0xF0 + i] = (zpal < 6)
+                ? kBiosZxPal[zpal][i]
+                : (uint16_t)(RTC::nvByte((uint8_t)(NV_CPAL + i * 2)) |
+                             ((uint16_t)RTC::nvByte((uint8_t)(NV_CPAL + i * 2 + 1)) << 8));
+        VIDEO::tsCramChanged();
+    }
+    setBanks();
+    applyZclk();        // the Setup's CPU clock, without the guest-write toast
+    frameIntRecalc();   // HSINT moved
+}
+
 void TsConf::trdosTrap(uint8_t pcH) {
     // check_trdos() replacement — reference z80_main.inl:185-215 +
     // memory.cpp:397-411 for MM_TSL. Entry (CF_SETDOSROM): PC at #3Dxx with
@@ -425,12 +516,18 @@ void TsConf::trdosTrap(uint8_t pcH) {
     // always RAM on TS-Conf, so any PC >= #4000 exits, and so does window 0
     // itself once W0_RAM is set. (Under VDOS there is no exit — phase 4.)
     if (!ESPectrum::trdos) {
-        if (pcH == 0x3D && (r.p7ffd & 0x10) && !r.w0_ram()) {
+        // dos_on = win0 && opfetch && a[13:8]==#3D && rom128 && !w0_map_n.
+        // The mapped-mode term is the RTL's and is load-bearing: in LINEAR mode
+        // the trap does not exist, which is the state TS-BIOS boots in.
+        if (pcH == 0x3D && (r.p7ffd & 0x10) && !r.w0_ram() && !r.w0_map_n()) {
             ESPectrum::trdos = true;
             setBanks();
         }
     } else {
-        if (pcH >= 0x40 || r.w0_ram()) {
+        // dos_off = !win0 && opfetch — an opcode fetch outside window 0, and
+        // nothing else. The `|| w0_ram()` this used to carry is not in the RTL
+        // (a fetch from window-0 RAM keeps the signal) and cost nothing to drop.
+        if (pcH >= 0x40) {
             ESPectrum::trdos = false;
             setBanks();
         }
@@ -463,6 +560,11 @@ void TsConf::write7ffd(uint8_t val) {
             break;
     }
     r.p7ffd = val;
+    // ROM128 is ONE latch with two names: `zports.v` copies D4 into MEMCONFIG
+    // bit 0 on every #7FFD write, the way the TSW_MEMCONF handler copies it back.
+    // Only the read-back saw the difference, but a guest that writes #7FFD and
+    // then reads MEMCONFIG (TS-BIOS's own idiom) would have been told 0.
+    r.memconf = (uint8_t)((r.memconf & ~0x01) | ((val >> 4) & 1));
     // SCR bit — no line latch. A change of the displayed page is what arms
     // Gigascreen's Auto mode: every other machine bumps the countdown from its
     // own #7FFD videoLatch flip, and TS-Conf takes this handler INSTEAD of that
@@ -1407,7 +1509,12 @@ void TsConf::reset(bool cold) {
     r.intmask = 1;
     r.fddvirt = 0;
     r.sysconf = 0;       // 3.5 MHz
-    r.memconf = 0;       // mapped mode, ROM, W0 read-only
+    // **W0_MAP_N = 1, i.e. window 0 is LINEAR and shows ROM page[0] = 0 (TS-BIOS)**
+    // — `zports.v`: `memconf <= 8'h04;  // no map`, the RTL's own comment. This
+    // file said 0 (mapped) until 2026-09-17 and leaned on a forced DOS signal to
+    // land on the same page 0; the two are indistinguishable for the first opcode
+    // and diverge the moment TS-BIOS runs code from RAM — see bootRom/trdosTrap.
+    r.memconf = 0x04;
     r.cacheconf = 0;
     r.hsint = 2;
     r.vsint = 0;
@@ -1431,12 +1538,8 @@ void TsConf::reset(bool cold) {
         // FMAddr. Seed the ZX bank with the standard palette anyway so a
         // guest that skips CRAM init stays visible. RGB555: R=t>>10 G=t>>5
         // B=t, 5-bit channels.
-        static const uint16_t zx555[16] = {
-            0x0000, 0x0010, 0x4000, 0x4010, 0x0200, 0x0210, 0x4200, 0x4210,
-            0x0000, 0x0018, 0x6000, 0x6018, 0x0300, 0x0318, 0x6300, 0x6318,
-        };
         for (int i = 0; i < 256; i++) cram[i] = 0;
-        for (int i = 0; i < 16; i++) cram[0xF0 + i] = zx555[i];
+        for (int i = 0; i < 16; i++) cram[0xF0 + i] = kZxCram555[i];
         for (int i = 0; i < 256; i++) sfile[i] = 0;
         sfileGen++;
     }

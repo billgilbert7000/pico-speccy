@@ -143,10 +143,19 @@ visit https://zxespectrum.speccy.org/contacto
 
 // Scorpion reset menu: Service monitor=1, TR-DOS=2, 128K=3, 48K=4
 #define MENU_RESETTO_SCORP "Reset to\n" "Service monitor\n" "TR-DOS\n" "128K\n" "48K\n"
-// TS-Conf: TS-BIOS picks the boot target itself (NVRAM "Boot from/bank"); the two
-// keys it samples at START are Symbol Shift (-> Setup) and Caps Shift (-> the
-// alternate "CS boot" target, boot.$c from the SD card by default).
-#define MENU_RESETTO_TSCONF "Reset to\n" "TS-BIOS Setup\n" "Boot from SD (boot.$c)\n" "Default (BIOS)\n"
+// TS-Conf: TS-BIOS Setup=1 (the one entry that still goes through the BIOS —
+// it samples Symbol Shift at START), then one entry per ROM page of the
+// selected BIOS set, cold-booted directly like the Pentagon/Scorpion entries.
+// Which page a label means differs between the two sets (Config.cpp bindRoms),
+// hence two menus: stock has the Pentagon 128 ROM at page 2, the Gluk set has
+// Mr Gluk's service ROM there and the plain 48K ROM at page 3.
+// Row 2 is the BIOS's own alternate boot target (the key it samples is Caps
+// Shift), whose default is boot.$c from the boot device — hence the label; a
+// Setup that points "CS Boot from" elsewhere goes there instead.
+// Stock:  Setup=1, CS boot=2, TR-DOS=3, 128K=4, 48K=5
+#define MENU_RESETTO_TSCONF "Reset to\n" "TS-BIOS Setup\n" "Boot from SD (boot.$c)\n" "TR-DOS\n" "128K\n" "48K\n"
+// Gluk:   Setup=1, CS boot=2, Mr Gluk=3, TR-DOS=4, 48K=5
+#define MENU_RESETTO_TSGLUK "Reset to\n" "TS-BIOS Setup\n" "Boot from SD (boot.$c)\n" "Mr Gluk Reset Srvs\n" "TR-DOS\n" "48K\n"
 
 #define MOS_FILE "/.firmware"
 

@@ -145,6 +145,11 @@ public:
     // same top-border toast as the Turbo hotkey when the effective clock moves.
     static void applyZclk(bool fromGuest = false);
     static void setBanks();      // recompute MemESP::ramCurrent[0..3]
+    // Cold-boot window 0 onto one page of the BIOS set (0 TS-BIOS, 1 TR-DOS,
+    // 2 the 128/Gluk service ROM, 3 48 BASIC) — the Reset-to menu's per-page
+    // entries. Called right after ESPectrum::reset(), i.e. after TsConf::reset()
+    // has already put the register file back to its tsinit values.
+    static void bootRom(uint8_t page, bool lock48);
     static void trdosTrap(uint8_t pcH); // check_trdos() replacement (Z80_JLS.cpp)
 
     // Interrupt controller (zint.v). Three latched sources: FRAME (the
