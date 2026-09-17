@@ -2,7 +2,11 @@
 """Convert pico-spec framebuffer dump to PNG.
 
 Usage:
-    python3 fb2png.py fb.bin pal.bin WIDTH HEIGHT out.png
+    python3 fb2png.py fb.bin pal.bin WIDTH HEIGHT out.png [--zx] [--raw-pal] [--no-xor]
+
+--raw-pal keeps the dumped palette as it is (screenshot.gdb dumps the HDMI
+driver's real RGB shadow); without it a runtime palette (TS-Conf CRAM, ULA+) is
+mistaken for a placeholder and replaced by the standard ZX table.
 
 Optional check: if a sibling rowptrs.bin exists in /tmp, we report whether the
 framebuffer rows are contiguous (i.e. row[k] == row[0] + k*width). If they are
@@ -92,6 +96,11 @@ def main():
     fb_path, pal_path, w, h, out_path = sys.argv[1:6]
     w, h = int(w), int(h)
     use_zx = '--zx' in sys.argv[6:]
+    # Keep the dumped palette exactly as it is. The heuristic below is tuned for
+    # ZX-like tables and throws away any RUNTIME palette (TS-Conf CRAM, ULA+,
+    # a custom preset) as "bogus" — which is precisely the case one wants to
+    # look at when a runtime palette is under suspicion.
+    raw_pal = '--raw-pal' in sys.argv[6:]
     no_xor = '--no-xor' in sys.argv[6:]
 
     check_contiguous(w, h)
@@ -122,7 +131,7 @@ def main():
         if all(c in (0x00, 0xCD, 0xFF) for c in pal[i]) and pal[i] != (0, 0, 0)
     )
     looks_bogus = zx_match < 4
-    if use_zx or looks_default or looks_bogus:
+    if not raw_pal and (use_zx or looks_default or looks_bogus):
         for i in range(16):
             pal[i] = ZX_PALETTE[i]
         # 16 = OSD orange; 17..239 = the stock G3R3B2 CLUT cube (grb_to_rgb888

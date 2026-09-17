@@ -2667,6 +2667,84 @@ top and bottom) nor the ts256 map (stable — 16 distinct colours every frame) w
   in its log), Digger intro (16c — now through the remap), Bruce Lee, Ninja Gaiden, fishbone,
   TS-BIOS Setup (TEXT mode goes through the pair path, untouched), and a VGA board.
 
+### Kolbass (TS-Conf 256c video player): a single-bank palette needs the picture to flip BETWEEN sweeps (2026-09-16/17; hw-confirmed on `debug/DVp2-tspal-nygift-*-1.0.6.elf`, owner: "теперь отлично" — Kolbass and nygift both)
+
+The demo (`debug/`-less; a 12-picture ring, 64000-byte `DMA ctrl=19` blit + a 256-cell
+CRAM DMA every 4th frame, 12.2 pictures/s, sprites for the text) has **138-231
+distinct CRAM colours**, so `ts256PickBanks` gives `nb = 1` and per-row palette
+versioning is unavailable: one global palette, one single-buffered fb. The
+artifact was a 1-px checkerboard (the source's ordered dither under a wrong
+palette) over a band or the whole picture, ~one display frame per picture. It
+took eleven hardware rounds; the mechanisms, in the order they were peeled:
+
+- **`tsVideoApplyPending()` drained core1 at the top, every frame** — the "No drain
+  at EndFrame" rule broken in place: `wait=3.4 ms on 60/60 frames` of a 5.0 ms
+  `cpu`. The drain now sits below the mode-change early return.
+- **The palette poll never ran inside the blit.** `dmaExecBulk` is the one place
+  core0 goes dark for ms, and it covered the whole blanking; `tsPalettePoll` is now
+  pumped every 8 blocks (core0 only). `[TSPAL] blank 2 vis 11` was the tell.
+- **With `nb == 1` there are exactly two consistent states** (old pixels + old
+  palette, new + new), so the fb must flip between sweeps, not during one:
+  `ts_reindex_hold` skips posting lines for the rest of the guest frame,
+  `tsReindexReady` is armed at EndFrame, and `tsReindexRelease()` renders the whole
+  picture from the complete VRAM + flushes the palette when the BEAM leaves the
+  picture (`beam >= lin_end2 || beam < 0`) — beam-relative, so V-Sync on or off.
+  Releasing "at the next guest frame" instead put the flip mid-sweep with V-Sync
+  off (`bad≈1000 rows/61 sweeps`).
+- **The hold trigger is the PAIR**: a blit into the visible bitmap with a CRAM
+  change in the same frame (either order: `tsCramDirty` at the blit, or the hint at
+  the change), OR a wide change (`TS_REINDEX_MIN_CELLS` = 32 cells). Two wrong
+  triggers were hw-refuted: `want == top` (the static picture's palette is written
+  by another routine at another raster row — 72 cells took the sticky path on a
+  full pool, `viol=144 near=72 moved=0 merges=0`, a one-frame full negative) and
+  the width alone (consecutive video pictures change < 32 cells, `bad=1600/50f`).
+  A blit with no palette change holds nothing (TMNT).
+- **The 184-slot pool runs out** (`live=184/184 exh=1`): the sticky map kept one
+  offset per CELL for ever, equal colours never shared, and the losers were parked
+  on the nearest live colour by INDEX order. `ts256Reduce()` (held re-index only)
+  rebuilds from colours: equal colours share, then the closest pairs merge until
+  the pool fits (`mergeMaxD2=1` measured — every merge one 5-bit step), offsets
+  reused where they already show the colour. Its 2.3 KB of tables are `TS_OVL_BSS`.
+- **An approximated cell must not hop.** The sticky path judged "changed" by the
+  SLOT's colour; a merged cell looked changed on every assign and was re-parked
+  elsewhere (`moved=464-655` per window on the static picture). `ts256_cell_col[]`
+  = the CRAM value at the last assign is the comparison now, and a CRAM write of
+  the same value is not a change at all (TsConf DMA + FMAddr paths).
+- **The border bands are painted with the border cell's slot NUMBER** and only
+  repainted at EndFrame — a flush that renumbered the slots left 40 rows in another
+  cell's colour. `tsPalette256Flush` repaints the bands right after programming.
+- **`RedrawPausedFrame` flushes a pending TS palette first** — a debugger screenshot
+  had shown the new picture under the old palette and cost a round; the debugger's
+  footer (`dbgFrameNu`) in the shot was what named it.
+- **Instruments that stayed** (`TS_VIDEO_TRACE`): `[TSPAL] bad=` = rows the beam
+  scanned whose map generation (tagged by CORE1 at render time — a post-time tag
+  hid stale rows for a round) differs from the programmed one; `map: viol/near/
+  moved/live/merges/mergeMaxD2` = the map invariant after every flush; `late=` =
+  rows rendered after the beam passed them (the release's own signature is
+  `max≈206`, harmless). `tools/screenshot.gdb` now dumps the REAL HDMI palette
+  (`'hdmi.c'::palette`, probed, last in the script) and `fb2png.py --raw-pal` keeps
+  it — the only truthful TS-Conf screenshot. `c1=` lines/frame is the hold's cost
+  meter: 150 = one held frame in four.
+- Rulings from the counters, not theories: `mergeMaxD2=1` says more slots would NOT
+  help this demo; `hdmi_snap` on / `hdmi_dither` (ULA+-gated) ruled out; the
+  capture-card split was not it (the grabber showed sprites checkerboarded too, and
+  those live in constant CRAM cells).
+- Cost: one display frame of picture latency per held change (two when the release
+  lands in the pacing wait — fixed by not zeroing `ts_line_idx` there); a palette
+  fade at `nb == 1` updates every other frame. RobFgift (`nb = 4`) got fixed by the
+  first two items alone and never enters the hold.
+- **A hold must not outlive its mode (nygift, hw 2026-09-17).** nygift switches
+  VConfig seven times a run; a hold taken in one mode survived the rebuild, so
+  `tsRenderLine` posted nothing for ever: white screen after the first picture, a
+  menu that stayed on screen after Esc, and `applyPalette()` on menu exit as the
+  only thing that ever repainted (`hold=1 chg=1 app=0 bad=143250/750 sweeps`).
+  `tsReindexClear()` runs on every mode leave/rebuild (`tsVideoApplyPending`'s real
+  change, `tsVideoForceOff`, both `ts_pal256_live = false` sites), and EndFrame
+  releases a hold that has been ready for a whole frame unseen by any poll
+  (`relForced` in the trace — must read 0 in normal play). `ts_pal_ncells` counts
+  per pending WINDOW, not since the last flush. Rule for anything that suspends
+  rendering: it needs an owner that clears it and a clock that bounds it.
+
 ### The TS-Conf palette on VGA: dither the 256c artwork, ROUND the flat ZX 16 (hw 2026-09-16)
 
 Two reports, one line of code: "можно цвета получше?" on a 256c TMNT screen, and

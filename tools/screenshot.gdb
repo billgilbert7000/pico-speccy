@@ -17,12 +17,6 @@ while $y < $h
   append binary memory /tmp/picospec_fb.bin $row ($row + $w)
   set $y = $y + 1
 end
-# Dump 1KB at $fb0-aligned dummy zone — NOT a real palette. fb2png.py will
-# auto-detect that the palette doesn't look right and fall back to the
-# standard ZX palette, which is what we want for HDMI build anyway (real
-# palette is optimized away into TMDS conv_color).
-dump binary memory /tmp/picospec_pal.bin $fb0 ($fb0 + 1024)
-printf "screenshot: palette placeholder dumped (ZX fallback will be used)\n"
 set logging file /tmp/picospec_dim.txt
 set logging overwrite on
 set logging redirect on
@@ -30,3 +24,34 @@ set logging enabled on
 printf "%d %d\n", $w, $h
 set logging enabled off
 printf "screenshot: dump done\n"
+
+# The HDMI driver keeps an RGB888 shadow of every slot it programmed
+# (`static uint32_t palette[256]` in hdmi.c) — 256 x 0x00RRGGBB, exactly the
+# layout fb2png.py expects. Dumping THAT instead of a placeholder is the only
+# way to see what a runtime palette really put on the wire: on TS-Conf the
+# framebuffer holds ts256 slot numbers and the ZX fallback decodes them as
+# nonsense (the CLAUDE.md warning that "both screenshot decoders lie in these
+# modes"). Decode with `fb2png.py ... --raw-pal` to keep it.
+#
+# PROBE first: a missing symbol aborts the whole sourced file, and with logging
+# redirected the MI error never reaches the extension — the dump then hangs with
+# the target paused (the memdump.gdb lesson). `info variables` prints nothing and
+# errors on nothing when there is no match, and an untaken `if` body is never
+# evaluated. VGA-only / SOFTTV / TFT builds have no such symbol and keep the
+# placeholder.
+set logging file /tmp/picospec_sympal.txt
+set logging overwrite on
+set logging redirect on
+set logging enabled on
+info variables ^palette$
+set logging enabled off
+set logging redirect off
+shell grep -v "regular expression" /tmp/picospec_sympal.txt | grep -q "uint32_t palette\[256\]" && echo 'set $has_hdmipal = 1' > /tmp/picospec_sympal.gdb || echo 'set $has_hdmipal = 0' > /tmp/picospec_sympal.gdb
+source /tmp/picospec_sympal.gdb
+if $has_hdmipal
+  dump binary memory /tmp/picospec_pal.bin &'hdmi.c'::palette[0] &'hdmi.c'::palette[256]
+  printf "screenshot: real HDMI palette dumped (decode with --raw-pal)\n"
+else
+  dump binary memory /tmp/picospec_pal.bin $fb0 ($fb0 + 1024)
+  printf "screenshot: palette placeholder dumped (ZX fallback will be used)\n"
+end

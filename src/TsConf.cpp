@@ -645,8 +645,7 @@ TS_HOT void TsConf::fmWrite(uint16_t addr, uint8_t val) {
     uint16_t w = ((uint16_t)val << 8) | s_fm_tmp;
     switch ((addr >> 9) & 0x07) {
         case 0:
-            cram[(addr >> 1) & 0xFF] = w;
-            VIDEO::tsCramChanged();
+            if (cram[(addr >> 1) & 0xFF] != w) { cram[(addr >> 1) & 0xFF] = w; VIDEO::tsCramChanged(); }
             break;
         case 1:
             sfile[(addr >> 1) & 0xFF] = w;
@@ -1069,9 +1068,13 @@ TS_HOT void TsConf::dmaStart(uint8_t ctrl) {
             const uint32_t n = 1;
             switch (mode) {
                 case M_CRAM: {
+                    // A rewrite with the SAME value is not a change. Kolbass re-DMAs
+                    // its whole palette every 4th frame while a static picture is up;
+                    // registering that as a change sent the merged cells of an
+                    // exhausted pool hopping between "nearest" slots (hw 2026-09-17).
                     const uint8_t idx = (uint8_t)(dd >> 1);
-                    cram[idx] = src.rd(ss);
-                    VIDEO::tsCramChanged();
+                    const uint16_t v = src.rd(ss);
+                    if (cram[idx] != v) { cram[idx] = v; VIDEO::tsCramChanged(); }
                     break;
                 }
                 case M_SFILE:
@@ -1170,6 +1173,7 @@ TS_HOT void TsConf::dmaExecBulk(uint8_t ctrl, uint32_t saddr, uint32_t daddr, ui
     uint32_t ss = saddr, dd = daddr, sreg = saddr, dreg = daddr;
     uint32_t len = (uint32_t)dmalen + 1;
     uint32_t num = dmanum;
+    uint32_t blk = 0;               // blocks done — the palette poll below rides on it
     DmaRam src, dst;
     uint16_t fill = 0;
     if (mode == M_FILL) {           // dma_fill: ONE source word, read up front
@@ -1276,6 +1280,18 @@ TS_HOT void TsConf::dmaExecBulk(uint8_t ctrl, uint32_t saddr, uint32_t daddr, ui
         // dma_next_burst
         if (salgn) { sreg = (sreg + asize) & 0x3FFFFF; ss = sreg; }
         if (dalgn) { dreg = (dreg + asize) & 0x3FFFFF; dd = dreg; }
+        // A long bulk copy is the one place core0 goes dark for MILLISECONDS
+        // (Kolbass: 64000 B in 6.8 ms), and that is exactly the window in which
+        // the display beam leaves the picture — the only moment a pending
+        // re-index palette can be applied without splitting the screen. With
+        // the poll only at the guest's line ticks and in the frame-pacing wait
+        // the blanking was missed 10 times out of 13 (hw 2026-09-16,
+        // `[TSPAL] blank 2 vis 11`) and the flush landed inside the sweep.
+        // The copy's guest-time model is computed separately, so this changes
+        // no guest timing; core1 renders nothing of the new picture yet (the
+        // lines are posted after the DMA), so the framebuffer still holds the
+        // previous picture and the flush is exactly right here.
+        if (!(++blk & 7) && VIDEO::tsCramDirty && get_core_num() == 0) VIDEO::tsPalettePoll(false);
         if (num) { num--; len = (uint32_t)dmalen + 1; }
         else break;
     }

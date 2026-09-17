@@ -579,6 +579,14 @@ public:
   static void tsCramChanged();
   static void tsPalSelWritten();    // PalSel: like tsCramChanged where the 16 slots / pair tables depend on it
   static void tsPalettePoll(bool force);
+  // TS_VIDEO_TRACE only: keep the idle loops calling tsPalettePoll even when no
+  // CRAM change is pending, so the beam can be walked for the mismatch count.
+  static bool tsPalScanWanted;
+  // A held re-index whose guest frame is over: the picture is rendered at the
+  // next BLANKING (tsPalettePoll), not at the next guest frame — the flip must be
+  // beam-relative or it lands mid-sweep whenever V-Sync pacing is off.
+  static bool tsReindexReady;
+  static inline bool tsPollWanted() { return tsCramDirty || tsPalScanWanted || tsReindexReady; }
   static int  displayBeamRow();     // fb row under the beam, -1 = blanking, -2 = driver has none
   static void setVsyncLead(bool on);   // TS whole-line modes: frame-pacing v_sync fires before blanking
   static void tsPaletteFlush();

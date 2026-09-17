@@ -513,13 +513,20 @@ static struct {
 static uint64_t ts_frame_start_us = 0;
 #define TSPAL_APPLIED(field, beam) tsPalDbgApplied(ts_pal_dbg.field, (beam))
 #define TSPAL_COUNT(field)         (ts_pal_dbg.field++)
+#define TSPAL_MAPGEN()             (ts_map_gen++)
+#define TSPAL_PALGEN()             (ts_pal_gen_live = ts_map_gen)
 #else
 #define TSPAL_APPLIED(field, beam) ((void)0)
 #define TSPAL_COUNT(field)         ((void)0)
+#define TSPAL_MAPGEN()             ((void)0)
+#define TSPAL_PALGEN()             ((void)0)
 #endif
 uint8_t g_ts_fastmem = 0;
 bool     VIDEO::ts_tsu_live = false;
 bool     VIDEO::ts_pal256_live = false;
+bool     VIDEO::tsPalScanWanted = false;
+bool     VIDEO::tsReindexReady  = false;
+static void tsReindexClear();   // defined with the re-index hold state below
 uint8_t  VIDEO::ts_rres_live = 0;
 uint8_t  VIDEO::ts_crop_top = 0;
 uint32_t VIDEO::ts_ygctr = 0;
@@ -962,6 +969,7 @@ void VIDEO::tsVideoForceOff() {
     ts_render_live = 0;
     ts_tsu_live = false;
     ts_pal256_live = false;
+    tsReindexClear();
     ts_pal_row = -1;
     setVsyncLead(false);
     if (c256) applyPalette();     // the ts256 remap had taken over the hardware palette
@@ -2248,12 +2256,81 @@ static uint32_t ts256_ver = 0;         // versions created since the last invali
 // and the old rows must follow it too — see tsPalettePoll.
 static bool     ts_reindex_hint = false;
 static constexpr uint32_t TS_REINDEX_MIN_BYTES = 2048;
+// ...and, with no palette banks to version with (nb == 1), the picture may not
+// be replaced PIECEMEAL either. A single global palette has exactly two
+// consistent states — old pixels + old palette, new pixels + new palette — so
+// the framebuffer has to flip between two sweeps, not during one. The guest's
+// 64000-byte blit takes ~10 ms of core0 (hw 2026-09-16), which is long past the
+// start of the display frame, so the lines it feeds land under a beam that is
+// already inside the picture. `ts_reindex_hold` keeps them out of the
+// framebuffer for the rest of the guest frame; the next frame re-renders
+// everything from the (now complete) VRAM at its own start, in one go, and
+// tsPalettePoll flushes in the blanking after that. Costs one display frame of
+// latency — the demo that needs this updates 12 times a second.
+static uint16_t ts_pal_ncells = 0;             // CRAM cells written since the pending window opened
+static constexpr uint16_t TS_REINDEX_MIN_CELLS = 32;   // a change this wide is a whole-palette change wherever it lands
+static bool     ts_reindex_hold = false;       // skip posting lines while set
+static bool     ts_reindex_held_prev = false;  // a release happened this frame: no new hold until EndFrame
+static uint32_t ts_last_curline = 0xFFFFFFFFu; // tsRenderLine's repeat filter (reset by the release)
+static bool     ts_reindex_ready_seen = false;  // tsReindexReady was already up at the previous EndFrame
+#if TSPAL_DBG
+static uint32_t ts_dbg_rel = 0, ts_dbg_rel_dirty = 0, ts_dbg_rel_forced = 0, ts_dbg_hold_blit = 0, ts_dbg_hold_wide = 0;
+#endif
+// Forget any held re-index. On every path that leaves or rebuilds the mode
+// (tsVideoApplyPending's real change, tsVideoForceOff, Reset): a hold that
+// outlives its mode is a picture that never renders again — nygift's mode
+// switches (7 VConfig writes a run) left `hold=1` for 15 s with `chg=1 app=0`,
+// a white screen, and the menu's applyPalette() as the only thing that ever
+// repainted it (hw 2026-09-17).
+static void tsReindexClear() {
+    ts_reindex_hold = false;
+    ts_reindex_held_prev = false;
+    ts_reindex_ready_seen = false;
+    VIDEO::tsReindexReady = false;
+}
+
+// ── Direct measurement of the artifact itself (TS_VIDEO_TRACE) ──────────────
+// Every counter so far reports when the palette was APPLIED, which is one step
+// removed from the thing being complained about: rows the beam actually scanned
+// while the framebuffer and the hardware palette came from different pictures.
+// Kolbass is the case that made this necessary — three rounds of "the timing is
+// perfect" against "still broken". Each fb row carries the MAP generation it was
+// rendered with (the cell -> slot numbering is what ts256Assign changes; the slot
+// colours follow at the flush), the flush records the generation the hardware now
+// holds, and the beam is walked row by row as it advances: every row whose
+// generation differs from the programmed one is a row displayed wrong. `bad` in
+// the [TSPAL] line is that count — it is the number to drive to zero, and it is
+// independent of any theory about when things ought to happen.
+#if TSPAL_DBG
+static uint8_t  ts_row_gen[288];        // fb row -> map generation it was RENDERED with (core1 copies it at render time)
+static uint8_t  ts_row_gen_posted[288]; // fb row -> map generation at POST time (core0). The scan used to read this
+                                        // one: a row posted but not yet rendered counted as new while the beam
+                                        // still showed its old pixels — the hole every counter fell through.
+static volatile uint32_t ts_late_rows = 0, ts_late_max = 0;   // rows core1 rendered AFTER the beam had passed them
+static uint8_t  ts_map_gen = 0;         // bumped by every ts256Assign from the poll
+static uint8_t  ts_pal_gen_live = 0;    // generation the hardware slots currently hold
+static int32_t  ts_scan_last = -1;      // last beam row counted this sweep
+static uint32_t ts_scan_bad = 0, ts_scan_bad_sweep = 0, ts_scan_bad_max = 0, ts_scan_sweeps = 0;
+// Map invariant, checked after every flush: every CRAM cell's offset must hold
+// exactly the cell's colour (viol), no live offset may still be dirty (dirty),
+// plus how many cells changed offset in this assign (moved) and how many were
+// parked on the NEAREST colour because the pool ran out (near). A per-CELL
+// wrongness — "negative in places", a few colours flipping for one frame —
+// cannot show in the row-generation count above; it shows here.
+static uint32_t ts_inv_viol = 0, ts_inv_dirty = 0, ts_inv_moved = 0, ts_inv_near = 0, ts_inv_live = 0, ts_inv_checks = 0;
+static uint32_t ts_inv_mergemax = 0, ts_inv_merges = 0;   // worst / count of colour merges (ts256Reduce), 5-bit RGB distance squared
+#endif
 
 // TsConf::dmaStart, every bulk DMA: destination inside the base bitmap or a
 // tile-graphics page (not the sprite page — sprite frames are streamed by
 // many games and are no re-index of the picture), big enough to be a redraw.
 void VIDEO::tsVramDmaNote(uint32_t addr, uint32_t len) {
-    if (!ts_pal256_live || ts_reindex_hint || len < TS_REINDEX_MIN_BYTES) return;
+    // NOT gated on ts_reindex_hint: the hint stays up until a flush, and a blit
+    // arriving while the previous change is still pending must STILL hold the
+    // picture. With the gate, one late flush turned every following blit into
+    // an unheld, mid-sweep replacement — Kolbass, hw 2026-09-16: `bad=143..171`
+    // rows once a second, each paired with a `later 1` apply at beam=192.
+    if (!ts_pal256_live || len < TS_REINDEX_MIN_BYTES) return;
     const uint32_t page = addr >> 14;
     const uint8_t vp = TsConf::r.vpage;
     bool hit = false;
@@ -2268,7 +2345,28 @@ void VIDEO::tsVramDmaNote(uint32_t addr, uint32_t len) {
         if ((tsc & 0x20) && (page & 0xF8) == (TsConf::r.t0gpage & 0xF8)) hit = true;
         if ((tsc & 0x40) && (page & 0xF8) == (TsConf::r.t1gpage & 0xF8)) hit = true;
     }
-    if (hit) ts_reindex_hint = true;
+    if (!hit) return;
+    ts_reindex_hint = true;
+    // The blit alone holds nothing: a title that redraws its screen by DMA every
+    // frame without touching CRAM (TMNT) must keep rendering at full rate. The
+    // hold is for the PAIR pixels + palette; here the palette came first
+    // (Kolbass: CRAM DMA, then the blit), the other order is handled in
+    // tsCramChanged through the hint just set. A change already scheduled for
+    // release (tsReindexReady) will render the newest VRAM anyway.
+    // The hold is for the PAIR pixels + palette: a blit with a palette change
+    // already registered this frame holds (Kolbass: CRAM DMA, then the blit —
+    // and between two similar video pictures FEWER than 32 cells change, so the
+    // width test alone let the blit render progressively under a palette that
+    // flipped in blanking: `bad=1600 rows/50 frames, worst sweep 200`, hw
+    // 2026-09-17). The other order — blit first, CRAM later in the frame — is
+    // caught in tsCramChanged through the hint just set. A blit with no palette
+    // change at all holds nothing (TMNT redraws its screen by DMA every frame).
+    if (ts256_nb == 1 && VIDEO::tsCramDirty && !VIDEO::tsReindexReady) {
+#if TSPAL_DBG
+        if (!ts_reindex_hold) ts_dbg_hold_blit++;
+#endif
+        ts_reindex_hold = true;
+    }
 }
 
 static void ts256PoolInit() {
@@ -2318,14 +2416,127 @@ static uint8_t ts256PickBanks() {
     return 1;
 }
 
+// ── Palette REDUCTION for a held re-index (nb == 1) ─────────────────────────
+// The hold re-renders the whole picture in one go, so the numbering is free to
+// change — and it has to: the sticky rule below keeps one offset per CELL for
+// ever, two cells with the same colour never share, and the moment a picture
+// needs more cells than the pool has, whichever cells come LAST BY INDEX are
+// parked on the nearest live colour, whatever that is. Kolbass, hw 2026-09-17:
+// `live=184/184 exh=1 near≈40-55 per flush` — ~4 % of the pixels of every
+// other picture in the wrong colour, scattered, "a negative in places".
+// Here: distinct colours first (equal colours share, as on hardware there is
+// simply one slot per colour value), and if they still exceed the pool the two
+// CLOSEST colours are merged, repeatedly, the larger group surviving — a
+// 184-colour quantisation of the 256-colour palette, so the error lands on
+// near-identical colours instead of on arbitrary cells. Offsets that already
+// show a colour are reused (no palette write), the rest take free ones.
+// Tables live in the TS-Conf overlay window (every access is behind the mode).
+static uint16_t TS_OVL_BSS rc_col[256];    // group -> colour
+static uint16_t TS_OVL_BSS rc_nd[256];     // group -> distance to its nearest live group
+static uint8_t  TS_OVL_BSS rc_cnt[256];    // group -> cells (saturating)
+static uint8_t  TS_OVL_BSS rc_of[256];     // cell -> group
+static uint8_t  TS_OVL_BSS rc_nn[256];     // group -> nearest live group
+static uint8_t  TS_OVL_BSS rc_alive[256];
+static uint8_t  TS_OVL_BSS rc_off[256];    // group -> offset
+// CRAM value each cell had when it was last assigned. The sticky path used to
+// judge "changed" by comparing CRAM with the SLOT's colour — right for an exact
+// cell, wrong for one parked on the nearest colour by an exhausted pool: it
+// looked changed on every assign, left its offset, found no free one and was
+// re-parked, often elsewhere — and the rows already rendered with its old slot
+// number showed another cell's colour (Kolbass, static picture, hw 2026-09-17).
+static uint16_t TS_OVL_BSS ts256_cell_col[256];
+static void ts256Reduce() {
+    ts256PoolInit();
+    const int bs = ts256_bs;
+    int n = 0;
+    for (int i = 0; i < 256; i++) {
+        const uint16_t c = TsConf::cram[i] & 0x7FFF;
+        int k = 0;
+        while (k < n && rc_col[k] != c) k++;
+        if (k == n) { rc_col[n] = c; rc_cnt[n] = 0; rc_alive[n] = 1; n++; }
+        rc_of[i] = (uint8_t)k;
+        if (rc_cnt[k] < 255) rc_cnt[k]++;
+    }
+    int alive = n;
+    if (alive > bs) {
+        auto nnOf = [&](int k) {
+            uint32_t bd = 0xFFFFFFFFu; int bj = k;
+            for (int j = 0; j < n; j++) {
+                if (j == k || !rc_alive[j]) continue;
+                const uint32_t d = ts555Dist(rc_col[k], rc_col[j]);
+                if (d < bd) { bd = d; bj = j; }
+            }
+            rc_nn[k] = (uint8_t)bj; rc_nd[k] = (uint16_t)(bd > 0xFFFF ? 0xFFFF : bd);
+        };
+        for (int k = 0; k < n; k++) nnOf(k);
+        while (alive > bs) {
+            int a = -1; uint32_t bd = 0xFFFFFFFFu;
+            for (int k = 0; k < n; k++) if (rc_alive[k] && rc_nd[k] < bd) { bd = rc_nd[k]; a = k; }
+            const int b = rc_nn[a];
+#if TSPAL_DBG
+            if (bd > ts_inv_mergemax) ts_inv_mergemax = bd;
+            ts_inv_merges++;
+#endif
+            const int keep = (rc_cnt[a] >= rc_cnt[b]) ? a : b, gone = (keep == a) ? b : a;
+            for (int i = 0; i < 256; i++) if (rc_of[i] == gone) rc_of[i] = (uint8_t)keep;
+            const unsigned sum = (unsigned)rc_cnt[keep] + rc_cnt[gone];
+            rc_cnt[keep] = (uint8_t)(sum > 255 ? 255 : sum);
+            rc_alive[gone] = 0; alive--;
+            for (int k = 0; k < n; k++)
+                if (rc_alive[k] && (k == keep || rc_nn[k] == gone || rc_nn[k] == keep)) nnOf(k);
+        }
+        ts256_exhausted = true;             // colours were approximated (reported by the trace)
+    }
+    // Offsets. Pass 1: a live or free offset that already shows the colour is
+    // kept — no palette write. Pass 2: the rest take free offsets and go dirty.
+    for (int o = 0; o < bs; o++) ts256_slot_ref[o] = 0;
+    for (int k = 0; k < n; k++) {
+        rc_off[k] = 0xFF;
+        if (!rc_alive[k]) continue;
+        for (int o = 0; o < bs; o++)
+            if (!ts256_slot_ref[o] && ts256_slot_col[o] == rc_col[k]) { rc_off[k] = (uint8_t)o; ts256_slot_ref[o] = 1; break; }
+    }
+    int next = 0;
+    for (int k = 0; k < n; k++) {
+        if (!rc_alive[k] || rc_off[k] != 0xFF) continue;
+        while (next < bs && ts256_slot_ref[next]) next++;
+        rc_off[k] = (uint8_t)next;                     // alive <= bs, so this always lands
+        ts256_slot_ref[next] = 1;
+        ts256_slot_col[next] = rc_col[k];
+        ts256MarkDirty((uint8_t)next);
+    }
+    for (int o = 0; o < bs; o++) ts256_slot_ref[o] = 0;
+    for (int i = 0; i < 256; i++) {
+        const int k = rc_of[i];
+#if TSPAL_DBG
+        if (ts256_valid && ts256_off[i] != rc_off[k]) ts_inv_moved++;
+        if ((rc_col[k] & 0x7FFF) != (TsConf::cram[i] & 0x7FFF)) ts_inv_near++;
+#endif
+        ts256SetMap(i, rc_off[k]);
+        ts256_slot_ref[rc_off[k]]++;
+        ts256_cell_col[i] = TsConf::cram[i] & 0x7FFF;
+    }
+    for (int b = ts256_nb; b < TS256_MAX_BANKS; b++) memcpy(ts256_map_b[b], ts256_map_b[0], 256);
+    ts256_valid = true;
+}
+
 // Bring the cell→offset map up to date with CRAM. Cheap when nothing changed
 // (one pass of 256 compares); called at the first poll after a CRAM change so
 // lines rendered from then on use the new numbering. `full` forgets
 // everything (mode entry: the slots hold the standard palette).
 static void ts256Assign(bool full) {
     ts256PoolInit();
+    // A held re-index with a single bank: the whole picture is re-rendered next
+    // frame, so rebuild the numbering from the colours instead of patching the
+    // sticky map (see ts256Reduce). Deterministic, so the flush's second call
+    // in the next frame reproduces the same map and writes nothing.
+    if (!full && ts256_valid && ts256_nb == 1 && (ts_reindex_hold || ts_reindex_held_prev)) {
+        ts256Reduce();
+        return;
+    }
     if (full || !ts256_valid) {
         for (int i = 0; i < TS256_POOL; i++) { ts256_slot_col[i] = 0xFFFF; ts256_slot_ref[i] = 0; }
+        for (int i = 0; i < 256; i++) ts256_cell_col[i] = 0xFFFF;
         memset(ts256_dirty_b, 0, sizeof ts256_dirty_b);
         ts256_valid = false;
         ts256_exhausted = false;
@@ -2338,6 +2549,8 @@ static void ts256Assign(bool full) {
         const uint16_t c = TsConf::cram[i] & 0x7FFF;
         if (ts256_valid) {
             const uint8_t s = ts256_off[i];
+            if (ts256_cell_col[i] == c) continue;                     // the CELL did not change (approximated or not)
+            ts256_cell_col[i] = c;
             if (ts256_slot_col[s] == c) continue;                     // unchanged
             if (ts256_slot_ref[s] == 1) {                             // sole owner: recolour in place
                 ts256_slot_col[s] = c;
@@ -2376,8 +2589,13 @@ static void ts256Assign(bool full) {
             }
             ts256_exhausted = true;
         }
+#if TSPAL_DBG
+        if (ts256_valid && ts256_off[i] != (uint8_t)hit) ts_inv_moved++;
+        if ((ts256_slot_col[hit] & 0x7FFF) != c) ts_inv_near++;
+#endif
         ts256SetMap(i, (uint8_t)hit);
         ts256_slot_ref[hit]++;
+        ts256_cell_col[i] = c;
     }
     // Banks beyond nb mirror bank 0: a line still queued with a higher bank tag
     // from before the count shrank then renders with live slots, not a stale map.
@@ -2416,6 +2634,22 @@ static void ts256ProgramBank(int b) {
 // changed slots go into every bank, so every row on screen — whatever version
 // it was rendered with — shows the new colours at once (the beam-scheduled
 // path for a palette ANIMATION, see tsPalettePoll).
+#if TSPAL_DBG
+static void ts256InvariantCheck() {
+    uint32_t viol = 0, dirty = 0, live = 0;
+    for (int i = 0; i < 256; i++) {
+        const uint16_t c = TsConf::cram[i] & 0x7FFF;
+        if ((ts256_slot_col[ts256_off[i]] & 0x7FFF) != c) viol++;
+    }
+    for (int o = 0; o < ts256_bs; o++) {
+        if (!ts256_slot_ref[o]) continue;
+        live++;
+        if (ts256_dirty_b[0][o >> 5] & (1u << (o & 31))) dirty++;
+    }
+    ts_inv_viol += viol; ts_inv_dirty += dirty; ts_inv_live = live; ts_inv_checks++;
+}
+#endif
+
 static void tsPalette256Flush(bool invalidate) {
     if (invalidate) {
         ts256PoolInit();
@@ -2433,6 +2667,19 @@ static void tsPalette256Flush(bool invalidate) {
             if (ts256_slot_ref[o]) ts256MarkDirty((uint8_t)o);
     }
     for (int b = 0; b < ts256_nb; b++) ts256ProgramBank(b);
+#if TSPAL_DBG
+    ts256InvariantCheck();
+#endif
+    // The border bands are painted with the border cell's SLOT NUMBER and only
+    // repainted at EndFrame when that number changes (gmxBorderFrame). A flush
+    // that renumbered the slots (ts256Reduce does, on every held palette) leaves
+    // 20 + 20 rows holding the OLD number under the NEW colours — another cell's
+    // colour framing the picture until the next EndFrame, which with V-Sync
+    // pacing off may be most of a sweep away. Every row instrument here scans
+    // the PICTURE rows only, which is why this was the residue no counter saw
+    // (Kolbass, hw 2026-09-17: "very hard to notice, but still there"). Cheap:
+    // two memsets of 20 rows, once per palette flush.
+    if (VIDEO::ts_render_live) { VIDEO::gmx_border_dirty = true; VIDEO::gmxBorderFrame(false); }
 }
 
 // Versioned apply (nb > 1): a new palette version = the next bank, written at
@@ -2476,7 +2723,10 @@ static void ts256Version() {
 void VIDEO::tsPaletteFlush() {
     tsCramDirty = false;
     ts_pal_row = -1;
+    ts_pal_ncells = 0;
     ts_pal_assigned = false;
+    TSPAL_PALGEN();
+    ts_reindex_hint = false;   // accounted for by this flush (no-op on the nb > 1 path: tsPalettePoll takes ts256Version there)
     if (ts_pal256_live) {
         tsPalette256Flush(false);
         return;
@@ -2560,7 +2810,32 @@ void VIDEO::tsPaletteRestore() {
 // guest line (tsDrawTick), at EndFrame and from the frame-pacing waits.
 void VIDEO::tsCramChanged() {
     tsCramDirty = true;
-    if (ts_pal_row >= 0) return;
+    if (ts_pal_row < 0) ts_pal_ncells = 0;    // a new pending window: count ITS cells (the flush resets too, but a window
+                                              // that never flushed must not make every later single-cell write "wide")
+    if (ts_pal_ncells < 0xFFFF) ts_pal_ncells++;
+    // A change this wide is a whole-palette change wherever it lands in the
+    // frame; with a single bank it is held and flipped with the picture. The
+    // earlier `want == top` test missed Kolbass' static picture, whose palette
+    // is written by a different routine at another raster position: that
+    // change took the sticky path on a full pool — `viol=144 near=72 moved=0
+    // merges=0` in one window, hw 2026-09-17 — 72 cells left on their old
+    // colours for a frame, the "full negative" at the scene cut.
+    if (ts_pal256_live && ts256_nb == 1 && !tsReindexReady &&
+        (ts_reindex_hint || ts_pal_ncells >= TS_REINDEX_MIN_CELLS)) {
+#if TSPAL_DBG
+        if (!ts_reindex_hold) ts_dbg_hold_wide++;
+#endif
+        ts_reindex_hint = true;
+        ts_reindex_hold = true;
+    }
+    if (ts_pal_row >= 0) {
+        // Already pending. A change from an EARLIER frame is superseded: the
+        // pixels the renderer will show are the latest ones, so the apply must
+        // be judged against this frame — and `dseq` is 4-bit signed, a change
+        // left pending 8 frames wraps negative and blocks itself for ever.
+        if (ts_pal_seq == ts_frame_seq) return;
+        ts_pal_row = -1;
+    }
     if (!ts_fast_armed || ts_line_t == 0xFFFFFFFFu) {
         // Before the first / after the last content line: it is the NEXT frame's
         // top that first shows the new colours.
@@ -2570,6 +2845,16 @@ void VIDEO::tsCramChanged() {
         ts_pal_row = (int32_t)(lin_end + ts_line_idx);   // the next line to render
         ts_pal_seq = ts_frame_seq;
     }
+    // A WHOLE-FRAME palette change (landed before the first content line) with
+    // no palette banks to version with is treated exactly like a re-index —
+    // held, reduced and flipped with the picture in blanking — whether or not a
+    // blit comes with it. Without this the change takes the sticky path, and
+    // on an exhausted pool every cell that really changed is re-parked on the
+    // nearest colour, often a different slot: Kolbass' static picture re-DMAs a
+    // palette that DOES differ every 4th frame (chg≈12 with no blits, moved
+    // 460-655 per window, hw 2026-09-17) — ~50 cells hopping per change, the
+    // rows already rendered showing other cells' colours. A per-LINE palette
+    // effect (want > top) keeps the beam rule: it is not a frame-wide change.
 #if TSPAL_DBG
     ts_pal_dbg.changes++;
     ts_pal_dbg.change_us = time_us_64();
@@ -2601,6 +2886,19 @@ static void tsPalDbgPrint() {
                ts_pal_dbg.beam_min, ts_pal_dbg.beam_max, ts_pal_dbg.lat_max_us, ts_pal_dbg.chg_gt_max_us,
                ts_pal_dbg.blocked_seq, ts_pal_dbg.waited, (int)VIDEO::ts_pal256_live, ts256_nb, (unsigned long)ts256_ver,
                c1 / 50, (unsigned long)ts_render_pos);
+    Debug::log("[TSPAL] bad=%lu rows/%lu sweeps (worst sweep %lu of %u visible) hold=%d | map: viol=%lu dirty=%lu near=%lu moved=%lu live=%lu/%u checks=%lu exh=%d merges=%lu mergeMaxD2=%lu",
+               (unsigned long)ts_scan_bad, (unsigned long)ts_scan_sweeps, (unsigned long)ts_scan_bad_max,
+               (unsigned)(lin_end2 - lin_end), (int)ts_reindex_hold,
+               (unsigned long)ts_inv_viol, (unsigned long)ts_inv_dirty, (unsigned long)ts_inv_near, (unsigned long)ts_inv_moved,
+               (unsigned long)ts_inv_live, (unsigned)ts256_bs, (unsigned long)ts_inv_checks, (int)ts256_exhausted,
+               (unsigned long)ts_inv_merges, (unsigned long)ts_inv_mergemax);
+    Debug::log("[TSPAL] late=%lu rows rendered behind the beam (max %lu rows behind) | hold: blit=%lu wide=%lu rel=%lu relDirty=%lu relForced=%lu ready=%d hold=%d",
+               (unsigned long)ts_late_rows, (unsigned long)ts_late_max, (unsigned long)ts_dbg_hold_blit, (unsigned long)ts_dbg_hold_wide,
+               (unsigned long)ts_dbg_rel, (unsigned long)ts_dbg_rel_dirty, (unsigned long)ts_dbg_rel_forced, (int)VIDEO::tsReindexReady, (int)ts_reindex_hold);
+    ts_late_rows = 0; ts_late_max = 0;
+    ts_dbg_hold_blit = ts_dbg_hold_wide = ts_dbg_rel = ts_dbg_rel_dirty = ts_dbg_rel_forced = 0;
+    ts_scan_bad = ts_scan_bad_max = ts_scan_sweeps = 0;
+    ts_inv_viol = ts_inv_dirty = ts_inv_near = ts_inv_moved = ts_inv_checks = ts_inv_merges = ts_inv_mergemax = 0;
     ts_pal_dbg.changes = ts_pal_dbg.applies = ts_pal_dbg.p_force = ts_pal_dbg.p_nobeam = ts_pal_dbg.p_norow = ts_pal_dbg.p_bank = 0;
     ts_pal_dbg.p_blank = ts_pal_dbg.p_vis = ts_pal_dbg.p_later = ts_pal_dbg.blocked_seq = ts_pal_dbg.waited = 0;
     ts_pal_dbg.beam_min = 999; ts_pal_dbg.beam_max = -999; ts_pal_dbg.lat_max_us = 0; ts_pal_dbg.chg_gt_max_us = 0;
@@ -2640,7 +2938,95 @@ int VIDEO::displayBeamRow() {
 #endif
 }
 
+#if TSPAL_DBG
+// Walk the beam row by row across the visible rows and count the ones whose
+// framebuffer generation differs from the generation the hardware palette
+// holds. Called from every poll, so it must be incremental: each row is looked
+// at once per sweep. This is the artifact, counted.
+static void tsPalScanBeam(int beam) {
+    VIDEO::tsPalScanWanted = VIDEO::ts_pal256_live;
+    if (beam < 0) {
+        if (ts_scan_last >= 0) {          // sweep over: fold it into the window
+            ts_scan_bad += ts_scan_bad_sweep;
+            if (ts_scan_bad_sweep > ts_scan_bad_max) ts_scan_bad_max = ts_scan_bad_sweep;
+            ts_scan_bad_sweep = 0; ts_scan_sweeps++; ts_scan_last = -1;
+        }
+        return;
+    }
+    if (beam < ts_scan_last) {            // wrapped without a blanking poll
+        ts_scan_bad += ts_scan_bad_sweep;
+        if (ts_scan_bad_sweep > ts_scan_bad_max) ts_scan_bad_max = ts_scan_bad_sweep;
+        ts_scan_bad_sweep = 0; ts_scan_sweeps++; ts_scan_last = -1;
+    }
+    int r = (ts_scan_last < (int)lin_end) ? (int)lin_end : ts_scan_last + 1;
+    const int end = (beam < (int)lin_end2) ? beam : (int)lin_end2 - 1;
+    for (; r <= end; r++)
+        if (r < (int)sizeof ts_row_gen && ts_row_gen[r] != ts_pal_gen_live) ts_scan_bad_sweep++;
+    if (beam > ts_scan_last) ts_scan_last = beam;
+}
+#endif
+
+// Beam-driven release of a held re-index: the beam has just left the picture,
+// so the whole frame is rendered NOW (every content line, from the current
+// registers — a re-index has no per-line raster effects by construction, the
+// hold already cost them) and the pending palette is flushed in the same
+// blanking. core1 needs ~4.4 ms for 200 lines against 5.2 ms of blanking and
+// stays ahead of the beam from row one, so the sweep that follows carries new
+// pixels under the new palette on every row. The guest's own line ticks for the
+// rest of this frame are switched off (the picture is already posted).
+static void tsReindexRelease() {
+    ts_reindex_ready_seen = false;
+    // The map must match the CRAM of THIS moment: a change that landed after
+    // the poll which reduced it (a palette animation writing at every frame's
+    // top) would otherwise render with a map for the previous palette.
+    if (VIDEO::ts_pal256_live) { ts256Assign(false); ts_pal_assigned = true; }
+    ts_reindex_hold = false;
+    VIDEO::tsReindexReady = false;
+    ts_reindex_held_prev = true;
+    const uint32_t lines = lin_end2 - lin_end;
+    ts_last_curline = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < lines; i++) {
+        linedraw_cnt = lin_end + i;
+        curline = i;
+        VIDEO::tsRenderLine(i);
+    }
+    // Stop the guest's ticks re-posting THIS frame — but only if the frame is
+    // still being posted (ts_line_idx > 0). With V-Sync pacing a HALT-only frame
+    // is over 0.1 ms after v_sync and the release lands in its pacing wait,
+    // where EndFrame has already re-armed the next frame at line 0: zeroing that
+    // one cost a second un-rendered frame per hold (c1 100 of 200 lines, sprites
+    // frozen 2 frames in 4, hw 2026-09-17). Rendering it again a few ms later
+    // is 200 lines of core1 — cheaper than a lost frame of animation.
+    if (ts_fast_armed && ts_line_idx > 0) {
+        ts_line_idx = lines;
+        linedraw_cnt = lin_end2;
+        VIDEO::ts_line_t = 0xFFFFFFFFu;
+        VIDEO::Draw = &VIDEO::Blank;
+        VIDEO::Draw_Opcode = &VIDEO::Blank_Opcode;
+    }
+#if TSPAL_DBG
+    ts_dbg_rel++;
+    if (VIDEO::tsCramDirty) ts_dbg_rel_dirty++;
+#endif
+    if (VIDEO::tsCramDirty) {
+        TSPAL_APPLIED(p_blank, -1);
+        VIDEO::tsPaletteFlush();
+        ts_pal_flushes++;
+    }
+}
+
 void VIDEO::tsPalettePoll(bool force) {
+    const int beam0 = displayBeamRow();
+#if TSPAL_DBG
+    if (ts_pal256_live) tsPalScanBeam(beam0);
+#endif
+    // Release the moment the beam has left the PICTURE — the bottom border is as
+    // good as blanking and adds ~1.3 ms: the release render (200 lines, ~4.5 ms
+    // of core1 plus the HDMI ISR's share) must be complete before the beam
+    // reaches the first content row of the next sweep, or those rows show the
+    // OLD pixels under the NEW palette for one frame — invisible while the
+    // pictures are alike, a negative flash at a scene cut (hw 2026-09-17).
+    if (tsReindexReady && (beam0 < 0 || beam0 >= (int)lin_end2)) { tsReindexRelease(); return; }
     if (!tsCramDirty) return;
     if (ts_pal256_live && ts256_nb > 1 && ts_reindex_hint) {
         // RE-INDEX (pixels were redrawn for this palette — ts_reindex_hint):
@@ -2661,8 +3047,17 @@ void VIDEO::tsPalettePoll(bool force) {
     }
     // The cell→slot map follows CRAM at once (lines rendered from here on use
     // the new numbering); only the slot COLOURS wait for the beam below.
-    if (ts_pal256_live && !ts_pal_assigned) { ts256Assign(false); ts_pal_assigned = true; }
-    if (force || !ts_render_live || ESPectrum::maxSpeed || ts_pal_flushes >= TS_PAL_MAX_FLUSHES) {
+    if (ts_pal256_live && !ts_pal_assigned) {
+        ts256Assign(false); ts_pal_assigned = true;
+        TSPAL_MAPGEN();
+    }
+    // The unconditional flush at v_sync (ESPectrum::loop) would otherwise defeat
+    // the re-index rule below by landing the new palette on the picture that is
+    // still being held back — which IS the failure the hold exists to remove.
+    // It stays as the safety valve: the hold lasts one frame, so a change the
+    // beam rule never resolves is forced at the v_sync after that.
+    const bool reindexPending = (ts_pal256_live && ts256_nb == 1 && ts_reindex_hint);
+    if ((force && !reindexPending) || !ts_render_live || ESPectrum::maxSpeed || ts_pal_flushes >= TS_PAL_MAX_FLUSHES) {
         TSPAL_APPLIED(p_force, displayBeamRow());
         tsPaletteFlush();
         ts_pal_flushes++;
@@ -2684,13 +3079,39 @@ void VIDEO::tsPalettePoll(bool force) {
     const uint32_t pos = ts_render_pos;
     int dseq = (int)(((pos >> 16) - ts_pal_seq) & 0x0F);
     if (dseq >= 8) dseq -= 16;
-    if (dseq < 0) { TSPAL_COUNT(blocked_seq); return; }   // renderer still on an earlier frame: nothing new is on screen yet
     const int32_t top = (int32_t)lin_end;
     const int32_t doneTo = top + (int32_t)(pos & 0xFFFF) - 1;   // last completed row of the renderer's frame
+    // A full RE-INDEX with no palette banks (nb == 1) has exactly two consistent
+    // states and the framebuffer is held back to make them the only two it ever
+    // shows (ts_reindex_hold): flush in the first blanking AFTER the renderer
+    // has replaced the picture — never before it. Getting this backwards is
+    // what the 2026-09-16 captures show: flushing in the blanking that PRECEDES
+    // the re-render put the previous picture under the new palette for a whole
+    // display frame (edge-matched per row against both neighbouring pictures on
+    // a scene cut: 9 bands of 10 still held the OLD picture), and flushing
+    // inside the sweep, which is what the plain rule below does, split the
+    // screen at the row where the renderer crossed the beam.
+    const bool reindexDone = (ts_pal256_live && ts256_nb == 1 && ts_reindex_hint &&
+                              (dseq > 0 || (dseq == 0 && doneTo >= (int32_t)lin_end2 - 1)));
+    if (beam < 0 && reindexDone) {
+        TSPAL_APPLIED(p_blank, beam);
+        tsPaletteFlush();
+        ts_pal_flushes++;
+        return;
+    }
+    if (dseq < 0) { TSPAL_COUNT(blocked_seq); return; }   // renderer still on an earlier frame: nothing new is on screen yet
+    if (ts_reindex_hold || ts_reindex_held_prev) { TSPAL_COUNT(waited); return; }   // the held picture must not be recoloured under the beam
+    // A re-index with a single palette bank has NO legal mid-sweep apply: the
+    // hold makes the picture flip between sweeps, so the palette may only flip
+    // in blanking too (reindexDone above). The beam rule below is for palette
+    // animations over unchanged pixels; reaching it here with the hint up is
+    // exactly the `later 1 beam=192` that painted 171 rows wrong.
+    if (ts_pal256_live && ts256_nb == 1 && ts_reindex_hint) { TSPAL_COUNT(waited); return; }
     bool apply;
     if (dseq == 0) {
         // The change frame: new pixels on rows want..doneTo.
-        apply = (beam < 0) ? (want <= top && doneTo >= want) : (beam >= want && beam <= doneTo);
+        apply = (beam < 0) ? (want <= top && doneTo >= want)
+                           : (beam >= want && beam <= doneTo);
     } else {
         // A later frame: rows from `want` down were completed in the change
         // frame, rows top..doneTo in this one.
@@ -4109,6 +4530,7 @@ void VIDEO::Reset() {
         ts_render_live = 0;
         ts_tsu_live = false;
         ts_pal256_live = false;
+    tsReindexClear();
         ts_pal_row = -1;
         setVsyncLead(false);
         ts_rres_live = 0;
@@ -5398,7 +5820,6 @@ static const TsRres TS_RENDER_RO kTsRres[4] = {
 
 // Cold: runs once per mode change, from EndFrame (vblank).
 void VIDEO::tsVideoApplyPending() {
-    tsRenderDrain();
     const uint8_t vc = TsConf::r.vconf;
     uint8_t want = (vc & 0x20) ? (uint8_t)TSV_NOGFX : (uint8_t)(vc & 0x03);
     const uint8_t rres = vc >> 6;
@@ -5414,6 +5835,17 @@ void VIDEO::tsVideoApplyPending() {
     const uint8_t wantRender = (want != TSV_ZX || wantTsu) ? 1 : 0;
     if (want == ts_vmode_live && wantTsu == ts_tsu_live &&
         (!wantRender || rres == ts_rres_live)) return;
+
+    // Only a REAL mode change needs the queue empty (the geometry, the driver
+    // tables and the palette below are rebuilt under core1's feet). This call
+    // used to sit at the top of the function, i.e. it drained on EVERY frame —
+    // exactly the "No drain at EndFrame" rule this design was built on: core0
+    // then waits out core1's whole render pass at the frame boundary. Measured
+    // on Kolbass (TS-Conf 256c + sprites, hw 2026-09-16): `wait` 3.1-3.4 ms on
+    // 60/60 frames against a c1 of 4.2 ms, i.e. two thirds of the frame's
+    // `cpu=5.0 ms` was core0 spinning.
+    tsRenderDrain();
+    tsReindexClear();                      // a hold must not outlive the mode it was taken in
 
     const bool wasPair  = (ts_vmode_live == TSV_TEXT);
     bool wantPair = (want == TSV_TEXT);
@@ -5598,9 +6030,8 @@ void VIDEO::tsRenderLine(uint32_t curline) {
     // and the GMX renderer never noticed because it is idempotent. The Y
     // counter below is not (hw 2026-09-06: SETUP came out half height), so a
     // repeat of the line just rendered is dropped here.
-    static uint32_t s_last_curline = 0xFFFFFFFFu;
-    if (curline == s_last_curline) return;   // line 0 of the next frame follows the last line, never 0
-    s_last_curline = curline;
+    if (curline == ts_last_curline) return;   // line 0 of the next frame follows the last line, never 0
+    ts_last_curline = curline;
 
     if (curline == 0) {
         ts_ygctr = ((uint32_t)TsConf::r.g_yoffs + ts_crop_top) & 0x1FF;
@@ -5611,6 +6042,14 @@ void VIDEO::tsRenderLine(uint32_t curline) {
     } else {
         ts_ygctr = (ts_ygctr + 1) & 0x1FF;
     }
+
+    // Re-index in flight and no palette banks: hold the whole picture back to
+    // the next frame (see ts_reindex_hold). The Y counter above is kept up to
+    // date so the frame that does render starts from the right row.
+    if (ts_reindex_hold) return;
+#if TSPAL_DBG
+    if (lin_end + curline < sizeof ts_row_gen_posted) ts_row_gen_posted[lin_end + curline] = ts_map_gen;
+#endif
 
     TsRenderJob j;
     j.l.kind = 0; j.l.tsu = 0;
@@ -5893,6 +6332,17 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
     const uint32_t ygctr = j.l.ygctr;
     const uint32_t frow = curline + lin_end;
     ts_render_pos = ((uint32_t)(j.l.kind >> 4) << 16) | curline;   // lines below this one are done (tsPalettePoll)
+#if TSPAL_DBG
+    if (frow < sizeof ts_row_gen) ts_row_gen[frow] = ts_row_gen_posted[frow];
+    {   // the beam already scanned this row in the current sweep: it showed the OLD pixels
+        const int b = displayBeamRow();
+        if (b >= (int)frow && b >= (int)lin_end) {
+            ts_late_rows = ts_late_rows + 1;
+            const uint32_t d = (uint32_t)(b - (int)frow);
+            if (d > ts_late_max) ts_late_max = d;
+        }
+    }
+#endif
     if (!vga.frameBuffer || frow >= (uint32_t)vga.yres) return;
     uint8_t* fb_row = (uint8_t*)vga.frameBuffer[frow];
     if (!fb_row) return;
@@ -6834,6 +7284,30 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
         // pictures once lines rendered at their own time (Ninja Gaiden, hw 2026-09-07).
         ts_line_t = tStatesScreen << ESPectrum::multiplicator;
         ts_line_idx = 0;
+        // A held re-index: VRAM is complete now (the blit ran inside this frame),
+        // but the picture is NOT released here — the guest frame boundary has no
+        // fixed relation to the display beam once V-Sync pacing is off (hw
+        // 2026-09-17, vsync=0: `bad≈1000 rows/61 sweeps`, every update torn). It
+        // is released by tsPalettePoll when the beam enters blanking, whole
+        // picture and palette together (tsReindexRelease).
+        if (ts_reindex_hold) {
+            if (ts_reindex_ready_seen) {
+                // Ready since the PREVIOUS EndFrame and still not released: no poll
+                // saw the beam leave the picture for a whole frame (a full-height
+                // mode, a core0 with no idle, ...). Release now, wherever the beam
+                // is — one torn frame beats a picture that never renders.
+#if TSPAL_DBG
+                ts_dbg_rel_forced++;
+#endif
+                tsReindexRelease();
+            } else {
+                tsReindexReady = true;
+                ts_reindex_ready_seen = true;
+            }
+        } else {
+            ts_reindex_ready_seen = false;
+        }
+        ts_reindex_held_prev = false;
         ts_frame_seq++;                    // the frame whose lines are posted from here (tsPalettePoll)
         Draw = &TsDraw;
         Draw_Opcode = &TsDraw_Opcode;
@@ -6988,6 +7462,18 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
 void VIDEO::RedrawPausedFrame() {
 
     if (!vga.frameBuffer) return;
+
+    // A TS-Conf palette change still waiting for the beam has to be applied
+    // NOW: the beam rule is meaningless once the machine is stopped — nothing
+    // advances, `tsPalettePoll` is only pumped from ESPectrum::loop, and the
+    // walk below re-renders the whole picture from the CURRENT VRAM. Without
+    // this the paused screen shows the new picture under the previous palette
+    // and keeps showing it for as long as the debugger is open: every colour
+    // of the 256c artwork wrong, the source dither turned into a violent
+    // 1-px checkerboard (hw 2026-09-16, a debugger capture of Kolbass —
+    // `dbgFrameNu`'s footer is in the shot, which is what named the cause).
+    if (Z80Ops::isTsconf && (tsReindexReady || ts_reindex_hold)) { ts_reindex_hold = false; tsReindexReady = false; }
+    if (Z80Ops::isTsconf && tsCramDirty) tsPalettePoll(true);
 
     uint32_t saved_tstates = CPU::tstates;
 
