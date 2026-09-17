@@ -617,7 +617,25 @@ void mem_desc_t::from_mem(mem_desc_t& ram, size_t sz) {
     }
 }
 void mem_desc_t::cleanup() {
+    // A POINTER page's data is wherever `p` points — an SRAM buffer, or a butter
+    // slot handed out by assign_ram in BUTTER order (butter_idx), which is NOT the
+    // ZX page number. `vram_off()` (= page_idx * 16 KB) is the backing store of the
+    // NON-pointer tiers only. The original test was inverted and zeroed
+    // `butter_nc(page * 16K)` for pointer pages: on a TS-Conf boot with pages 0..5
+    // in SRAM that hit ZX page i+6 instead of i, left the SRAM pages standing, and
+    // for the last six pages ran 96 KB PAST the page strip into the Buffer arena —
+    // straight over the NeoGS low RAM (fw code + work RAM, the first palloc there),
+    // so every .spg load after commit 400e7c4 turned the card into a NOP slide
+    // (hw 2026-09-17: GS-Z80 PC in zeroed RAM, SP at its reset top, command 0x30
+    // never acknowledged, Lode Runner's uploader parked in its D0 wait). The GMX
+    // F11 wipe and the snapshot loaders' void-page zeroing had the same defect.
+    // Through the CACHED alias on purpose: pointer pages are read through it by
+    // both cores, so an uncached memset would leave stale (and possibly dirty)
+    // lines behind.
     if (_int->mem_type == POINTER) {
+        if (!_int->p) return;
+        memset(direct(), 0, MEM_PG_SZ);
+    } else {
         // Zero the vram backing store (same effect as the old per-byte _write
         // loop — 16384 SPI transactions — but chunked).
         uint32_t ba = _int->vram_off();
@@ -643,9 +661,6 @@ void mem_desc_t::cleanup() {
                 _write(addr, 0);
             }
         }
-    } else {
-        if (!_int->p) return;
-        memset(direct(), 0, MEM_PG_SZ);
     }
 }
 

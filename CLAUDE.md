@@ -5564,6 +5564,35 @@ statics worth a lazy palloc: `g_rawTrkDataBuf` 8 KB (wd1793, 20 sites),
 that have no SPI PSRAM / swap. GS-Z80 core efficiency (redcode + per-access
 callbacks) is the second lever and only matters for TS + a GS that is PLAYING.
 
+## `mem_desc_t::cleanup()` zeroed the WRONG memory for pointer pages — and killed NeoGS (hw-confirmed 2026-09-17)
+
+"NeoGS hangs, it did not a couple of days ago." Dump: GS-Z80 `PC=D673 SP=4400` in a
+banked window that reads all zeros, `status=01 command=30` never acknowledged, the ZX
+(Lode Runner's FH1-style uploader) parked in `IN A,(#BB) / RRCA / JR C` at 6651 — and
+the card's WHOLE low RAM (fw code under NOROM + the fixed 4000-7FFF work window)
+zero. Nothing GS-side changed; what changed two days earlier was commit 400e7c4, the
+.spg loader's `for (i < MEM_PG_CNT) ram[i].cleanup()`. `cleanup()` had its branches
+INVERTED since the initial commit: for a POINTER page it zeroed `butter_nc(page_idx
+* 16 KB)` — the backing-store offset of the NON-pointer tiers — while a butter pointer
+page's data is at `PSRAM_DATA + butter_idx * 16 KB`, where `butter_idx` counts only
+butter pages (`assign_ram`). On a TS-Conf boot pages 0..5 are SRAM, so cleanup(i) wiped
+ZX page i+6, left the SRAM pages standing, and for i = 250..255 wrote 96 KB PAST the
+page strip into the Buffer arena (`initPools butter=...@+4000KB` = exactly 250 pages) —
+whose first block is `s_workRamBuf`, the NeoGS 64 KB low RAM + blank page. Every .spg
+load since then turned a live card into a NOP slide; the demos loaded before Lode
+Runner never talked to it, so nobody saw. The GMX F11 wipe (ESPectrum::reset) and the
+snapshot loaders' void-page `cleanup()` calls (48K image on a 128K machine: pages 1/3/4/6
+"zeroed" = butter pages 7/9/10/12 destroyed, the real ones stale) had the same defect
+on every butter board. Fix: POINTER → `memset(direct())` through the CACHED alias (both
+cores read pointer pages through it; an uncached memset would leave stale, possibly
+dirty, lines), everything else keeps the backing-store path. Cost: the cached memset
+read-allocates, so `[SPG] N RAM pages cleared in ... us` grows from ~76 ms to **~268 ms** (hw log 2026-09-17, 256 pages). Acceptable for a
+load; if it ever matters, the faster variant is the uncached memset at the RIGHT
+offset (`p - PSRAM_DATA`) followed by `xip_cache_invalidate_range` over the page —
+but mind the order against dirty lines and a core1 render of the page in flight. Lesson: **`vram_off()` is only meaningful for a page whose data is
+IN the backing store**; any code path that touches a POINTER page must go through `p`.
+Test ELF `debug/DVp2-ngs-cleanup-1.0.6.elf` (plain build).
+
 ## The framebuffer is claimed FIRST, and the MP3 decoder is lazy (2026-08-13)
 
 **hw-confirmed 2026-08-13 on z0p2** (ZERO2 + Pico 2, butter 8 MB): 720x576 + NeoGS +
