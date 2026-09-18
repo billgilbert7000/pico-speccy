@@ -29,6 +29,7 @@ the Free Software Foundation, either version 3 of the License, or
 #include "RTC.h"
 #include "ZxEvoAvr.h"
 #include "DivMMC.h"
+#include "IDE.h"
 #include "LEDIndicators.h"
 #include "OSDMain.h"
 
@@ -1172,11 +1173,25 @@ struct DmaRam {
 // DRAM cycles per word (dma.v phases; see the DRAM model above): RAM->RAM read
 // + write, blit read src + read dst + write, FILL / CRAM / SFILE one access.
 // SPI is bound by the card's clock instead (~4 T per word at 14 MHz SCK) and
-// keeps a flat T cost.
+// keeps a flat T cost. IDE likewise: the FPGA's own `ide` module spends 6 fclk
+// (28 MHz) per 16-bit access — one `go` plus the five states of `st[4:0]`,
+// common/ide.v — and the DRAM half one cycle (4 fclk), i.e. 10 fclk = 1.25 base
+// T per word, of which only a quarter is DRAM. The transfer is paced by that
+// bus, not by DRAM bandwidth, so like SPI it is a flat cost (quarter-T units).
 static const uint8_t kDmaCycRam  = 2;
 static const uint8_t kDmaCycBlt  = 3;
 static const uint8_t kDmaCycOne  = 1;
 static const uint8_t kDmaCostSpi = 4;
+static const uint8_t kDmaCostIdeQ2 = 5;   // T per word x4
+
+// The DMA's IDE device is wired to the ZX-Evo's OWN connector: the top-level
+// `ide` module arbitrates one drive between the Z80 ports and the DMA, and that
+// connector's Z80-side decode is NEMO-style (zports.v `ide_even`). A drive
+// reached through some other card's port map — an SMUC on the bus — is NOT on
+// it, so it is not what this DMA moves. With nothing there the transaction
+// still RUNS (a guest waiting on DMA_ACT or the DMA interrupt must not hang for
+// want of a disk): reads take the open bus, writes go nowhere.
+static inline bool ideDmaOn() { return IDE::portScheme == IDE::NEMO; }
 
 // Bulk DMA through the core1 render queue: hw-REFUTED 2026-09-07 (TMNT ship
 // scene: ~170 sprite blits per frame, each followed by a DMAStatus poll — every
@@ -1218,7 +1233,7 @@ TS_HOT void TsConf::dmaStart(uint8_t ctrl) {
     uint32_t num = r.dmanum;
     uint32_t words = 0;
     uint8_t cyc = kDmaCycRam;      // DRAM cycles per word
-    bool spi = false;
+    bool spi = false, ide = false;
     DmaRam src, dst;
 
     auto ss_inc = [&]() { ss = salgn ? ((ss & m1) | ((ss + 2) & m2)) : ((ss + 2) & 0x3FFFFF); };
@@ -1226,16 +1241,8 @@ TS_HOT void TsConf::dmaStart(uint8_t ctrl) {
 
     switch (mode) {
         case M_RAM: case M_BLT1: case M_BLT2: case M_FILL: case M_CRAM: case M_SFILE:
-        case M_SPIRAM: case M_RAMSPI:
+        case M_SPIRAM: case M_RAMSPI: case M_IDERAM: case M_RAMIDE:
             break;
-        case M_IDERAM: case M_RAMIDE: {
-            static bool warned = false;
-            if (!warned) {
-                warned = true;
-                Debug::log("TsConf: IDE DMA (ctrl=%02X) not implemented — transaction dropped", ctrl);
-            }
-            return;   // reference: DMA_ST_NOP — DMA_ACT never rises
-        }
         default:
             return;   // reserved device: no-op, like the reference
     }
@@ -1267,16 +1274,36 @@ TS_HOT void TsConf::dmaStart(uint8_t ctrl) {
         if (mode == M_RAM) ts_dma_words_ram += words; else if (mode == M_FILL) ts_dma_words_fill += words; else ts_dma_words_blt += words;
 #endif
     } else {
-    // Synchronous modes read RAM (CRAM/SFILE/RAMSPI source) or write it
-    // (SPIRAM): a queued bulk DMA must land first, and a SPIRAM write must not
-    // overtake a queued line that reads its destination.
+    // Synchronous modes read RAM (CRAM/SFILE/RAMSPI/RAMIDE source) or write it
+    // (SPIRAM/IDERAM): a queued bulk DMA must land first, and a write into RAM
+    // must not overtake a queued line that reads its destination.
     VIDEO::tsRenderDrainDma();
-    if (mode == M_SPIRAM && VIDEO::tsRenderOverlaps(dd, 2 * len * (num + 1) + asize * (num + 1))) VIDEO::tsRenderDrain();
+    if (mode == M_SPIRAM || mode == M_IDERAM) {
+        // Device -> RAM: a queued line that reads the destination must render
+        // first, and sectors landing in the bitmap are a re-index for the
+        // palette heuristic exactly as a bulk blit is (tsVramDmaNote).
+        if (VIDEO::tsRenderOverlaps(dd, 2 * len * (num + 1) + asize * (num + 1))) VIDEO::tsRenderDrain();
+        VIDEO::tsVramDmaNote(dd, 2 * len * (num + 1));
+    }
+    bool ide_on = false;      // the on-board drive is there (hoisted out of the loop)
     if (mode == M_CRAM || mode == M_SFILE) {
         cyc = kDmaCycOne;
     } else if (mode == M_SPIRAM || mode == M_RAMSPI) {
         spi = true;
         LED::touchR(LED::ZCTRL);
+    } else if (mode == M_IDERAM || mode == M_RAMIDE) {
+        ide = true;
+        cyc = kDmaCycOne;     // one DRAM access per word (the `dma=` DRAM counter)
+        LED::touchR(LED::IDE);
+        ide_on = ideDmaOn();
+        if (!ide_on) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                Debug::log("TsConf: IDE DMA (ctrl=%02X) with no on-board drive (IDE scheme %u)"
+                           " - reads give 0xFFFF", ctrl, (unsigned)IDE::portScheme);
+            }
+        }
     }
 
     for (;;) {
@@ -1309,14 +1336,23 @@ TS_HOT void TsConf::dmaStart(uint8_t ctrl) {
                     DivMMC::zc_write_data((uint8_t)(v >> 8));
                     break;
                 }
+                case M_IDERAM:            // ide.v drives ide_a=0 / cs0: the DATA
+                                          // register, one whole word, no latch
+                    dst.wr(dd, ide_on ? IDE::read_data16() : 0xFFFF);   // none: open bus
+                    break;
+                case M_RAMIDE: {
+                    const uint16_t v = src.rd(ss);   // the DRAM half runs either way
+                    if (ide_on) IDE::write_data16(v);
+                    break;
+                }
                 default: break;
             }
 #if PERF_TRACE && PERF_HIST
-            if (mode != M_FILL && mode != M_SPIRAM) ts_dma_src_hist[(ss >> 14) & 0xFF] += n;
-            if (mode != M_RAMSPI) ts_dma_dst_hist[(dd >> 14) & 0xFF] += n;
+            if (mode != M_FILL && mode != M_SPIRAM && mode != M_IDERAM) ts_dma_src_hist[(ss >> 14) & 0xFF] += n;
+            if (mode != M_RAMSPI && mode != M_RAMIDE) ts_dma_dst_hist[(dd >> 14) & 0xFF] += n;
 #endif
-            if (mode != M_SPIRAM) ss_inc();
-            if (mode != M_RAMSPI) dd_inc();
+            if (mode != M_SPIRAM && mode != M_IDERAM) ss_inc();
+            if (mode != M_RAMSPI && mode != M_RAMIDE)  dd_inc();
             words += n;
             rem -= n;
         }
@@ -1335,8 +1371,9 @@ TS_HOT void TsConf::dmaStart(uint8_t ctrl) {
     // "busy" simply supersedes it — the data is long written either way.
     s_dma_busy = true;
     s_steal_half = 0;
-    if (spi) s_dma_end = CPU::tstates + ((words * kDmaCostSpi) << ESPectrum::multiplicator);
-    else     s_dma_end = tsDmaEndWithVideo(CPU::tstates, words * cyc);   // + CPU steals, live (tsDmaSteal)
+    if (spi)      s_dma_end = CPU::tstates + ((words * kDmaCostSpi) << ESPectrum::multiplicator);
+    else if (ide) s_dma_end = CPU::tstates + (((words * kDmaCostIdeQ2) >> 2) << ESPectrum::multiplicator);
+    else          s_dma_end = tsDmaEndWithVideo(CPU::tstates, words * cyc);   // + CPU steals, live (tsDmaSteal)
 #if PERF_TRACE
     if (!spi) ts_dma_cyc += words * cyc;
 #endif

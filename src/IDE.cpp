@@ -1415,3 +1415,13 @@ void IDE::write_data_low(uint8_t lo) {
     write8(0, latch_write);
 }
 
+uint16_t IDE::read_data16() {
+    const uint8_t lo = read8(0);
+    return (uint16_t)lo | ((uint16_t)read8(0) << 8);
+}
+
+void IDE::write_data16(uint16_t v) {
+    write8(0, (uint8_t)v);
+    write8(0, (uint8_t)(v >> 8));
+}
+

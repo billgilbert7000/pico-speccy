@@ -8568,6 +8568,71 @@ vdos_off = iordwr &&  vg_port && vdos
   ordinary build; `TS_VIDEO_TRACE` carries the rest, and the memory dump's
   TS-Conf block prints `vdos=`).
 
+## DMA device IDE (ctrl 03/0B): the DMA owns the ON-BOARD connector (2026-09-18, NOT hw-tested and probably untestable)
+
+The last of the Wild Commander gaps, and the reference answers every question
+about it — `pentevo/fpga/current/common/ide.v` is 120 lines and the DMA is one of
+its two masters:
+
+```verilog
+assign ide_out = dma_req ? dma_out : z80_out;
+assign ide_a   = dma_req ? 3'b0    : z80_a;      // <- the DATA register, always
+wire cs0_n = dma_req ? 1'b0 : z80_cs0_n;
+wire cs1_n = dma_req ? 1'b1 : z80_cs1_n;
+```
+
+- **One whole 16-bit word per device access, no latch and no byte order to
+  choose.** `dma.v` wires IDE as `ide_in[15:0] -> data` / `ide_out = data` and its
+  `dev_stb` takes `ide_int_stb` on its own — the `byte_sw_stb`/`bsel` half-word
+  machinery is the SPI and WTPORT path, not this one. `IDE::read_data16()` /
+  `write_data16()` (IDE.h) are that access: two `read8(0)`/`write8(0)` steps of the
+  existing engine, low half first, which is the first sector byte because that is
+  what ATA puts on D0-D7. A sector therefore lands in RAM in file order.
+- **The drive is the ZX-Evo's OWN**, since `ide.v` arbitrates ONE connector
+  between the Z80 ports and the DMA, and that connector's Z80-side decode is
+  NEMO-style (`zports.v` `ide_even`). So `ideDmaOn()` is `IDE::portScheme ==
+  IDE::NEMO`: a disk reached through another card's port map — an SMUC on the bus,
+  which TS-Conf now offers — is not on that cable and is not what this DMA moves.
+- **With no drive the transaction still RUNS**, reads taking the open bus
+  (0xFFFF) and writes going nowhere. Dropping it (the old stub's `DMA_ST_NOP`,
+  where DMA_ACT never rises) hangs any guest that waits on DMA_ACT or the DMA
+  interrupt, which is a far worse failure than a buffer of 0xFF. Warn-once in the
+  log, so the 0xFFs have an explanation.
+- **Cost is FLAT, like SPI, and it is the IDE bus that sets it**: `ide.v` spends
+  6 fclk per access (`go` plus the five states of `st[4:0]` at 28 MHz) and the
+  DRAM half one cycle (4 fclk) — 10 fclk = **1.25 base T per word**, of which
+  only a quarter is DRAM, so `tsDmaEndWithVideo` (which removes the video
+  fetcher's share of DRAM) is the wrong model here. 256 words = a sector = ~320 T,
+  about 1.5 scanlines. `cyc` is still set to 1 so the `[PERF] dram: dma=` DRAM
+  counter stays honest.
+- **Deliberate deviations**: a real transfer is paced by the drive and needs DRQ
+  up, where our `read8(0)` answers 0xFF outside a transfer and auto-advances
+  through a multi-sector read — i.e. a driver that starts the DMA at the wrong
+  moment gets filler instead of a stall; and the SD access behind a sector read
+  stops the emulated Z80 for milliseconds while the modelled DMA_ACT is ~0.1 ms,
+  the same deviation every disk access here has. `tsDmaSteal` (a CPU access
+  stealing a DRAM cycle from a running DMA) still applies, slightly over-charging
+  a transfer that only wants a quarter of the DRAM — same as SPI.
+- **Same commit: device->RAM DMA now notes the VRAM write** (`tsVramDmaNote`) for
+  SPI as well as IDE. A sector of artwork landing in the bitmap is a re-index for
+  the `nb == 1` palette heuristic exactly as a bulk blit is; only the bulk path
+  did it before.
+- **Checked on the host** (scratchpad, not `tools/` — `TsConf.cpp` cannot be
+  host-compiled, so the test is a transcription and would rot there): the shipped
+  loop against an independent implementation of Unreal's own
+  `dma_ide_r`/`dma_ide_w` + `dma_next_burst` driven one memcyc at a time, over
+  8640 combinations of addresses, len, num, S/D_ALGN, ASZ and direction — the
+  device-access order, the RAM word paired with each, and the register file left
+  behind all agree. Three mutations each fail it: letting IDERAM step the source
+  address, letting RAMIDE step the destination, and a burst that ignores the
+  alignment window. The word order is checked separately against `read8(0)`.
+- **Hw check owed, and it may never come** (the owner's own "наверное проверить не
+  сможем"): nothing is known to drive this — WC's panel drivers are port drivers,
+  and its DMA IDE users are the ones that were out of reach while the stub stood.
+  If a title ever does: `[PERF] ts: dma=` should show the words, the `NGS`-style
+  warn-once line must be ABSENT (it means the scheme is not NEMO), and a sector
+  read into the bitmap must appear right way round rather than byte-swapped.
+
 ## The SD write path: the card has to STOP saying "data accepted" (2026-09-18, NOT hw-tested)
 
 Wild Commander (TS-Conf, boots as `boot.$C` off the FAT card through TS-BIOS)
@@ -8611,9 +8676,10 @@ The gap list is done. **VDOS / FDDVirt**, **TSU over TEXT** and **SMUC** were
 implemented the same day (three sections below). The three that remain are owner
 rulings, not open work — do NOT reopen them without a new request:
 
-- **DMA device IDE** (`ctrl 03/0B`, the warn-once stub) stays a stub: "пункт 2
-  это логично, не надо править". WC's IDE drivers that use DMA are therefore out;
-  its ordinary (port-driven) IDE panels are not.
+- **DMA device IDE** (`ctrl 03/0B`) was first ruled out ("пункт 2 это логично, не
+  надо править") and then reopened the same day ("в принципе тоже можно поправить,
+  но наверное проверить не сможем") — it is IMPLEMENTED, see the section below,
+  and is the one piece here with no path to a hardware verdict.
 - **90x36 text** is not a code question ("решается не кодом"). RRES 360x288 on a
   320x240 framebuffer shows the central 80x30 of it, so the answer is the user's
   own setup: `TextMode=1` at 640x480, or the 720x576 video mode.

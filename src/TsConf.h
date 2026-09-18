@@ -16,12 +16,12 @@ Phase 1 scope — the machine core only:
   - FRAME interrupt with programmable HSINT/VSINT position, IM2 vector #FF.
   - SysConfig ZCLK 3.5/7/14 MHz -> ESPectrum::multiplicator.
   - CRAM/SFILE storage (written via #nnAF only in this phase).
-Phase 2 (2026-09-06) adds the DMA controller (RAM/BLT1/BLT2/FILL/CRAM/SFILE
-and SPI via the Z-Controller; IDE is a warn-once stub), the LINE and DMA
-interrupt sources with the hardware's priority/acknowledge rules, and the
+Phase 2 (2026-09-06) adds the DMA controller (RAM/BLT1/BLT2/FILL/CRAM/SFILE,
+SPI via the Z-Controller and, since 2026-09-18, the on-board IDE), the LINE and
+DMA interrupt sources with the hardware's priority/acknowledge rules, and the
 W0_WE write protect. Phase 3/4 added the 16c/256c/text video modes and the
 TSU; the read cache is modelled by the DRAM timing model (TsDramCache.h), and
-VDOS (virtual floppies) by fddPortIo below. Still inert: the DMA's IDE device.
+VDOS (virtual floppies) by fddPortIo below.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by

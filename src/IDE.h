@@ -82,6 +82,14 @@ public:
     static uint8_t read_data_low();
     static void    write_data_low(uint8_t lo);
 
+    // Whole-word data-port access, for a bus that carries all 16 bits at once.
+    // The TS-Conf DMA is the only user: its `ide` module drives ide_a=0 / cs0
+    // with the full word (fpga/current/common/ide.v), so there is no latch and
+    // no byte order to choose — the low half is the first sector byte, exactly
+    // as read_data_low() puts it on the bus.
+    static uint16_t read_data16();
+    static void     write_data16(uint16_t v);
+
 private:
     static bool open_image(int slot, const char* path);
     static uint32_t lba();
