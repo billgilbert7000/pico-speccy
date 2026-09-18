@@ -8511,6 +8511,60 @@ on real hardware — the SMUC clock at #DFBA versus the Pentagon/Karabas one at
 - `RTC_PORT_TRACE` CMake option (default OFF) logs every `..F7` IN/OUT for debugging.
 - **Toggle**: Devices → **"CMOS + NVRAM"** (renamed from "RTC + NVRAM" 2026-09-07; Yes/No → `Config::rtc_enabled`, NVS key still `rtc_enabled`, default **off**). It governs **every battery-backed chip in the firmware**: the Pentagon/Profi **Mr Gluk** MC146818 (`#DFF7`/`#BFF7`), the **Karabas-Pro native** DS1307 path (`#FF`/`#BF` under CPM+ROM14), and — since 2026-09-07 — whether the Scorpion's **SMUC** card is fitted at all (its MC146818 + 24LC16; see the SMUC section). Two deliberate non-members: **TS-Conf**, where those same Gluk ports are the ZX-Evo AVR and MUST stay live or TS-BIOS sits in an invisible Setup, and SNTP (Network → Sync time / the boot auto-sync), which only *writes* the clock when the option is on. Machines with no clock (48K/128K/+2/+3/+3e/Byte) show the row and ignore it. When off, the Gluk/Karabas ports still RESPOND STATICALLY (not bypassed): reads float 0xFF (Gluk shows "NO CMOS"; Karabas clock shows FF), but status regs A/C read UIP/flags clear so the Karabas ROMain boot's MC146818 "wait until UIP clears" loop can't hang (was the "ROMain won't start with RTC off" bug); register-select is still latched, data writes swallowed (`RTC::readDisabled()`, four handlers in Ports.cpp).
 
+## The SD write path: the card has to STOP saying "data accepted" (2026-09-18, NOT hw-tested)
+
+Wild Commander (TS-Conf, boots as `boot.$C` off the FAT card through TS-BIOS)
+read the card perfectly and **froze the machine the moment it saved `wc.ini`**,
+leaving the file gone after a forced reboot. The bug is one line of
+`DivMMC::mmc_read`'s CMD24 case: after the data-response token it answered
+**0x05 to every further read, for ever**. A real card answers 0x05 ONCE, then
+holds MISO low (0x00) while it programs, then 0xFF.
+
+- That difference is invisible to a driver whose busy-wait is "read while the
+  byte is 0x00", and it is a **permanent hang** for one that waits for the busy
+  phase to END by polling for 0xFF. WC's Z-Controller driver has BOTH loops —
+  `IN A,(C) / OR A / JR Z` after the response and an unbounded
+  `IN A,(C) / INC A / JR NZ` ("wait ready"), the latter being exactly the
+  "ожидание busy после завершения транзакции записи" its changelog added. The
+  read path was never affected because CMD17 ends with `mmc_read_index = -1`,
+  i.e. it does return to 0xFF.
+- Fixed by `mmc_wr_resp` (-1 none / 0 token / 1 busy / 2 ready), armed when a
+  block is stored — for CMD24 **and** every CMD25 block, which had no data
+  response at all (WC's error path for a bad response is `OUT (#0FAF),err` +
+  `JR $`, i.e. a dead hang with a coloured border — worth recognising). It is
+  read at the TOP of `mmc_read`, ahead of the command latch, because the latch
+  is now released as soon as the block's CRC bytes are in.
+- **Releasing the latch is the second half of the fix**: `mmc_index_command`
+  used to run past the end of the block for ever, so with CS held low across
+  commands the card went deaf to the NEXT command frame and the driver hung in
+  its R1 wait instead. Only a CS edge healed it.
+- Third, smaller: the 0xFE data token may be preceded by any number of 0xFF gap
+  bytes; the index now holds at the token slot until the token really arrives,
+  or the whole block shifts one byte per gap.
+- Checked on the host by transcribing the patched state machine and driving it
+  with WC's own byte sequence (CS, CMD24 frame, R1 wait, gaps, token, 512+CRC,
+  response, busy wait, ready wait, and a second command with CS held low). The
+  pre-fix model fails exactly at the ready wait — that is the hang. Re-derive it
+  before touching this area again; the file itself cannot be host-compiled (it
+  pulls FatFs and the SDK).
+
+### What Wild Commander still needs from us (analysed 2026-09-18, not fixed)
+
+Everything it touches is emulated except these, in priority order: **VDOS /
+FDDVirt** (`TsConf.cpp` stores `#29` and nothing else — kills `MOUNTER.WMF`,
+`TRDUMP.WMF` and every "TR-DOS Only" menu entry; the RTL rule is: any I/O to
+`#1F/#3F/#5F/#7F/#FF` while `dos && virt_vg` maps RAM page **0xFF** into
+window 0, writable, from the NEXT opcode fetch, and an access to `#1F..#7F`
+while in VDOS leaves it); **DMA device IDE** (`ctrl 03/0B`, warn-once stub, so
+its IDE drivers with DMA are out); **90x36 text** (RRES 360x288 — on a 320x240
+framebuffer only the central 80x30 of it is visible, so use `TextMode=1` at
+640x480 or the 720x576 video mode); **TSU over TEXT** (hardware composites
+them — `video_render.v` — we drop the TSU in a TEXT frame, which is what
+`CLOCK.WMF` uses); SMUC is Scorpion-gated here, and the second ZC card (cfg
+bit 3, `DRV=6`) does not exist. Its whole keyboard goes through the ZX-Evo AVR
+PS/2 scancode log (Gluk reg `#F0`, type 2 — `ZxEvoAvr.cpp`), which WC being
+usable at all now confirms on hardware.
+
 ## FDI copy protection — physical damage emulation (`src/wd1793.cpp`)
 
 An FDI sector flagged with a **bad data CRC** was unreadable on the source

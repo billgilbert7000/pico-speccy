@@ -101,6 +101,14 @@ private:
     static int  mmc_wr25_idx;     // -1 = waiting for token, 0..511 data, 512..513 CRC
     static bool mmc_wr25_r1;      // R1 pending for the CMD25 response
 
+    // Data-response phase of a written block (CMD24 and every CMD25 block):
+    // -1 = none, 0 = the 0x05 "data accepted" token is due, 1 = one busy byte
+    // (MISO low = 0x00), 2 = ready again (0xFF from here on). A card that never
+    // leaves the response byte hangs every driver that waits for the busy phase
+    // to END — see the comment at the CMD24 read case in DivMMC.cpp.
+    static int  mmc_wr_resp;
+    static uint8_t mmcWriteResponse();   // walks that sequence, one byte per read
+
     static uint32_t mmc_read_address;
     static uint32_t mmc_write_address;
 
