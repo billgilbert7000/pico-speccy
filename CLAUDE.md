@@ -8605,18 +8605,23 @@ holds MISO low (0x00) while it programs, then 0xFF.
   before touching this area again; the file itself cannot be host-compiled (it
   pulls FatFs and the SDK).
 
-### What Wild Commander still needs from us (analysed 2026-09-18)
+### What Wild Commander still needs from us — CLOSED (analysed and finished 2026-09-18)
 
-Everything it touches is emulated except these, in priority order:
-~~**VDOS / FDDVirt**~~ (done the same day — see the section below);
-**DMA device IDE** (`ctrl 03/0B`, warn-once stub, so
-its IDE drivers with DMA are out); **90x36 text** (RRES 360x288 — on a 320x240
-framebuffer only the central 80x30 of it is visible, so use `TextMode=1` at
-640x480 or the 720x576 video mode); ~~**TSU over TEXT**~~ (done the same day —
-see the section below); ~~**SMUC**~~ (done the same day — see the section below);
-the second ZC card (cfg bit 3, `DRV=6`) does not exist. Its whole keyboard goes through the ZX-Evo AVR
-PS/2 scancode log (Gluk reg `#F0`, type 2 — `ZxEvoAvr.cpp`), which WC being
-usable at all now confirms on hardware.
+The gap list is done. **VDOS / FDDVirt**, **TSU over TEXT** and **SMUC** were
+implemented the same day (three sections below). The three that remain are owner
+rulings, not open work — do NOT reopen them without a new request:
+
+- **DMA device IDE** (`ctrl 03/0B`, the warn-once stub) stays a stub: "пункт 2
+  это логично, не надо править". WC's IDE drivers that use DMA are therefore out;
+  its ordinary (port-driven) IDE panels are not.
+- **90x36 text** is not a code question ("решается не кодом"). RRES 360x288 on a
+  320x240 framebuffer shows the central 80x30 of it, so the answer is the user's
+  own setup: `TextMode=1` at 640x480, or the 720x576 video mode.
+- **The second ZC card** (cfg bit 3, `DRV=6`) will not be emulated — "всегда будет
+  без карты", i.e. that slot is expected to be empty on this hardware.
+
+Its whole keyboard goes through the ZX-Evo AVR PS/2 scancode log (Gluk reg `#F0`,
+type 2 — `ZxEvoAvr.cpp`), which WC being usable at all now confirms on hardware.
 
 ## SMUC on TS-Conf: the ports are OPEN, and the card's clock is not the AVR (2026-09-18, NOT hw-tested)
 
