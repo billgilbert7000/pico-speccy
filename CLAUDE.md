@@ -8511,6 +8511,64 @@ on real hardware — the SMUC clock at #DFBA versus the Pentagon/Karabas one at
 - `RTC_PORT_TRACE` CMake option (default OFF) logs every `..F7` IN/OUT for debugging.
 - **Toggle**: Devices → **"CMOS + NVRAM"** (renamed from "RTC + NVRAM" 2026-09-07; Yes/No → `Config::rtc_enabled`, NVS key still `rtc_enabled`, default **off**). It governs **every battery-backed chip in the firmware**: the Pentagon/Profi **Mr Gluk** MC146818 (`#DFF7`/`#BFF7`), the **Karabas-Pro native** DS1307 path (`#FF`/`#BF` under CPM+ROM14), and — since 2026-09-07 — whether the Scorpion's **SMUC** card is fitted at all (its MC146818 + 24LC16; see the SMUC section). Two deliberate non-members: **TS-Conf**, where those same Gluk ports are the ZX-Evo AVR and MUST stay live or TS-BIOS sits in an invisible Setup, and SNTP (Network → Sync time / the boot auto-sync), which only *writes* the clock when the option is on. Machines with no clock (48K/128K/+2/+3/+3e/Byte) show the row and ignore it. When off, the Gluk/Karabas ports still RESPOND STATICALLY (not bypassed): reads float 0xFF (Gluk shows "NO CMOS"; Karabas clock shows FF), but status regs A/C read UIP/flags clear so the Karabas ROMain boot's MC146818 "wait until UIP clears" loop can't hang (was the "ROMain won't start with RTC off" bug); register-select is still latched, data writes swallowed (`RTC::readDisabled()`, four handlers in Ports.cpp).
 
+## VDOS: the FPGA swaps the TR-DOS ROM for RAM page 0xFF (2026-09-18, NOT hw-tested)
+
+TS-Conf's virtual floppies are not an FDC emulation at all. FDDVirt (`#29`)
+marks drives 0-3 virtual (b3:0) and opens the controller ports outside TR-DOS
+(b7, OPEN_VG); when the TR-DOS ROM then touches `#1F/#3F/#5F/#7F/#FF` with a
+virtual drive selected, the FPGA **puts RAM page 0xFF in window 0** — writable,
+ROM gone, the DOS signal held up — so the guest's own handler takes over at the
+address right after the access, does the work and leaves by touching one of
+those ports again. That is what Wild Commander's `MOUNTER.WMF` (Alex Rider's
+vDOS) uses to serve mounted TRD/SCL images, and what `TRDUMP.WMF` and the
+"TR-DOS Only" menu entries need.
+
+`TsConf::fddPortIo` (called first thing by both port paths, behind a one-test
+`(addr & 0x1F) == 0x1F` filter) is `zports.v` line for line:
+
+```
+fddvrt = fddvirt[3:0];  open_vg = fddvirt[7];  virt_vg = fddvrt[drive_sel_raw]
+vg_wen   = (dos || open_vg) && !vdos && !virt_vg          // controller selected
+vg_wrDS  = iowr && vgsys_port && (dos || open_vg)         // drive latch, NOT gated
+vdos_on  = iordwr && (vg_port || vgsys_port) && dos && !vdos && virt_vg
+vdos_off = iordwr &&  vg_port && vdos
+```
+
+- **`virt_vg` uses the drive selected BEFORE this access.** `drive_sel_raw` is a
+  clocked latch, so writing a virtual drive number to `#FF` does not itself
+  enter VDOS — the NEXT controller access does. The latch is not gated by
+  `vdos` or `virt_vg` either: that is how the handler in page 0xFF chooses
+  which virtual drive it is serving.
+- **Both transition accesses are invisible to the WD1793** (`vg_wen` is 0
+  during each), so they are eaten here. An eaten read of a controller register
+  answers **0xFF** — `zports.v`'s read mux has no entry for the four VG
+  registers, so they fall to its `default: dout = 8'hFF` when the chip is not
+  selected. A **read of `#FF` is never eaten**: its INTRQ/DRQ bits come from
+  the FPGA, not from the chip's data bus, and the RTL does not gate them.
+- **`dos_off` gained the RTL's `!vdos` term** (`zmem.v`), or the handler would
+  drop TR-DOS the moment it called out of window 0 — and vDOS does.
+- The window-0 override sits in `setBanks` (page 0xFF, and RAM even with
+  `W0_RAM`=0), the write-protect bit is suppressed in `tsUpdateWrGate`
+  (`ramwr_en = !win0 || w0_we || vdos`) and the DRAM cache rows are rebuilt
+  with window 0 as RAM. With less than 4 MB configured page 0xFF aliases down
+  like every other page number here.
+- **DELIBERATE DEVIATION: the hardware delays the window-0 swap to the next
+  opcode fetch** (`vdos = opfetch ? pre_vdos : vdos_r`, whose own comment says
+  "due to INIR that writes right after iord cycle"); we switch inside the
+  access. The two differ only for a block instruction whose memory half lands
+  in window 0 — a sector read into 0x0000-0x3FFF, i.e. into the ROM the trigger
+  came from. Every opcode fetch after the triggering instruction comes from
+  page 0xFF either way, which is the part the handler depends on.
+- Checked by sweeping all 98304 combinations of (fddvirt, drive_sel, dos, vdos,
+  port, direction) against those equations transcribed independently from the
+  Verilog; four hand-applied mutations (dropping the `!vdos` in `vg_wen`, the
+  `virt` in `vdos_on`, the `#FF`-read exemption, and letting `#FF` exit VDOS)
+  each fail it. That is a truth-table check only — the paging half is checked
+  by inspection, so the first hardware run should look for `[VDOS] FDDVirt ...`
+  and `[VDOS] on/off` in the log (the first dozen transitions are logged in an
+  ordinary build; `TS_VIDEO_TRACE` carries the rest, and the memory dump's
+  TS-Conf block prints `vdos=`).
+
 ## The SD write path: the card has to STOP saying "data accepted" (2026-09-18, NOT hw-tested)
 
 Wild Commander (TS-Conf, boots as `boot.$C` off the FAT card through TS-BIOS)
@@ -8548,14 +8606,11 @@ holds MISO low (0x00) while it programs, then 0xFF.
   before touching this area again; the file itself cannot be host-compiled (it
   pulls FatFs and the SDK).
 
-### What Wild Commander still needs from us (analysed 2026-09-18, not fixed)
+### What Wild Commander still needs from us (analysed 2026-09-18)
 
-Everything it touches is emulated except these, in priority order: **VDOS /
-FDDVirt** (`TsConf.cpp` stores `#29` and nothing else — kills `MOUNTER.WMF`,
-`TRDUMP.WMF` and every "TR-DOS Only" menu entry; the RTL rule is: any I/O to
-`#1F/#3F/#5F/#7F/#FF` while `dos && virt_vg` maps RAM page **0xFF** into
-window 0, writable, from the NEXT opcode fetch, and an access to `#1F..#7F`
-while in VDOS leaves it); **DMA device IDE** (`ctrl 03/0B`, warn-once stub, so
+Everything it touches is emulated except these, in priority order:
+~~**VDOS / FDDVirt**~~ (done the same day — see the section below);
+**DMA device IDE** (`ctrl 03/0B`, warn-once stub, so
 its IDE drivers with DMA are out); **90x36 text** (RRES 360x288 — on a 320x240
 framebuffer only the central 80x30 of it is visible, so use `TextMode=1` at
 640x480 or the 720x576 video mode); **TSU over TEXT** (hardware composites

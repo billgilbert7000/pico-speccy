@@ -1058,6 +1058,17 @@ IRAM_ATTR uint8_t Ports::input(uint16_t address) {
   if (Z80Ops::isTsconf && (address & 0xFF) == 0xAF)
     return TsConf::portRead((uint8_t)(address >> 8));
 
+  // TS-Conf virtual floppies (FDDVirt / VDOS): the window-0 swap is triggered by
+  // the controller ports themselves, so this has to run before anything else
+  // claims them — the Kempston #1F branch included, because while TR-DOS (or
+  // OPEN_VG) owns those ports they are not the joystick. An EATEN read means the
+  // WD1793 is not selected: open bus. The (addr & 0x1F) == 0x1F pre-filter keeps
+  // the cost of the hook on the hot I/O path to one test (#1F/#3F/#5F/#7F/#FF all
+  // satisfy it; fddPortIo rejects the other three).
+  if (Z80Ops::isTsconf && (address & 0x1F) == 0x1F &&
+      TsConf::fddPortIo(address, false, 0) == TsConf::FDD_EATEN)
+    return 0xFF;
+
   if (MEM_PG_CNT > 64 && !Z80Ops::isTsconf && address == 0xAFF7) {
     LED::touchR(LED::RAM);
     return portAFF7;
@@ -3007,6 +3018,13 @@ IRAM_ATTR void Ports::output(uint16_t address, uint8_t data) {
     TsConf::portWrite((uint8_t)(address >> 8), data);
     return;
   }
+
+  // TS-Conf virtual floppies — see the matching hook in Ports::input. A write to
+  // #FF always latches the drive number (that latch is in the FPGA, not in the
+  // controller); an EATEN write is one the WD1793 must not see.
+  if (Z80Ops::isTsconf && (a8 & 0x1F) == 0x1F &&
+      TsConf::fddPortIo(address, true, data) == TsConf::FDD_EATEN)
+    return;
 
   // ZiFi NIC port: A0..A7 == 0xEF, A8..A15 selects register (0x00..0xC7)
   // 0xEFF7 (hi=0xEF > 0xC7) falls through to Pentagon mode16col handler below
