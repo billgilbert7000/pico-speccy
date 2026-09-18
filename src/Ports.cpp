@@ -1151,14 +1151,15 @@ IRAM_ATTR uint8_t Ports::input(uint16_t address) {
     }
     // else: not an IDE sub-address — fall through (don't shadow AY/ULA etc.)
   }
-  // IDE/HDD — SMUC scheme (Scorpion only, TR-DOS/service address space). Like
-  // NEMO this must precede the ULA even-port branch: every SMUC port has A0=0.
+  // IDE/HDD — SMUC scheme (Scorpion: TR-DOS/service address space; TS-Conf: a
+  // ZXBUS card with its ports always open). Like NEMO this must precede the ULA
+  // even-port branch: every SMUC port has A0=0.
   if (smucActive()) {
     uint8_t v;
     if (smucPortRead(address, &v)) return v;
   }
 #if SMUC_TRACE
-  else if (Z80Ops::isScorpion) smucTraceGated(false, address, 0);
+  else if (Z80Ops::isScorpion || Z80Ops::isTsconf) smucTraceGated(false, address, 0);
 #endif
   // OPL3 (YMF262) VGM-player card: the status register lives at the address
   // ports (#C4/#C6); data ports read 0x00, as verified on real YMF262 (MAME).
@@ -2594,12 +2595,24 @@ bool Ports::gmxPortWrite(uint16_t address, uint8_t data) {
 // boot re-initialised them ("настройки БИОС не сохраняются между F12",
 // 2026-09-07). Config, not Z80Ops, for the two switches: they are read live.
 static inline bool smucCardFitted() {
+  // TS-Conf: the card is a ZXBUS one there and Wild Commander offers it as a
+  // panel drive (`DRV=3/4` IDEsmucMaster/Slave, wc.ini), so the IDE/HDD row
+  // alone fits it — "CMOS + NVRAM" on a ZX-Evo means the machine's OWN Gluk
+  // clock, which is the AVR keyboard controller and is always live. The card's
+  // own MC146818 + 24LC16 come with it, as on a Scorpion.
+  if (Z80Ops::isTsconf) return IDE::scheme == IDE::SMUC;
   return Z80Ops::isScorpion &&
          (Config::rtc_enabled || IDE::scheme == IDE::SMUC);
 }
 static inline bool smucActive() {
-  return smucCardFitted() &&
-         (ESPectrum::trdos || (Ports::port1FFD & 0x02));   // DOSEN or SYSEN
+  if (!smucCardFitted()) return false;
+  // On a Scorpion the card sits inside the DOS address space. A ZX-Evo has no
+  // SYSEN and enters TR-DOS only through the #3Dxx trap, so a gated card would
+  // never answer software running from RAM — which is every WC panel driver.
+  // That is the "SMUC с открытыми портами" configuration WC's own changelog
+  // names, and it is what its driver was written against.
+  if (Z80Ops::isTsconf) return true;
+  return ESPectrum::trdos || (Ports::port1FFD & 0x02);   // DOSEN or SYSEN
 }
 // Whether a DRIVE hangs on the card's ATA bus is the IDE/HDD row's business
 // alone — and `portScheme` is OFF unless an image is really mounted, so "scheme
@@ -2673,6 +2686,7 @@ void smucTraceGated(bool wr, uint16_t address, uint8_t v) {
 // change: Config::requestMachine and the tail of the menu commit. Both calls
 // are idempotent — init() no-ops while it is up, close() while it is down.
 static bool smucCardConfigured() {
+  if (Config::arch == A_TSCONF) return Config::ide_scheme == IDE::SMUC;
   return Config::arch == A_SCORP &&
          (Config::rtc_enabled || Config::ide_scheme == IDE::SMUC);
 }
@@ -2748,7 +2762,14 @@ bool Ports::smucPortWrite(uint16_t address, uint8_t data) {
       // Setup's writes were swallowed and its reads came back 0xFF: every boot
       // said "CMOS checksum error" and the settings lived only in the
       // firmware's RAM copy — kept across F11, lost on every F12 (2026-09-07).
-      if (smucSys & 0x80) RTC::writeData(data);
+      // `false` = not the Gluk window: the chip on the card is a plain
+      // MC146818, never the ZX-Evo AVR (RTC.h). Deliberate deviation on
+      // TS-Conf, where the two clocks are separate chips on real hardware and
+      // one `RTC::` singleton here: they share the register file and the
+      // select latch. Nothing drives both — WC's SMUC driver is a DISK driver
+      // — and the alternative (letting these fall through) would put the
+      // card's clock on the ULA border.
+      if (smucSys & 0x80) RTC::writeData(data, false);
       else                RTC::selectReg(data);
     }
   } else {
@@ -2803,7 +2824,7 @@ bool Ports::smucPortRead(uint16_t address, uint8_t* out) {
       // SYS read: NVRAM SDA comes back on D6; D7 would be the drive's INTRQ.
       *out = Nvram24::read() & 0x7F;
     } else {
-      *out = RTC::readData();       // the card's own clock: always live (see the write side)
+      *out = RTC::readData(false);  // the card's own clock: always live, never the AVR (write side)
     }
   } else {
     // #5FBA version (must never be #FF) / #7FBA the FDD latch read-back.
@@ -3319,7 +3340,7 @@ IRAM_ATTR void Ports::output(uint16_t address, uint8_t data) {
   // IDE/HDD — SMUC scheme (see the input twin).
   if (smucActive()) { if (smucPortWrite(address, data)) return; }
 #if SMUC_TRACE
-  else if (Z80Ops::isScorpion) smucTraceGated(true, address, data);
+  else if (Z80Ops::isScorpion || Z80Ops::isTsconf) smucTraceGated(true, address, data);
 #endif
   // OPL3 (YMF262) — the AlexZor DivMMC VGM-player sound card: address/data
   // register pairs on #C4/#C5 (set #1) and #C6/#C7 (set #2), low-byte decode

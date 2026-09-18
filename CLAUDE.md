@@ -8613,10 +8613,73 @@ Everything it touches is emulated except these, in priority order:
 its IDE drivers with DMA are out); **90x36 text** (RRES 360x288 — on a 320x240
 framebuffer only the central 80x30 of it is visible, so use `TextMode=1` at
 640x480 or the 720x576 video mode); ~~**TSU over TEXT**~~ (done the same day —
-see the section below); SMUC is Scorpion-gated here, and the second ZC card (cfg
-bit 3, `DRV=6`) does not exist. Its whole keyboard goes through the ZX-Evo AVR
+see the section below); ~~**SMUC**~~ (done the same day — see the section below);
+the second ZC card (cfg bit 3, `DRV=6`) does not exist. Its whole keyboard goes through the ZX-Evo AVR
 PS/2 scancode log (Gluk reg `#F0`, type 2 — `ZxEvoAvr.cpp`), which WC being
 usable at all now confirms on hardware.
+
+## SMUC on TS-Conf: the ports are OPEN, and the card's clock is not the AVR (2026-09-18, NOT hw-tested)
+
+Wild Commander offers `IDEsmucMaster` / `IDEsmucSlave` as panel drives (`DRV=3`
+/ `DRV=4` in `wc.ini`) and its own changelog names the driver it ships as the
+one "под SMUC с открытыми портами" — so the card is a ZXBUS card on a ZX-Evo
+and its ports answer whatever the machine is doing. Two rules change against the
+Scorpion's, and both are forced by the machine rather than chosen:
+
+- **The card is FITTED by the IDE/HDD row alone** (`smucCardFitted`,
+  `smucCardConfigured`). On a Scorpion `Config::rtc_enabled` also fits it,
+  because there the MC146818 the user is switching on IS the SMUC's. On a ZX-Evo
+  "CMOS + NVRAM" means the machine's OWN Gluk clock — which is the AVR keyboard
+  controller (`ZxEvoAvr.cpp`) and is unconditionally live, or TS-BIOS sits in an
+  invisible Setup. Tying the card to it would have made the row mean two
+  different chips on one machine. The card's own MC146818 + 24LC16 come with the
+  card, as on a Scorpion.
+- **`smucActive()` has no DOSEN/SYSEN gate on TS-Conf.** A ZX-Evo has no `#1FFD`
+  SYSEN at all and enters TR-DOS only through the `#3Dxx` trap, so a gated card
+  would be invisible to anything running from RAM — which is every WC panel
+  driver. That IS the open-ports configuration, not a deviation from it.
+
+**The AVR hazard, and why the fix belongs to the PORT PAIR and not to the
+machine.** `RTC::readData/writeData` divert reg C/D/E and the `0xF0..0xFF`
+window to `ZxEvoAvr` whenever `Z80Ops::isTsconf` — correct for `#DFF7`/`#BFF7`
+and wrong for the SMUC's `#DFBA`, which is a plain MC146818 on a separate board.
+Both now take `bool avrExt` (default `true`, so every existing caller is
+unchanged) and the SMUC path passes `false`: the card's reg C keeps its real UF
+/ PF flags, its reg D/E are ordinary registers, and a driver that walks the
+`0xF0+` cells gets storage instead of a scancode log.
+
+- **Deliberate deviation**: on real hardware those are two chips; here they share
+  one `RTC::` register file AND one select latch (`RTC::sel`), so an interleaved
+  `OUT (#DFF7)` / `OUT (#DFBA)` sequence would confuse them. Nothing drives both
+  — WC's SMUC driver is a DISK driver and TS-BIOS never touches `#xxBA` — and the
+  alternative (letting `#DFBA` fall through) puts the card's clock write on the
+  ULA border, since every SMUC port has A0=0. The CMOS image is `cmos_TSConf.nvr`
+  either way, i.e. shared with TS-BIOS's own NVRAM; the 24LC16 gets its own
+  `nvram_TSConf.bin`.
+
+**Decode**: unchanged (`(address & 0x18A3) == 0x18A2 && !(address & 0x0040)`),
+swept against every other TS-Conf decode over all 65536 addresses on the host —
+512 accepted addresses, low bytes `A2 A6 AA AE B2 B6 BA BE`, all 16 documented
+ports reachable, and the ONLY collision is the generic even-port ULA path, which
+is expected and is exactly what the block's placement before it (and its
+`return`) exists for. It does not touch `#nnAF` (TS-Conf registers), `#xx1F`
+(the FDC/VDOS filter) or `#xxF7` (Gluk).
+
+**Note the ZX-Evo's OWN on-board IDE is NEMO-style** (`zports.v`: `ide_even =
+(loa[2:0]==3'b000) && (loa[3] != loa[4])`, plus `NIDE11`), and our `IDE::NEMO`
+scheme already answers on TS-Conf — so WC's `DRV=0` / `DRV=5` need nothing. SMUC
+is the second controller, not a replacement.
+
+**Hw check owed** (none of this has run): WC with `DRV=3` (and `DRV=4` for the
+slave) against a mounted `.hdf`, i.e. the panel listing a partition; the TS-Conf
+keyboard still working while the card is fitted (the `avrExt` split — a
+regression there reads as dead keys, since WC's whole keyboard is the AVR
+scancode log); TS-BIOS Setup still reaching its own NVRAM; `IDE/HDD = SMUC` with
+NO image mounted reading as "controller present, no drive" rather than hanging a
+probe; and the menu note on a machine that is neither Scorpion nor TS-Conf.
+Diagnostics: `-DSMUC_TRACE=ON` now also logs refused accesses on TS-Conf, and
+Hardware Info's `SMUC card` row says `open ports, CMOS + NVRAM + HDD` / `...,
+no HDD` there.
 
 ## TSU over TEXT: in hires a pixel is its own LOW NIBBLE (2026-09-18, NOT hw-tested)
 

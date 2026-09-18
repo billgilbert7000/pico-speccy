@@ -21,8 +21,13 @@ class RTC {
 public:
     static void    init();                 // one-time register defaults
     static void    selectReg(uint8_t reg); // OUT (#DFF7)
-    static void    writeData(uint8_t v);   // OUT (#BFF7)
-    static uint8_t readData();             // IN  A,(#BFF7)
+    // `avrExt` = this access came through the ZX-Evo's Gluk clock ports, where
+    // the MC146818 IS the AVR keyboard controller and reg C/D/E plus the
+    // 0xF0..0xFF window mean something else (ZxEvoAvr.h). The SMUC card carries
+    // its own plain MC146818, so its #DFBA passes false — the extension belongs
+    // to the port pair, not to the machine.
+    static void    writeData(uint8_t v, bool avrExt = true);   // OUT (#BFF7)
+    static uint8_t readData(bool avrExt = true);               // IN  A,(#BFF7)
     // RTC disabled in Options: the ports still answer with a static value so
     // register-select writes never leak elsewhere and the Karabas ROMain boot
     // clock's MC146818 "wait until UIP clears" loop can't spin forever on 0xFF.

@@ -6075,13 +6075,19 @@ static void buildEmulatorInfoText() {
     }
     // On a Scorpion the clock and NVRAM sit on the SMUC card, and the IDE/HDD
     // row only decides whether a disk hangs off it — so say which half is live
-    // rather than leaving "no HDD" and "no CMOS" indistinguishable.
+    // rather than leaving "no HDD" and "no CMOS" indistinguishable. On TS-Conf
+    // the card is fitted by the IDE row alone (the machine's own clock is the
+    // AVR behind the Gluk ports), so there is no half to be missing.
     if (Config::arch == A_SCORP) {
         const bool smucDisk = (IDE::portScheme == IDE::SMUC);  // live AND a mounted image
         pos += infoAppend(buf, pos, bufsz, " SMUC card      : %s\n",
             smucDisk                ? "CMOS + NVRAM + HDD"
             : Config::rtc_enabled   ? "CMOS + NVRAM, no HDD"
                                     : "not fitted");
+    } else if (Config::arch == A_TSCONF && Config::ide_scheme == IDE::SMUC) {
+        pos += infoAppend(buf, pos, bufsz, " SMUC card      : %s\n",
+            (IDE::portScheme == IDE::SMUC) ? "open ports, CMOS + NVRAM + HDD"
+                                           : "open ports, CMOS + NVRAM, no HDD");
     }
 
     // --- Video ---
