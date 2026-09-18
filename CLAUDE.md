@@ -2893,8 +2893,7 @@ VPage/GYOffs. The live VCONFIG table read out of the dump:
   **ZX, 16c and NOGFX lines are EXACT** (their pixels are `{gpal, n}` by
   construction); a 256c band is exact inside its own gpal bank and approximated
   to 16 colours otherwise. Known limits of the mixed frame, all in the pair
-  half: the TSU is dropped (`wantTsu` excludes TEXT — no known title mixes them),
-  TEXT itself ignores the per-line PalSel (the pair palette is one bank per apply,
+  half: TEXT ignores the per-line PalSel (the pair palette is one bank per apply,
   and the two this demo alternates are identical), and `profiPaletteApplyPending`
   applies at v_sync, which on TS-Conf leads blanking by `TS_VSYNC_LEAD_LINES` —
   so a palette animated every frame tears at a fixed raster position near the
@@ -8613,12 +8612,73 @@ Everything it touches is emulated except these, in priority order:
 **DMA device IDE** (`ctrl 03/0B`, warn-once stub, so
 its IDE drivers with DMA are out); **90x36 text** (RRES 360x288 — on a 320x240
 framebuffer only the central 80x30 of it is visible, so use `TextMode=1` at
-640x480 or the 720x576 video mode); **TSU over TEXT** (hardware composites
-them — `video_render.v` — we drop the TSU in a TEXT frame, which is what
-`CLOCK.WMF` uses); SMUC is Scorpion-gated here, and the second ZC card (cfg
+640x480 or the 720x576 video mode); ~~**TSU over TEXT**~~ (done the same day —
+see the section below); SMUC is Scorpion-gated here, and the second ZC card (cfg
 bit 3, `DRV=6`) does not exist. Its whole keyboard goes through the ZX-Evo AVR
 PS/2 scancode log (Gluk reg `#F0`, type 2 — `ZxEvoAvr.cpp`), which WC being
 usable at all now confirms on hardware.
+
+## TSU over TEXT: in hires a pixel is its own LOW NIBBLE (2026-09-18, NOT hw-tested)
+
+`wantTsu` used to exclude TEXT frames outright, so Wild Commander's `CLOCK.WMF`
+(and anything else that puts tiles or sprites over an 80-column desktop) drew
+nothing. The hardware composites the TSU over EVERY mode — `video_render.v`
+picks `video1 = tsu_visible ? tsdata_in : ...` before it knows anything about
+hires — and two RTL facts make the emulation a per-framebuffer-byte override
+rather than a second palette path:
+
+- **The TSU line buffer is read at the LORES rate**: `video_sync.v`'s
+  `ts_raddr = hcount - hpix_beg_ts`, and `hcount` counts 7 MHz pixels in every
+  mode (`always @(posedge clk) if (c3)`), where the text renderer's own `psel`
+  advances on `pix_stb = tv_hires ? f1 : c3` = 14 MHz. So ONE TSU pixel covers
+  BOTH hires pixels of one packed-pair framebuffer byte, and a visible TSU pixel
+  simply replaces that byte with the pair DIAGONAL.
+- **In hires the palette high nibble is discarded.** `video_render.v` ends with
+  `vplex_out = hires ? {temp, video[3:0]} : video` and `video_out.v` reads it
+  back as `vdata = {palsel, plex_sel ? plex[3:0] : plex[7:4]}` — so a TSU
+  pixel's own 4-bit palette field never reaches the CRAM in a hires line; the
+  index is `{palsel, tsdata[3:0]}`, which is exactly what `profi_pair_lookup` is
+  indexed by in the TEXT branch (the pair palette IS the frame's gpal bank).
+  Visibility stays the RTL's `tsu_visible = |tsdata[3:0]`.
+
+So the TEXT branch of `tsRenderExec` composes the TSU line first and then, per
+character, overrides any of its four lores positions whose TSU nibble is
+non-zero with `profi_pair_lookup[n][n]`. Consequences worth knowing:
+
+- **A NOGFX line in a TEXT frame is still HIRES** (`tv_hires = pixrate[vmod]`
+  and `vmod` is the video mode, which NOGFX does not change), so it renders in
+  the same branch with its character layer replaced by the border byte instead
+  of falling into the generic lores path — `textNogfx`. Without that its TSU
+  pixels would go through `s_pairmap` (nearest of the 16 gpal colours) where the
+  hardware takes the low nibble exactly.
+- The **generic** path still maps a pair frame's non-TEXT lines through
+  `s_pairmap`, TSU pixels included. That is deliberate: those lines are LORES on
+  the hardware (a real ZX-Evo switches pixel clock per line, which we cannot —
+  the driver's pair tables are global), so the nearest-colour approximation is
+  the closer answer there than truncating to a nibble.
+- Nothing else needed changing: `tsRenderOverlaps`, `tsWatchedPage`, the
+  `TsuState`/SFILE snapshots and the tile-map prefetch (`ts_tmb`, allocated for
+  any whole-line mode) were all keyed on `ts_tsu_live` and never on the mode.
+- Cost on a TEXT frame that has no TSU layers up: zero (the compose is behind
+  `ts_tsu_live`). With them up it is one `tsuComposeLine` per line plus four
+  nibble tests per character. `[PERF] ts:` now attributes the text loop to `out`
+  and the compose to `tsu`, which it could not before.
+
+Checked on the host by transcribing the shipped loop and diffing it against an
+independent model built from the RTL above — a 2*w hires scanline, TSU sampled
+once per lores pixel, packed into pairs and stored through the `(k^2)` swizzle —
+over every (RRES, framebuffer width) pair including the two overhang cases, with
+and without NOGFX and the TSU: 12800 cases, 0 mismatches. Four hand mutations
+each fail it (TSU index from the whole byte, TSU sampled per hires pixel, the
+store order without `k^2`, and dropping the TSU on a NOGFX text line). The test
+is a transcription — `Video.cpp` cannot be host-compiled — so it lives in the
+session scratch rather than `tools/`, where it would rot silently.
+
+**Hw check owed**: `CLOCK.WMF` under Wild Commander (tiles/sprites over the
+80-column desktop), a plain TS-BIOS Setup entry (TEXT with no TSU — must be
+byte-identical to before), and Demorama's TEXT band inside its 256c screen (the
+mixed frame, where the TSU must NOT appear on the lores lines any differently
+than it did).
 
 ## FDI copy protection — physical damage emulation (`src/wd1793.cpp`)
 
