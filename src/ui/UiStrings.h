@@ -283,8 +283,8 @@
 #define TXT_ROM_SCORP_S      "ZS-256T"        // left-column short form (Option::slabel)
 #define TXT_ROM_SCORP_GR     "ZS-256 Turbo+ (Green)"
 #define TXT_ROM_SCORP_GR_S   "ZS-256T+"
-#define TXT_ROM_SCORP_GMX    "ZS-256 Turbo+ & GMX"
-#define TXT_ROM_SCORP_GMX_S  "GMX"
+#define TXT_ROM_SCORP_GMX    "ZS-256 Turbo+ & GMX v5"
+#define TXT_ROM_SCORP_GMX_S  "GMX v5"
 // The v6 image: the same firmware whose OWN monitor/navigator/debugger are drawn in
 // the GMX extended 640x200x16 screen instead of the standard ZX one.
 #define TXT_ROM_SCORP_GMX6   "ZS-256 Turbo+ & GMX v6"

@@ -2523,14 +2523,27 @@ bool Ports::gmxPortWrite(uint16_t address, uint8_t data) {
              (int)((data >> 7) & 1), Z80::getRegPC());
 #endif
       gmxPort7EFD = data;
-      // D7 turbo (7 MHz) — honored only while the USER has turbo on, same
-      // policy as Pentagon-1024SL #EFF7 D4 (the GMX boot ROM flips it at
-      // will and must not turbo a 3.5 MHz session).
-      if (ESPectrum::multUser) {
-        uint8_t want = (data & 0x80) ? ESPectrum::multUser : 0;
+      // D7 = turbo (7 MHz), and it is AUTHORITATIVE — the same call TS-Conf's
+      // ZCLK made on 2026-09-06, for the same reason. This is the machine's own
+      // speed register: the Shadow monitor's "S. Set Up -> V. Computer speed"
+      // item writes it, and its plane switcher (RAM thunk E4B0: `OR 0xC0`)
+      // re-asserts it on every far call, so the firmware genuinely runs fast and
+      // says so. Gating it on the user's Alt+F2 pick — the Pentagon-1024SL #EFF7
+      // D4 policy this used to copy — made that menu item look broken: it read
+      // "Fast" while the machine stayed at 3.5 MHz, and the #7EFD read-back
+      // (turbo in D2, below) reported the latch rather than reality, so the two
+      // disagreed (hw 2026-09-20). #EFF7 D4 keeps its policy because there the
+      // Gluk RTC rewrites the port as a SIDE EFFECT; nothing writes #7EFD except
+      // code that means to. MAME: `m_turbo = BIT(data,7);
+      // set_clock_scale(1 << m_turbo)` — unconditional.
+      // Alt+F2 / Menu+F11 therefore become an override that lasts until the
+      // guest's next #7EFD write; both already cycle from `multiplicator`.
+      {
+        const uint8_t want = (data & 0x80) ? 1 : 0;   // scale 1<<turbo = 3.5 / 7
         if (want != ESPectrum::multiplicator) {
           ESPectrum::multiplicator = want;
           CPU::updateStatesInFrame();
+          OSD::notify(want ? " CPU: 7 MHz " : " CPU: 3.5 MHz ", LEVEL_INFO, 900);
         }
       }
       // D4-6 = ProfROM plane (28F400 A16-18), frozen by fixrom (port #00 D4)

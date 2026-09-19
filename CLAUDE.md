@@ -7170,8 +7170,11 @@ move "Last" — that is what the "1024 and ProfROM sit BEFORE the conditional GM
 entry" rule buys.
 
 - **TWO romsets over two images** (2026-09-20, **hw-confirmed the same day for the
-  v5s+v5se pair — owner's verdict "работает"**; the second image was then swapped to
-  v6s at the owner's request and THAT pair is NOT hw-tested): `R_SCORP_GMX`
+  v5s+v5se pair; the second image was then swapped to v6s at the owner's request and
+  **v6s is hw-confirmed too, 2026-09-20: its 640x200 Shadow monitor renders in full
+  and the keyboard works** — a Ctrl+Alt+D screenshot of the Main menu with the cursor
+  on "V. Computer speed" is what that verdict rests on, so the navigator, the disk
+  utilities and anything that leaves the monitor are NOT covered): `R_SCORP_GMX`
   "ZS-256 Turbo+ & GMX" = `ProfRomGMX_v5s.rom` (v5.44.9643), `R_SCORP_GMX6`
   "ZS-256 Turbo+ & GMX v6" = `ProfRomGMX_v6s.rom` (v6.44.9643, CRC32 FCA97CD6).
   `isScorpGmxRomset()` (ArchRom.h) is the "is the GMX firmware live" test and EVERY
@@ -7181,6 +7184,21 @@ entry" rule buys.
   `gmxLiveBankTable()` care WHICH. Both entries gate together in the menus (same ROM
   region, same butter requirement) and sit LAST in `kPrefScorp`, so the
   preferred-romset indices stay build- and runtime-independent.
+- **`#7EFD` D7 (turbo) is AUTHORITATIVE since 2026-09-20, not gated on the user's
+  Alt+F2 pick** — the same call TS-Conf's ZCLK made on 2026-09-06, and it was found
+  the same way: the Shadow monitor's `S. Set Up -> V. Computer speed` read **Fast**
+  while the machine stayed at 3.5 MHz (hw, v6s). It is the machine's own speed
+  register — the monitor writes it, and its plane switcher re-asserts it on EVERY far
+  call (the RAM thunk at `E4B0` does `OR 0xC0`, so D7 is set on every `RST 30`), so
+  the firmware really does run fast. Worse, the read-back reports the LATCH (turbo in
+  **D2**, per MAME's `port_7efd_r`), so with the write gated the two halves of the
+  register disagreed. MAME's write is unconditional: `m_turbo = BIT(data, 7);
+  set_clock_scale(1 << m_turbo)`. **Pentagon-1024SL's `#EFF7` D4 keeps its
+  user-gated policy and that is not an inconsistency**: there the Gluk RTC rewrites
+  the port as a SIDE EFFECT of unrelated work, whereas nothing writes `#7EFD` except
+  code that means to. Alt+F2 / Menu+F11 are now an override that lasts until the
+  guest's next `#7EFD` write — they already cycle from `multiplicator`, so that came
+  for free.
 - **v5 vs v6 is WHICH SCREEN THE FIRMWARE DRAWS ITSELF ON**, not a hardware
   difference: v5's Shadow monitor, navigator and debugger use the standard ZX screen,
   v6's use the GMX **extended 640x200x16** mode (`gfx_ext`, `#7EFD` bit 3 — the mode
