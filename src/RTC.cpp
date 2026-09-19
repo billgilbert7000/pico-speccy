@@ -186,13 +186,17 @@ bool RTC::loadNVRAM() {
     uint8_t buf[256]; UINT br = 0;
     f_read(f, buf, sizeof(buf), &br);
     fclose2(f);
-    Debug::log("[CMOS] load %s (%u B) sig0E=%02X sum3F=%02X r11=%02X",
-               s_nv_path, (unsigned)br, buf[0x0E], buf[0x3F], buf[0x11]);
+    Debug::log("[CMOS] load %s (%u B) sig0E=%02X sum3F=%02X r11=%02X regB=%02X",
+               s_nv_path, (unsigned)br, buf[0x0E], buf[0x3F], buf[0x11], buf[0x0B]);
     if (br < 64) return false; // corrupt/short file
     // Restore only the battery-backed NVRAM (0x0E..) plus control-B mode byte;
     // time regs are computed live and control A/C/D are synthesised on read.
     // br==64 = pre-240-cell file format, restores what it has.
-    regs[0x0B] = buf[0x0B];
+    // ...and on TS-Conf force the AVR's rule over it: this file may have been
+    // ADOPTED from the shared legacy cmos.nvr, i.e. written by a machine whose
+    // reg B means something else (the image that produced the WC "hour 90" had
+    // sig0E=62 in it, i.e. ProfROM's signature — a Scorpion CMOS).
+    regs[0x0B] = Z80Ops::isTsconf ? avrRegB(buf[0x0B]) : buf[0x0B];
     for (unsigned i = 0x0E; i < br && i < sizeof(regs); i++) regs[i] = buf[i];
     regs[0x0D] = 0x80; // keep VRT asserted regardless of saved bytes
     return true;
@@ -273,9 +277,9 @@ void RTC::flushNVRAM(bool force) {
     UINT bw = 0;
     f_write(f, regs, sizeof(regs), &bw);
     fclose2(f);
-    Debug::log("[CMOS] save %s (%u B) sig0E=%02X sum3F=%02X wr=%u last=%02X:%02X%s",
-               RTC_NVRAM_PATH, (unsigned)bw, regs[0x0E], regs[0x3F],
-               (unsigned)nv_wr_n, nv_wr_sel, nv_wr_val,
+    Debug::log("[CMOS] save %s (%u B) sig0E=%02X sum3F=%02X regB=%02X (%s) wr=%u last=%02X:%02X%s",
+               RTC_NVRAM_PATH, (unsigned)bw, regs[0x0E], regs[0x3F], regs[0x0B],
+               formatStr(), (unsigned)nv_wr_n, nv_wr_sel, nv_wr_val,
                force ? " (forced)" : "");
     nv_wr_n = 0;
     nv_dirty = false;
@@ -321,6 +325,13 @@ void RTC::writeData(uint8_t v, bool avrExt) {
     }
     if (sel == 0x0C || sel == 0x0D) return; // control C/D are read-only
     if (sel == 0x0B) {
+        // On TS-Conf these ports are the ZX-Evo AVR, whose reg B keeps only the
+        // DM bit (avrRegB). Without this a guest that writes a 12-hour reg B is
+        // believed, and the clock reads back 22:00 as 0x90 = "10 PM" — which is
+        // exactly what Wild Commander printed as the hour 90 (hw 2026-09-19).
+        // The SMUC card's own MC146818 at #DFBA is a real chip: avrExt is false
+        // there and it keeps full datasheet semantics.
+        if (avrExt && Z80Ops::isTsconf) v = avrRegB(v);
         uint8_t prev = regs[0x0B];
         if (prev != v) { regs[0x0B] = v; nv_dirty = true; }
 #if RTC_PORT_TRACE

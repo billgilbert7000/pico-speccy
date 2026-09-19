@@ -1553,7 +1553,17 @@ void OSD::drawNotify() {
     const int bandw = px1 - px0;
     x = px0 + (bandw - textw) / 2;
 
-    if (notify_nm) {
+    // notify_nm is a LATCH taken when the banner was raised, and the video mode
+    // can move under it: on TS-Conf the " CPU: 14 MHz " toast is raised by
+    // applyZclk while the guest is still in a graphics mode, and the guest then
+    // switches to TEXT a few frames later. In a pair mode gfxInstallPalette()
+    // does not add a private block — it REPLACES the guest's 16 colours, and this
+    // path has no restore (it never needs one in standard mode), so every frame
+    // of the banner's life re-installed the interface palette over Wild Commander
+    // and the last one stayed for ever (hw 2026-09-19: 19 installs, one per
+    // frame, zero hand-backs; one F3 in and out put it right because THAT
+    // session's gfxEnd is what finally restored). Re-check live, every frame.
+    if (notify_nm && !profi_ds80_active) {
         // Same trick as drawStats/uiPausedBadge: the UI colours live in their own
         // palette block, so the running game keeps all 16 of its own entries.
         nm::gfxComputeSurface();
@@ -1607,7 +1617,11 @@ void OSD::drawVolumeBox() {
     // uses: UI colours live at 224..239, so the running game keeps its own 16.
     // DS80 stays classic: installing the UI palette would steal the guest's
     // entries while the game is still drawing.
-    if (nm::available() && !nm::Sf.ds80) {
+    // The test is the LIVE flag, not nm::Sf.ds80: that is a snapshot taken by the
+    // last gfxComputeSurface(), so before the first menu session of a boot it is
+    // still zero and this would take the UI path in a pair mode — the same hole
+    // drawNotify's latch had.
+    if (nm::available() && !profi_ds80_active) {
         nm::gfxComputeSurface();
         nm::gfxInstallPalette();
         const int base = nm::uiPaletteBase();
@@ -2088,14 +2102,26 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
     }
 
     // Alt+` (grave/tilde) or plain PrtScr (the Karabas-Pro hardware combo) —
-    // toggle Profi extended keyboard mode (only in Profi arch)
-    if (Config::arch == A_PROFI && !CTRL &&
+    // toggle the machine's "extra keys go to the guest" mode. Profi: the Karabas
+    // XT keyboard, where the keys also have to be injected into Ports::extPort.
+    // TS-Conf: the ZX-Evo AVR's PS/2 scancode log, which already carries every
+    // F-key (ZxEvoAvr::hidKey, fed from process_kbd_report) — there the toggle
+    // only decides whether the hotkey layer swallows them first.
+    if (!CTRL &&
         ((ALT && (KeytoESP == fabgl::VK_GRAVEACCENT || KeytoESP == fabgl::VK_TILDE)) ||
          (!ALT && KeytoESP == fabgl::VK_PRINTSCREEN))) {
-        Config::profi_ext_keys = !Config::profi_ext_keys;
-        Config::save();
-        notify(Config::profi_ext_keys ? " XT keyboard ON " : " XT keyboard OFF ", LEVEL_INFO, 900);
-        return;
+        if (Config::arch == A_PROFI) {
+            Config::profi_ext_keys = !Config::profi_ext_keys;
+            Config::save();
+            notify(Config::profi_ext_keys ? " XT keyboard ON " : " XT keyboard OFF ", LEVEL_INFO, 900);
+            return;
+        }
+        if (Z80Ops::isTsconf) {
+            Config::tsconf_ps2_keys = !Config::tsconf_ps2_keys;
+            Config::save();
+            notify(Config::tsconf_ps2_keys ? " PS/2 keys ON " : " PS/2 keys OFF ", LEVEL_INFO, 900);
+            return;
+        }
     }
 
 #ifdef VGA_HDMI
@@ -6052,6 +6078,8 @@ static void buildEmulatorInfoText() {
             " Frameskip      : %d us\n", Config::throtling * 1000);
     if (Z80Ops::isProfi && Config::profi_ext_keys)
         pos += infoAppend(buf, pos, bufsz, " XT keyboard    : On\n");
+    if (Z80Ops::isTsconf && Config::tsconf_ps2_keys)
+        pos += infoAppend(buf, pos, bufsz, " PS/2 keys      : On\n");
     if (Config::byte_cobmect_mode)
         pos += infoAppend(buf, pos, bufsz, " COBMECT mode   : On\n");
     if (MEM_PG_CNT != 64)   // Murmuzavr SD-swap: 64 pages = no swap
@@ -8018,12 +8046,13 @@ const char* hotkeysText() {
     // Everything below is hard-wired in ESPectrum::processKeyboard — not entries of the
     // table above, so not remappable and previously listed only on the classic page.
     const bool profi = Z80Ops::isProfi;
-    if (profi) {
-        // On Profi plain PrtScr is the Karabas XT-keyboard toggle, so BMP capture moves
-        // to Alt+PrtScr. The XT toggle is now the ONLY way to reach that setting — its
-        // Machine-menu row is gone, which makes this line its documentation.
+    const bool tsconf = Z80Ops::isTsconf;
+    if (profi || tsconf) {
+        // Where plain PrtScr is the extra-keys toggle, BMP capture moves to
+        // Alt+PrtScr. That toggle is the ONLY way to reach either setting — they
+        // have no menu row — which makes these lines their documentation.
         pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " %-20s %s\n",
-                        "XT keyboard", "Alt+~ or PrtScr");
+                        profi ? "XT keyboard" : "PS/2 keys", "Alt+~ or PrtScr");
         pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " %-20s %s\n",
                         "BMP capture", "Alt+PrtScr");
     } else {

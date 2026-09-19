@@ -215,9 +215,19 @@ void gfxBegin() {
     gfxInstallPalette();
 }
 
+// The RESTORE is driven by the latch inside restoreUiDS80Palette(), never by the
+// live mode: `Sf.ds80 && profi_ds80_active` is exactly the state that can MOVE
+// between the install and the restore (a machine switch or a reset taken from
+// inside the menu, tsVideoForceOff, a pair driver that refused), and skipping the
+// restore there leaves the guest running the MENU's 16 colours for the rest of the
+// session — hw 2026-09-19: Wild Commander's TEXT screen came up in interface slate
+// with profi_palette_live holding kUiPalette byte for byte, and one F3 in-and-out
+// put it right, because that session's restore is what finally ran.
+// restoreUiDS80Palette() is already safe either way: it always restores the array
+// and pushes the driver only while a pair mode is still armed.
 void gfxSuspendPalette() {
     // Standard mode needs nothing: the dialogs use indices 0..16, we own 224..239.
-    if (Sf.ds80 && profi_ds80_active) VIDEO::restoreUiDS80Palette();
+    VIDEO::restoreUiDS80Palette();
 }
 
 void gfxResumePalette() {
@@ -231,7 +241,7 @@ int             uiPaletteBase() { return UI_PAL_BASE; }
 uint8_t         uiPaletteSlot(UiColor c) { return palByte(c); }
 
 void gfxEnd() {
-    if (Sf.ds80 && profi_ds80_active) VIDEO::restoreUiDS80Palette();
+    VIDEO::restoreUiDS80Palette();   // latch-driven, see gfxSuspendPalette()
     // Standard mode: nothing to undo. 224..239 belong to the UI; the next
     // VIDEO::applyPalette() (palette change / reset) rewrites them from the G3R3B2
     // ramp, and gfxBegin() re-installs on every open, so there is no stale state.

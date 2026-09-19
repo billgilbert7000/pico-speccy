@@ -209,6 +209,11 @@ public:
     static bool     tape_player;
     static volatile bool real_player;
     static bool     profi_ext_keys;  // Profi extended keyboard mode (default false)
+    // TS-Conf: let F1-F10 and the nav keys reach the guest instead of the OSD.
+    // Nothing has to be injected anywhere - the ZX-Evo AVR's PS/2 scancode log
+    // (Gluk #F0 type 2, EXT_PS2KEYBOARDS_LOG) is fed unconditionally from
+    // process_kbd_report, so this flag only steps the hotkey layer aside.
+    static bool     tsconf_ps2_keys; // TS-Conf PS/2 keys to guest (default false)
     static bool     tape_timing_rg;
     static bool     tape_autostart;  // auto-play tape on load + after F11/boot re-mount (default true)
     static bool     rightSpace;

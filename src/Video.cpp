@@ -300,19 +300,33 @@ static inline void profi_ds80_driver_set(bool active, const uint32_t *palette16,
 static uint32_t profi_palette_ui_saved[16];
 static bool     profi_palette_ui_saved_valid = false;
 
+// Idempotent on purpose: the guest's palette is saved only on the FIRST install,
+// but the UI colours and the driver push happen every time. The menu re-installs
+// after anything that rewrites the hardware palette under it (F_PALETTE settings
+// -> VIDEO::applyPalette), and in a packed-pair mode that rewrite lands in the
+// very tables this pushes — an early return there made every one of those
+// re-installs a no-op and left the open menu wearing the standard ramp.
 void VIDEO::applyUiDS80Palette(const uint32_t rgb888[16]) {
-    if (profi_palette_ui_saved_valid) return;      // already installed
-    for (int i = 0; i < 16; i++) profi_palette_ui_saved[i] = profi_palette_live[i];
-    profi_palette_ui_saved_valid = true;
+    if (!profi_palette_ui_saved_valid) {
+        for (int i = 0; i < 16; i++) profi_palette_ui_saved[i] = profi_palette_live[i];
+        profi_palette_ui_saved_valid = true;
+    }
     for (int i = 0; i < 16; i++) profi_palette_live[i] = rgb888[i] & 0x00FFFFFF;
     profi_ds80_driver_set(true, profi_palette_live, &profi_pair_lookup[0][0]);
     rebuildDS80ColorLut();                          // keep legacy dotFast users sane
+    Debug::log("[PAL] UI palette installed over the pair mode (guest live0=%06lX saved)",
+               (unsigned long)profi_palette_ui_saved[0]);
 }
+
+bool VIDEO::uiOwnsPairPalette() { return profi_palette_ui_saved_valid; }
 
 void VIDEO::restoreUiDS80Palette() {
     if (!profi_palette_ui_saved_valid) return;
     for (int i = 0; i < 16; i++) profi_palette_live[i] = profi_palette_ui_saved[i];
     profi_palette_ui_saved_valid = false;
+    Debug::log("[PAL] UI palette handed back (guest live0=%06lX, pair %s)",
+               (unsigned long)profi_palette_live[0],
+               profi_ds80_active ? "re-pushed" : "not armed - array only");
     // Only touch the driver while DS80 is still armed: a machine switch from inside the
     // menu may already have left DS80, and re-arming it over a standard framebuffer
     // gives a shifted/garbled screen (same hazard DS80Guard documents).
@@ -1998,9 +2012,24 @@ void VIDEO::applyPalette() {
     // slot again (hw 2026-09-06: "picture right, colours wrong" after a palette
     // rewrite from a hotkey).
     if (ts_pal256_live) tsPalette256Flush(true);
-    // Timex hi-res owns the hardware palette as PAIR slots — the loops above
-    // just wrote the standard 8-bit entries over them.
-    if (timex_hires_live) timexHiresRefresh();
+    // A packed-pair mode owns the driver's colour tables as PAIR slots, and the
+    // loops above just wrote the standard 8-bit entries over every one of them:
+    // graphics_set_palette() writes conv_color, which is exactly where
+    // profi_ds80_driver_set() put the pairs. Re-push, or the mode runs on a
+    // shredded palette until something else happens to set profi_palette_dirty.
+    // Timex hi-res is the same case with its own source of 16 colours (the
+    // machine's ZX palette, not the Profi palette port) — unless a full-screen
+    // menu has swapped the UI block into profi_palette_live, which is then what
+    // the driver is running and what has to come back.
+    if (timex_hires_live && !profi_palette_ui_saved_valid) timexHiresRefresh();
+    else if (profi_ds80_active) {
+        profi_ds80_driver_set(true, profi_palette_live, &profi_pair_lookup[0][0]);
+        profi_palette_dirty = false;
+        Debug::log("[PAL] applyPalette over a pair mode: pairs re-pushed"
+                   " (pal256=%d uiOwned=%d live0=%06lX)",
+                   (int)ts_pal256_live, (int)profi_palette_ui_saved_valid,
+                   (unsigned long)profi_palette_live[0]);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -6065,6 +6094,18 @@ void VIDEO::tsVideoApplyPending() {
         } else {
             rebuildDS80ColorLut();
             Graphics8BitPalette::ds80_active = true;
+            // What the TEXT screen is about to be painted with. A wrong palette
+            // here and a wrong palette from a later clobber are different bugs
+            // with the same look, and the log used to carry neither.
+            Debug::log("[TSV] pair palette: palsel=%02X uiOwned=%d live=%06lX,%06lX,%06lX,%06lX"
+                       " cram=%04X,%04X,%04X,%04X",
+                       TsConf::r.palsel, (int)profi_palette_ui_saved_valid,
+                       (unsigned long)profi_palette_live[0], (unsigned long)profi_palette_live[1],
+                       (unsigned long)profi_palette_live[2], (unsigned long)profi_palette_live[7],
+                       TsConf::cram[((TsConf::r.palsel & 0x0F) << 4) | 0],
+                       TsConf::cram[((TsConf::r.palsel & 0x0F) << 4) | 1],
+                       TsConf::cram[((TsConf::r.palsel & 0x0F) << 4) | 2],
+                       TsConf::cram[((TsConf::r.palsel & 0x0F) << 4) | 7]);
         }
     } else if (!wantPair && wasPair) {
         profi_ds80_driver_set(false, nullptr, nullptr);

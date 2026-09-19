@@ -81,6 +81,14 @@ private:
     // SET-mode snapshot and commitTimeRegs must all go through these.
     static bool    regBcd()  { return !(regs[0x0B] & 0x04); }
     static bool    reg24h()  { return   regs[0x0B] & 0x02;  }
+    // ZX-Evo: the "MC146818" behind the Gluk ports is the AVR, and its reg B is
+    // not a control register at all — pentevo/avr/current/rtc.c keeps only the
+    // DM bit of whatever is written and forces the rest:
+    //     gluk_regs[GLUK_REG_B] = (data & GLUK_B_DATA_MODE) | GLUK_B_INIT_VALUE;
+    //     GLUK_B_DATA_MODE 0x04   GLUK_B_INIT_VALUE 0x02
+    // So 24-hour is HARD-WIRED there (the AVR also keeps hours 0..23 internally
+    // and has no 12-hour path at all), and SET/alarm/interrupt bits do not exist.
+    static uint8_t avrRegB(uint8_t v) { return (uint8_t)((v & 0x04) | 0x02); }
     static uint8_t encField(int v);   // clock field → register byte
     static uint8_t encHour(int h24);  // 0..23 → register byte (honors 12/24h)
     static int     decField(uint8_t v);

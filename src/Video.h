@@ -407,6 +407,11 @@ public:
   // strictly (install → restore) rather than overlap.
   static void applyUiDS80Palette(const uint32_t rgb888[16]);
   static void restoreUiDS80Palette();
+  // "a full-screen menu owns the pair palette right now" — the latch that says a
+  // restore is owed. Read by the diagnostics: a guest wearing the interface
+  // colours and a guest whose driver tables were clobbered look the same on
+  // screen and are opposite bugs.
+  static bool uiOwnsPairPalette();
   static void clearDS80Padding();        // re-blacken DS80 side-padding columns after OSD close
   static void profiPaletteReset();
   // Update palette[index] from a Profi RRRGGGBB color byte; sets dirty flag.

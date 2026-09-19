@@ -73,7 +73,7 @@ option(PERF_TRACE "Enable per-60-frame CPU/HDMI/FPS performance logging" OFF)
 # are off unless a profiling session asks for them; PERF_TRACE stays cheap.
 option(PERF_HIST "Per-access Z80/TS-Conf histograms in the PERF log (slow; needs PERF_TRACE)" OFF)
 option(NEG2_TRACE "Enable Profi negative-IDL attribution ([NEG2] lines)" OFF)
-option(TS_VIDEO_TRACE "TS-Conf: capped trace of VConfig/TSConfig/page/offset register writes with frame line + PC" OFF)
+option(TS_VIDEO_TRACE "TS-Conf: capped trace of VConfig/TSConfig/page/offset register writes with frame line + PC" ON)
 # TS-Conf DRAM model (TsConf.cpp): 14 MHz wait states per cache miss, CPU and
 # video accesses stealing DRAM cycles from a running DMA, blit = 3 cycles/word.
 # OFF = the flat per-word DMA cost and a wait-free 14 MHz Z80 (pre-2026-09-13).

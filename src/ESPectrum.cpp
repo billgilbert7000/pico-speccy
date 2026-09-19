@@ -1944,10 +1944,10 @@ IRAM_ATTR bool ESPectrum::readKbd(fabgl::VirtualKeyItem *Nextkey) {
     if (Nextkey->vk ==
         fabgl::VK_PRINTSCREEN) { // Capture framebuffer to BMP file in SD Card
                                  // (thx @dcrespo3d!)
-      // On Profi plain PrtScr is the Karabas-Pro XT-keyboard toggle (handled
-      // in do_OSD) — there the BMP capture moves to Alt+PrtScr; other archs
-      // keep the plain-PrtScr capture.
-      bool xtToggle = Z80Ops::isProfi &&
+      // On Profi plain PrtScr is the Karabas-Pro XT-keyboard toggle and on
+      // TS-Conf the PS/2-keys toggle (both handled in do_OSD) — there the BMP
+      // capture moves to Alt+PrtScr; other archs keep the plain-PrtScr capture.
+      bool xtToggle = (Z80Ops::isProfi || Z80Ops::isTsconf) &&
                       !PS2Controller.keyboard()->isVKDown(fabgl::VK_LALT) &&
                       !PS2Controller.keyboard()->isVKDown(fabgl::VK_RALT);
       if (!xtToggle) {
@@ -2196,7 +2196,19 @@ IRAM_ATTR void ESPectrum::processKeyboard() {
         // In Profi extended keyboard mode, F-keys and nav-keys pass to Z80 matrix
         // instead of opening OSD. PAUSE always opens OSD (escape hatch).
         // GRAVEACCENT/TILDE still go to OSD (for Alt+` toggle and max-speed hotkey).
-        bool passToZ80 = Z80Ops::isProfi && Config::profi_ext_keys
+        //
+        // TS-Conf "PS/2 keys" is the same gate for a different reason: nothing
+        // has to be injected there, because the ZX-Evo AVR's scancode log
+        // (ZxEvoAvr::hidKey, fed from process_kbd_report) already carries every
+        // F-key — swallowing the keypress here is the ONLY thing that kept them
+        // from software that reads that log (Wild Commander's F1-F10 panel keys).
+        // F11/F12 stay ours: F11 is the machine reset the patched TS-BIOS Setup
+        // footer names and F12 reboots the RP2350, which is what F12 does on a
+        // real ZX-Evo too (the AVR's hardware reset).
+        const bool extKeysOn = (Z80Ops::isProfi && Config::profi_ext_keys)
+            || (Z80Ops::isTsconf && Config::tsconf_ps2_keys
+                && KeytoESP != fabgl::VK_F11 && KeytoESP != fabgl::VK_F12);
+        bool passToZ80 = extKeysOn
             && KeytoESP != fabgl::VK_PAUSE
             && KeytoESP != fabgl::VK_TILDE
             && KeytoESP != fabgl::VK_GRAVEACCENT
