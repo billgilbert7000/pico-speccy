@@ -80,6 +80,7 @@ int DivMMC::mmc_ocr_index = -1;
 bool DivMMC::mmc_wr25_active = false;
 int  DivMMC::mmc_wr25_idx = -1;
 bool DivMMC::mmc_wr25_r1 = false;
+int  DivMMC::mmc_wr_resp = -1;
 
 uint32_t DivMMC::mmc_read_address = 0;
 uint32_t DivMMC::mmc_write_address = 0;
@@ -703,6 +704,18 @@ void DivMMC::mmc_cs(uint8_t value) {
     mmc_wr25_active = false;
     mmc_wr25_idx = -1;
     mmc_wr25_r1 = false;
+    mmc_wr_resp = -1;
+}
+
+// The bytes a card puts on MISO after it has taken a data block: the
+// data-response token (0bxxx0_0101 = accepted), then MISO held LOW while the
+// block is programmed, then 0xFF for ever. Drivers wait for BOTH edges — the
+// token to know it was accepted, the return to 0xFF to know the card is free —
+// so the sequence has to end, and end at 0xFF.
+uint8_t DivMMC::mmcWriteResponse() {
+    const uint8_t v = (mmc_wr_resp == 0) ? 0x05 : (mmc_wr_resp == 1) ? 0x00 : 0xFF;
+    if (mmc_wr_resp < 2) mmc_wr_resp++;
+    return v;
 }
 
 // Port 0xEB read — SD protocol response
@@ -714,6 +727,11 @@ uint8_t DivMMC::mmc_read() {
     if ((mmc_r1 & 1) == 0) {
         return mmc_r1;
     }
+
+    // A written block's data-response sequence outranks the command latch: the
+    // frame parser is released as soon as the block's CRC bytes are in, so
+    // mmc_last_command may already be 0 by the time the driver reads it.
+    if (mmc_wr_resp >= 0) return mmcWriteResponse();
 
     uint8_t value = 0xFF;
 
@@ -823,21 +841,28 @@ uint8_t DivMMC::mmc_read() {
             }
             return 0xFF;
 
-        case 0x58: // CMD24 WRITE_BLOCK
+        case 0x58: // CMD24 WRITE_BLOCK — R1, then an idle bus until the block
+                   // is in; the data response comes from mmcWriteResponse at the
+                   // top of this function. This case used to answer 0x05 to every
+                   // read from the fourth one on, i.e. the card never stopped
+                   // saying "data accepted": fine for a driver that waits while
+                   // the byte is 0x00, a PERMANENT HANG for one that waits for
+                   // the busy phase to END by polling for 0xFF. Wild Commander's
+                   // Z-Controller driver does exactly that after every write
+                   // ("ожидание busy после завершения транзакции записи"), so
+                   // reading a card worked and saving wc.ini froze the machine
+                   // mid-write, leaving the file half-deleted (2026-09-18).
             if (mmc_write_index >= 0) {
                 if (mmc_write_index == 0) value = 0xFF;       // NCR
                 if (mmc_write_index == 1) value = 0;           // R1
-                if (mmc_write_index == 2) value = 0xFF;
-                if (mmc_write_index == 3) value = 0xFF;
-                if (mmc_write_index >= 4) value = 0x05;        // Data accepted
+                if (mmc_write_index >= 2) value = 0xFF;        // idle until the block is in
                 mmc_write_index++;
                 return value;
             }
             return 0xFF;
 
-        case 0x59: // CMD25 WRITE_MULTIPLE_BLOCK — R1 once, then idle 0xFF
-                   // (blocks are flushed instantly, so no busy phase; the
-                   // driver's poll-until-0xFF loops pass straight through)
+        case 0x59: // CMD25 WRITE_MULTIPLE_BLOCK — R1 once, then idle 0xFF until
+                   // a block completes, then that block's data response.
             if (mmc_wr25_r1) {
                 mmc_wr25_r1 = false;
                 return 0;
@@ -924,6 +949,7 @@ void DivMMC::mmc_write(uint8_t value) {
                 mmc_write_address += 512;
             }
             mmc_wr25_idx = -1;                    // wait for next 0xFC/0xFD
+            mmc_wr_resp = 0;                      // ...after this block's response
         }
         return;
     }
@@ -935,6 +961,7 @@ void DivMMC::mmc_write(uint8_t value) {
         // Receive command byte
         mmc_last_command = value;
         mmc_index_command++;
+        mmc_wr_resp = -1;
 #if ZC_PORT_TRACE
         Debug::log("ZC: CMD%u (%02X)", (unsigned)(value & 0x3F), (unsigned)value);
 #endif
@@ -1062,6 +1089,10 @@ void DivMMC::mmc_write(uint8_t value) {
                     writeByte(mmc_write_address + byte_idx, value);
                 }
             }
+            // The 0xFE data token may be preceded by any number of 0xFF gap
+            // bytes. Hold the index at the token slot until it actually arrives:
+            // counting a gap byte as the token shifts the whole block by one.
+            if (mmc_index_command == WRITE_BLOCK_OFFSET + 1 && value != 0xFE) break;
             mmc_index_command++;
             if (mmc_index_command == WRITE_BLOCK_OFFSET + 2 + 512) {
                 if (sdhc_mode) {
@@ -1070,6 +1101,15 @@ void DivMMC::mmc_write(uint8_t value) {
                 } else {
                     flushWriteBuffer();
                 }
+                mmc_wr_resp = 0;              // data-response token is now due
+            } else if (mmc_index_command >= WRITE_BLOCK_OFFSET + 2 + 514) {
+                // Both CRC bytes are in — the command is over. Release the frame
+                // parser so a driver that keeps CS asserted across commands is
+                // heard again; without this the card stayed deaf to everything
+                // until the next CS edge.
+                mmc_index_command = 0;
+                mmc_last_command = 0;
+                mmc_write_index = -1;
             }
             #undef WRITE_BLOCK_OFFSET
             break;

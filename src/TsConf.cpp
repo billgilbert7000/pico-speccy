@@ -29,6 +29,7 @@ the Free Software Foundation, either version 3 of the License, or
 #include "RTC.h"
 #include "ZxEvoAvr.h"
 #include "DivMMC.h"
+#include "IDE.h"
 #include "LEDIndicators.h"
 #include "OSDMain.h"
 
@@ -86,6 +87,13 @@ uint8_t g_tsconf_wr = 0;
 uint8_t g_ts_bank_watch = 0;
 static uint8_t s_bank_phys[4];   // physical page per CPU bank (setBanks)
 
+// VDOS (zports.v / zmem.v). s_drive_sel is the FPGA's drive_sel_raw: latched
+// from a #FF write whenever the controller ports are open, INCLUDING while a
+// virtual drive is selected and while VDOS runs — that is how the handler in
+// page 0xFF picks which virtual drive it is serving.
+bool TsConf::vdosLive = false;
+static uint8_t s_drive_sel = 0;
+
 // FMAddr 512-byte windows latch the even byte here and commit the word on the
 // odd address (reference temp.fm_tmp).
 static uint8_t s_fm_tmp = 0;
@@ -94,9 +102,11 @@ static void tsUpdateWrGate() {
     uint8_t g = 0, wt = 0;
     if (Z80Ops::isTsconf) {
         if (TsConf::r.fmaddr & 0x10) g |= (TsConf::r.fmaddr & 0x0F) | 0x10;
-        if (TsConf::r.w0_ram() && !TsConf::r.w0_we()) g |= 0x20;
+        // ramwr_en = !win0 || w0_we || vdos — the protect does not apply in VDOS.
+        if (TsConf::r.w0_ram() && !TsConf::r.w0_we() && !TsConf::vdosLive) g |= 0x20;
         for (int b = 0; b < 4; b++)
-            if ((b || TsConf::r.w0_ram()) && VIDEO::tsWatchedPage(s_bank_phys[b])) wt |= (uint8_t)(1u << b);
+            if ((b || TsConf::r.w0_ram() || TsConf::vdosLive) &&
+                VIDEO::tsWatchedPage(s_bank_phys[b])) wt |= (uint8_t)(1u << b);
         if (wt) g |= 0x40;
     }
     g_ts_bank_watch = wt;
@@ -175,7 +185,8 @@ volatile uint32_t ts_row_rebuilds = 0;   // cache rows rebuilt (a window changed
 // The rows follow the bank map, W0_RAM and CacheConfig (setBanks, the SysConfig /
 // CacheConfig writes, reset).
 static void tsTagBaseRecalc() {
-    const uint32_t n = tsdcRecalc(s_bank_phys, TsConf::r.w0_ram(), TsConf::r.cacheconf);
+    const uint32_t n = tsdcRecalc(s_bank_phys, TsConf::r.w0_ram() || TsConf::vdosLive,
+                                  TsConf::r.cacheconf);
 #if PERF_TRACE
     ts_row_rebuilds += n;
 #else
@@ -385,7 +396,13 @@ void TsConf::setBanks() {
     // page number's low bits come from the DOS signal (bit 1) and ROM128
     // (#7FFD bit 4, bit 0): Service/DOS/128/48.
     uint8_t p0;
-    if (r.w0_map_n()) {
+    if (vdosLive) {
+        // xtpage[0] = vdos ? 8'hFF : ... — and rom_n_ram / ramwr_en both drop
+        // their window-0 terms, so the page is RAM and writable whatever
+        // W0_RAM / W0_WE say. (With less than 4 MB configured it aliases down
+        // like every other page number here.)
+        p0 = 0xFF;
+    } else if (r.w0_map_n()) {
         p0 = r.page[0];
     } else {
         uint8_t rom128 = (r.p7ffd >> 4) & 1;
@@ -393,9 +410,9 @@ void TsConf::setBanks() {
              | (r.page[0] & 0xFC);
     }
     s_bank_phys[0] = (uint8_t)(p0 & mask);
-    if (r.w0_ram()) {
-        // RAM at #0000. W0_WE=0 write protect is not modelled yet (phase 2);
-        // writes land in the page.
+    if (r.w0_ram() || vdosLive) {
+        // RAM at #0000 (or the VDOS page). The W0_WE write protect is applied
+        // by the CPU write funnel through g_tsconf_wr, not here.
         MemESP::ramCurrent[0] = MemESP::ram[p0 & mask].sync(0);
     } else {
         // ROM at #0000 — a flash pointer; MemESP::writebyte drops writes to
@@ -515,7 +532,7 @@ void TsConf::trdosTrap(uint8_t pcH) {
     // ROM128=1 (#7FFD bit 4) and ROM actually mapped in window 0. Exit
     // (CF_LEAVEDOSRAM): executing from RAM closes TR-DOS — windows 1..3 are
     // always RAM on TS-Conf, so any PC >= #4000 exits, and so does window 0
-    // itself once W0_RAM is set. (Under VDOS there is no exit — phase 4.)
+    // itself once W0_RAM is set. Under VDOS there is no exit at all.
     if (!ESPectrum::trdos) {
         // dos_on = win0 && opfetch && a[13:8]==#3D && rom128 && !w0_map_n.
         // The mapped-mode term is the RTL's and is load-bearing: in LINEAR mode
@@ -525,14 +542,89 @@ void TsConf::trdosTrap(uint8_t pcH) {
             setBanks();
         }
     } else {
-        // dos_off = !win0 && opfetch — an opcode fetch outside window 0, and
-        // nothing else. The `|| w0_ram()` this used to carry is not in the RTL
-        // (a fetch from window-0 RAM keeps the signal) and cost nothing to drop.
-        if (pcH >= 0x40) {
+        // dos_off = !win0 && opfetch && !vdos — an opcode fetch outside window
+        // 0, and nothing else. The `|| w0_ram()` this used to carry is not in
+        // the RTL (a fetch from window-0 RAM keeps the signal) and cost nothing
+        // to drop. The !vdos term is what lets a VDOS handler call out of
+        // window 0 (and Wild Commander's does) without losing TR-DOS.
+        if (pcH >= 0x40 && !vdosLive) {
             ESPectrum::trdos = false;
             setBanks();
         }
     }
+}
+
+// ---------------------------------------------------------------- VDOS ----
+// Every access to a WD1793 port (#1F/#3F/#5F/#7F, full 8-bit low-byte decode)
+// or to the Beta system register (#FF) passes through here first on TS-Conf.
+// zports.v is the whole specification:
+//
+//   fddvrt    = fddvirt[3:0];   open_vg = fddvirt[7]
+//   virt_vg   = fddvrt[drive_sel_raw]
+//   vg_wen    = (dos || open_vg) && !vdos && !virt_vg      // the FDC is selected
+//   vg_wrDS   = iowr && vgsys_port && (dos || open_vg)     // drive latch, NOT gated
+//   vdos_on   = iordwr && (vg_port || vgsys_port) && dos && !vdos && virt_vg
+//   vdos_off  = iordwr &&  vg_port && vdos
+//
+// The two transition accesses are themselves invisible to the controller
+// (vg_wen is 0 during both), which is why they are EATEN here. A read of #FF
+// is deliberately never eaten: its INTRQ/DRQ bits come from the FPGA, not from
+// the chip's data bus, and the RTL does not gate them (`VGSYS: dout = ...`).
+//
+// DELIBERATE DEVIATION: the hardware delays the window-0 switch to the next
+// opcode fetch (`vdos = opfetch ? pre_vdos : vdos_r`, "due to INIR that writes
+// right after iord cycle"); we switch inside the access. The two differ only
+// for a block instruction whose memory half lands in window 0 — i.e. a sector
+// read into 0x0000-0x3FFF, which is the ROM the trigger came from. Every
+// opcode fetch after the triggering instruction comes from page 0xFF either
+// way, which is what the handler relies on.
+TsConf::FddIo TsConf::fddPortIo(uint16_t addr, bool write, uint8_t data) {
+    const uint8_t lo = (uint8_t)(addr & 0xFF);
+    const bool vg    = (lo == 0x1F || lo == 0x3F || lo == 0x5F || lo == 0x7F);
+    const bool vgsys = (lo == 0xFF);
+    if (!vg && !vgsys) return FDD_PASS;
+
+    const bool open_vg = (r.fddvirt & 0x80) != 0;
+    const bool dos     = ESPectrum::trdos;
+    // Outside DOS with OPEN_VG clear the controller does not own these ports at
+    // all (porthit routes #1F to the Kempston joystick), so nothing here applies.
+    if (!vdosLive && !dos && !open_vg) return FDD_PASS;
+
+    // virt_vg is combinational on the CURRENT drive_sel: the #FF write below is
+    // a clocked latch, so this access still sees the drive selected before it.
+    const bool virt   = ((r.fddvirt >> (s_drive_sel & 3)) & 1) != 0;
+    const bool vg_wen = (dos || open_vg) && !vdosLive && !virt;
+
+    if (write && vgsys && (dos || open_vg)) s_drive_sel = (uint8_t)(data & 3);
+
+    // The first handful of transitions are logged unconditionally: "did VDOS
+    // engage at all" is the first question any virtual-disk report raises, and
+    // it must be answerable from an ordinary build's log. TSVT (TS_VIDEO_TRACE)
+    // carries the rest.
+    static uint8_t log_left = 12;
+    if (vdosLive) {
+        if (vg) {                       // vdos_off — the handler hands back
+            vdosLive = false;
+            setBanks();
+            TSVT("VDOS off (port %02X, pc=%04X)", lo, Z80::getRegPC());
+            if (log_left) { log_left--;
+                Debug::log("[VDOS] off  port=%02X pc=%04X", lo, Z80::getRegPC()); }
+        }
+    } else if (dos && virt) {           // vdos_on
+        vdosLive = true;
+        setBanks();
+        TSVT("VDOS on  (port %02X drive %u fddvirt=%02X pc=%04X)",
+             lo, (unsigned)s_drive_sel, (unsigned)r.fddvirt, Z80::getRegPC());
+        if (log_left) { log_left--;
+            Debug::log("[VDOS] on   port=%02X %s drive=%u fddvirt=%02X pc=%04X",
+                       lo, write ? "wr" : "rd", (unsigned)s_drive_sel,
+                       (unsigned)r.fddvirt, Z80::getRegPC()); }
+    }
+
+    // #FF reads are answered by the FPGA either way; everything else the
+    // controller is not selected for reads back as an open bus / is swallowed.
+    if (vgsys && !write) return FDD_PASS;
+    return vg_wen ? FDD_PASS : FDD_EATEN;
 }
 
 uint16_t TsConf::dbg_p7ffd = 0, TsConf::dbg_p7ffd_locked = 0;
@@ -608,9 +700,29 @@ TS_HOT void TsConf::portWrite(uint8_t reg, uint8_t val) {
             r.cacheconf = val & 0x0F;
             tsTagBaseRecalc();
             break;
-        case TSW_FDDVIRT:
-            r.fddvirt = val & 0x8F;  // stored; VDOS is a later phase
+        case TSW_FDDVIRT: {
+            // b3:0 = this drive is virtual, b7 = OPEN_VG. The RTL latches all
+            // eight bits but uses only those five, and there is no read-back
+            // register for #29, so the rest are dropped rather than stored.
+            const uint8_t nv = val & 0x8F;
+            static uint8_t log_left = 4;
+            if (nv != r.fddvirt && log_left) {
+                log_left--;
+                Debug::log("[VDOS] FDDVirt %02X -> %02X (virtual drives %c%c%c%c, open_vg %d)",
+                           r.fddvirt, nv,
+                           (nv & 1) ? 'A' : '-', (nv & 2) ? 'B' : '-',
+                           (nv & 4) ? 'C' : '-', (nv & 8) ? 'D' : '-',
+                           (nv >> 7) & 1);
+                // VDOS runs from page 0xFF, which only exists with the full
+                // 4 MB; below that it aliases onto a page the guest is using.
+                if ((nv & 0x0F) && MEM_PG_CNT < 256)
+                    Debug::log("[VDOS] WARNING: %u pages configured — page 0xFF "
+                               "aliases to %u (set Machine > TS-Conf > RAM = 4 MB)",
+                               (unsigned)MEM_PG_CNT, (unsigned)(0xFF & (MEM_PG_CNT - 1)));
+            }
+            r.fddvirt = nv;
             break;
+        }
         case TSW_INTMASK: TSVT("INTMASK=%02X", val);  {
             // zint.v: a source's latch is held at 0 while its mask bit is 0
             // ("writing 0 to a pending source resets it"); writing 1 leaves a
@@ -1061,11 +1173,25 @@ struct DmaRam {
 // DRAM cycles per word (dma.v phases; see the DRAM model above): RAM->RAM read
 // + write, blit read src + read dst + write, FILL / CRAM / SFILE one access.
 // SPI is bound by the card's clock instead (~4 T per word at 14 MHz SCK) and
-// keeps a flat T cost.
+// keeps a flat T cost. IDE likewise: the FPGA's own `ide` module spends 6 fclk
+// (28 MHz) per 16-bit access — one `go` plus the five states of `st[4:0]`,
+// common/ide.v — and the DRAM half one cycle (4 fclk), i.e. 10 fclk = 1.25 base
+// T per word, of which only a quarter is DRAM. The transfer is paced by that
+// bus, not by DRAM bandwidth, so like SPI it is a flat cost (quarter-T units).
 static const uint8_t kDmaCycRam  = 2;
 static const uint8_t kDmaCycBlt  = 3;
 static const uint8_t kDmaCycOne  = 1;
 static const uint8_t kDmaCostSpi = 4;
+static const uint8_t kDmaCostIdeQ2 = 5;   // T per word x4
+
+// The DMA's IDE device is wired to the ZX-Evo's OWN connector: the top-level
+// `ide` module arbitrates one drive between the Z80 ports and the DMA, and that
+// connector's Z80-side decode is NEMO-style (zports.v `ide_even`). A drive
+// reached through some other card's port map — an SMUC on the bus — is NOT on
+// it, so it is not what this DMA moves. With nothing there the transaction
+// still RUNS (a guest waiting on DMA_ACT or the DMA interrupt must not hang for
+// want of a disk): reads take the open bus, writes go nowhere.
+static inline bool ideDmaOn() { return IDE::portScheme == IDE::NEMO; }
 
 // Bulk DMA through the core1 render queue: hw-REFUTED 2026-09-07 (TMNT ship
 // scene: ~170 sprite blits per frame, each followed by a DMAStatus poll — every
@@ -1107,7 +1233,7 @@ TS_HOT void TsConf::dmaStart(uint8_t ctrl) {
     uint32_t num = r.dmanum;
     uint32_t words = 0;
     uint8_t cyc = kDmaCycRam;      // DRAM cycles per word
-    bool spi = false;
+    bool spi = false, ide = false;
     DmaRam src, dst;
 
     auto ss_inc = [&]() { ss = salgn ? ((ss & m1) | ((ss + 2) & m2)) : ((ss + 2) & 0x3FFFFF); };
@@ -1115,16 +1241,8 @@ TS_HOT void TsConf::dmaStart(uint8_t ctrl) {
 
     switch (mode) {
         case M_RAM: case M_BLT1: case M_BLT2: case M_FILL: case M_CRAM: case M_SFILE:
-        case M_SPIRAM: case M_RAMSPI:
+        case M_SPIRAM: case M_RAMSPI: case M_IDERAM: case M_RAMIDE:
             break;
-        case M_IDERAM: case M_RAMIDE: {
-            static bool warned = false;
-            if (!warned) {
-                warned = true;
-                Debug::log("TsConf: IDE DMA (ctrl=%02X) not implemented — transaction dropped", ctrl);
-            }
-            return;   // reference: DMA_ST_NOP — DMA_ACT never rises
-        }
         default:
             return;   // reserved device: no-op, like the reference
     }
@@ -1156,16 +1274,36 @@ TS_HOT void TsConf::dmaStart(uint8_t ctrl) {
         if (mode == M_RAM) ts_dma_words_ram += words; else if (mode == M_FILL) ts_dma_words_fill += words; else ts_dma_words_blt += words;
 #endif
     } else {
-    // Synchronous modes read RAM (CRAM/SFILE/RAMSPI source) or write it
-    // (SPIRAM): a queued bulk DMA must land first, and a SPIRAM write must not
-    // overtake a queued line that reads its destination.
+    // Synchronous modes read RAM (CRAM/SFILE/RAMSPI/RAMIDE source) or write it
+    // (SPIRAM/IDERAM): a queued bulk DMA must land first, and a write into RAM
+    // must not overtake a queued line that reads its destination.
     VIDEO::tsRenderDrainDma();
-    if (mode == M_SPIRAM && VIDEO::tsRenderOverlaps(dd, 2 * len * (num + 1) + asize * (num + 1))) VIDEO::tsRenderDrain();
+    if (mode == M_SPIRAM || mode == M_IDERAM) {
+        // Device -> RAM: a queued line that reads the destination must render
+        // first, and sectors landing in the bitmap are a re-index for the
+        // palette heuristic exactly as a bulk blit is (tsVramDmaNote).
+        if (VIDEO::tsRenderOverlaps(dd, 2 * len * (num + 1) + asize * (num + 1))) VIDEO::tsRenderDrain();
+        VIDEO::tsVramDmaNote(dd, 2 * len * (num + 1));
+    }
+    bool ide_on = false;      // the on-board drive is there (hoisted out of the loop)
     if (mode == M_CRAM || mode == M_SFILE) {
         cyc = kDmaCycOne;
     } else if (mode == M_SPIRAM || mode == M_RAMSPI) {
         spi = true;
         LED::touchR(LED::ZCTRL);
+    } else if (mode == M_IDERAM || mode == M_RAMIDE) {
+        ide = true;
+        cyc = kDmaCycOne;     // one DRAM access per word (the `dma=` DRAM counter)
+        LED::touchR(LED::IDE);
+        ide_on = ideDmaOn();
+        if (!ide_on) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                Debug::log("TsConf: IDE DMA (ctrl=%02X) with no on-board drive (IDE scheme %u)"
+                           " - reads give 0xFFFF", ctrl, (unsigned)IDE::portScheme);
+            }
+        }
     }
 
     for (;;) {
@@ -1198,14 +1336,23 @@ TS_HOT void TsConf::dmaStart(uint8_t ctrl) {
                     DivMMC::zc_write_data((uint8_t)(v >> 8));
                     break;
                 }
+                case M_IDERAM:            // ide.v drives ide_a=0 / cs0: the DATA
+                                          // register, one whole word, no latch
+                    dst.wr(dd, ide_on ? IDE::read_data16() : 0xFFFF);   // none: open bus
+                    break;
+                case M_RAMIDE: {
+                    const uint16_t v = src.rd(ss);   // the DRAM half runs either way
+                    if (ide_on) IDE::write_data16(v);
+                    break;
+                }
                 default: break;
             }
 #if PERF_TRACE && PERF_HIST
-            if (mode != M_FILL && mode != M_SPIRAM) ts_dma_src_hist[(ss >> 14) & 0xFF] += n;
-            if (mode != M_RAMSPI) ts_dma_dst_hist[(dd >> 14) & 0xFF] += n;
+            if (mode != M_FILL && mode != M_SPIRAM && mode != M_IDERAM) ts_dma_src_hist[(ss >> 14) & 0xFF] += n;
+            if (mode != M_RAMSPI && mode != M_RAMIDE) ts_dma_dst_hist[(dd >> 14) & 0xFF] += n;
 #endif
-            if (mode != M_SPIRAM) ss_inc();
-            if (mode != M_RAMSPI) dd_inc();
+            if (mode != M_SPIRAM && mode != M_IDERAM) ss_inc();
+            if (mode != M_RAMSPI && mode != M_RAMIDE)  dd_inc();
             words += n;
             rem -= n;
         }
@@ -1224,8 +1371,9 @@ TS_HOT void TsConf::dmaStart(uint8_t ctrl) {
     // "busy" simply supersedes it — the data is long written either way.
     s_dma_busy = true;
     s_steal_half = 0;
-    if (spi) s_dma_end = CPU::tstates + ((words * kDmaCostSpi) << ESPectrum::multiplicator);
-    else     s_dma_end = tsDmaEndWithVideo(CPU::tstates, words * cyc);   // + CPU steals, live (tsDmaSteal)
+    if (spi)      s_dma_end = CPU::tstates + ((words * kDmaCostSpi) << ESPectrum::multiplicator);
+    else if (ide) s_dma_end = CPU::tstates + (((words * kDmaCostIdeQ2) >> 2) << ESPectrum::multiplicator);
+    else          s_dma_end = tsDmaEndWithVideo(CPU::tstates, words * cyc);   // + CPU steals, live (tsDmaSteal)
 #if PERF_TRACE
     if (!spi) ts_dma_cyc += words * cyc;
 #endif
@@ -1509,6 +1657,8 @@ void TsConf::reset(bool cold) {
     r.fmaddr = 0;
     r.intmask = 1;
     r.fddvirt = 0;
+    vdosLive = false;      // the RTL resets vdos; drive_sel_raw has no reset,
+    s_drive_sel = 0;       // but starting anywhere else is not reproducible
     r.sysconf = 0;       // 3.5 MHz
     // **W0_MAP_N = 1, i.e. window 0 is LINEAR and shows ROM page[0] = 0 (TS-BIOS)**
     // — `zports.v`: `memconf <= 8'h04;  // no map`, the RTL's own comment. This

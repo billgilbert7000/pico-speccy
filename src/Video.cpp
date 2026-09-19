@@ -6015,14 +6015,17 @@ void VIDEO::tsVideoApplyPending() {
           Debug::log("[TSV] VM seen %02X -> want %u (live %u, rres %u)", vmSeen, want, ts_vmode_live, rres); } }
 #endif
     // TSU layers: any of S_EN/T1_EN/T0_EN (TSConfig b7..b5) and not NOTSU
-    // (VConfig b4). Text mode is hires and pair-slot — no TSU over it.
+    // (VConfig b4). TEXT is included: video_render.v composites the TSU over
+    // every mode, hires ones too (Wild Commander's CLOCK.WMF draws its hands
+    // that way over an 80-column desktop) — see the TEXT branch of
+    // tsRenderExec for what a TSU pixel looks like in hires.
     // Hysteresis: layers enabled at ANY point of the frame count (TsConf::tsuSeen,
     // set by every TSConfig write) — a game that switches its layers off around
     // the INT handler and back must not lose a whole frame of tiles because
     // EndFrame sampled the off window. Cleared here, once per frame.
     const uint8_t seen = (uint8_t)(TsConf::r.tsconf | TsConf::tsuSeen);
     TsConf::tsuSeen = 0;
-    const bool wantTsu = (seen & 0xE0) != 0 && !(vc & 0x10) && want != TSV_TEXT;
+    const bool wantTsu = (seen & 0xE0) != 0 && !(vc & 0x10);
     const uint8_t wantRender = (want != TSV_ZX || wantTsu || vmMixed) ? 1 : 0;
     if (want == ts_vmode_live && wantTsu == ts_tsu_live && wantRender == ts_render_live &&
         (!wantRender || rres == ts_rres_live)) return;
@@ -6606,38 +6609,79 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
     // A NOGFX line is border end to end, in either kind of frame — `brd` is
     // already the right byte for both (tsBorderSlotFor). Not with the TSU up:
     // video_render.v keeps tiles and sprites visible OVER the border there, so
-    // that case still needs the compose path below (nogfx).
+    // that case still needs the compose path below (nogfx) — and in a TEXT
+    // frame that compose is the hires one, so the branch right below takes it.
     if (lvm == TSV_NOGFX && !ts_tsu_live) { fillPad(x0, x1); return; }
 
-    if (lvm == TSV_TEXT) {
+    // A TEXT line is HIRES — two pixels per fb byte — so it renders here even
+    // with its character layer blanked by NOGFX (video_render.v only replaces
+    // the character pixels with the border there; the TSU stays visible).
+    const bool textNogfx = (lvm == TSV_NOGFX) && framePair && (j.l.vconf & 3) == TSV_TEXT;
+    if (lvm == TSV_TEXT || textNogfx) {
         // draw_tstx / addr_tx: 256-byte text rows (chars at +0, attrs at +0x80,
         // 128 columns max), font = page vpage^1 (8 bytes/char), row = ygctr>>3
         // (64 rows per page), char line = ygctr&7; paper = gpal|atr>>4, ink =
         // gpal|atr&15; 8 hires px per char = 4 pair bytes, (k^2) pre-swizzled
         // for the ISR's x^2 read pattern (same trick as GMX/DS80).
-        const uint8_t* scr = TsConf::pagePtr(j.l.vpage);
-        const uint8_t* fnt = TsConf::pagePtr(j.l.vpage ^ 0x01);
-        if (!scr || !fnt) { fillPad(x0, x1); return; }
-        const uint32_t s = (ygctr & 0x1F8) << 5;
-        const uint8_t  cl = ygctr & 7;
+        const uint8_t* scr = nullptr; const uint8_t* fnt = nullptr;
+        uint32_t s = 0; uint8_t cl = 0;
+        if (!textNogfx) {
+            scr = TsConf::pagePtr(j.l.vpage);
+            fnt = TsConf::pagePtr(j.l.vpage ^ 0x01);
+            if (!scr || !fnt) { fillPad(x0, x1); return; }
+            s  = (ygctr & 0x1F8) << 5;
+            cl = ygctr & 7;
+        }
+        // ── TSU over TEXT (video_render.v + video_out.v) ────────────────────
+        // Two facts make this a per-fb-byte override rather than a second
+        // palette path. (1) The TSU line buffer is read at the LORES rate:
+        // video_sync.v's `ts_raddr = hcount - hpix_beg_ts` and hcount counts
+        // 7 MHz pixels whatever the mode, so ONE TSU pixel covers BOTH hires
+        // pixels of one fb byte. (2) In hires the palette high nibble is
+        // thrown away — video_render.v packs `{temp, video[3:0]}` and
+        // video_out.v reads it back as `{palsel, nibble}` — so a TSU pixel is
+        // just its own LOW NIBBLE in the frame's gpal bank, which is exactly
+        // what profi_pair_lookup is indexed by here. Visibility is the RTL's
+        // own `tsu_visible = |tsdata[3:0]`.
+        const uint8_t* bl = nullptr;
+        if (ts_tsu_live) {
+            const uint32_t t1 = tsRenderUs();
+            memset(s_tsline, 0, (size_t)g.w);     // 0 = transparent
+            tsuComposeLine((uint32_t)curline + ts_crop_top, s_tsline, *st, sfile, j.l.palsel, seq, (uint8_t)((j.l.kind >> 1) & 1));
+            ts_tsu_us += tsRenderUs() - t1;
+            bl = s_tsline;
+        }
         // Text is hires: g.w lores pixels = 2*g.w hires pixels = g.w/4 chars
         // of 8 (80 at RRES 320) — each char = 4 pair bytes.
+        const uint32_t tout = tsRenderUs();
         const int cols = (int)g.w >> 2;
-        for (int j = 0; j < cols; j++) {
-            const int bx = x0 + j * 4;
+        for (int c = 0; c < cols; c++) {
+            const int bx = x0 + c * 4;
             if (bx < 0 || bx + 4 > xres) continue;            // cropped column
             if (carveRow && bx + 4 > cx0 && bx < cx1) continue; // stats box
-            const uint8_t sym = scr[s + j];
-            const uint8_t atr = scr[s + j + 0x80];
-            const uint8_t b   = fnt[cl + ((uint32_t)sym << 3)];
-            const uint8_t fg = atr & 0x0F, bg = atr >> 4;
-            const uint8_t p0 = profi_pair_lookup[(b & 0x08) ? fg : bg][(b & 0x04) ? fg : bg]; // k=2 → +0
-            const uint8_t p1 = profi_pair_lookup[(b & 0x02) ? fg : bg][(b & 0x01) ? fg : bg]; // k=3 → +1
-            const uint8_t p2 = profi_pair_lookup[(b & 0x80) ? fg : bg][(b & 0x40) ? fg : bg]; // k=0 → +2
-            const uint8_t p3 = profi_pair_lookup[(b & 0x20) ? fg : bg][(b & 0x10) ? fg : bg]; // k=1 → +3
+            uint8_t px[4];                                     // by lores position k, stored at k^2
+            if (textNogfx) { px[0] = px[1] = px[2] = px[3] = brd; }
+            else {
+                const uint8_t sym = scr[s + c];
+                const uint8_t atr = scr[s + c + 0x80];
+                const uint8_t b   = fnt[cl + ((uint32_t)sym << 3)];
+                const uint8_t fg = atr & 0x0F, bg = atr >> 4;
+                px[0] = profi_pair_lookup[(b & 0x80) ? fg : bg][(b & 0x40) ? fg : bg];
+                px[1] = profi_pair_lookup[(b & 0x20) ? fg : bg][(b & 0x10) ? fg : bg];
+                px[2] = profi_pair_lookup[(b & 0x08) ? fg : bg][(b & 0x04) ? fg : bg];
+                px[3] = profi_pair_lookup[(b & 0x02) ? fg : bg][(b & 0x01) ? fg : bg];
+            }
+            if (bl) {
+                const uint8_t* t = bl + c * 4;                 // area pixel = c*4 + k
+                for (int k = 0; k < 4; k++) {
+                    const uint8_t n = (uint8_t)(t[k] & 0x0F);
+                    if (n) px[k] = profi_pair_lookup[n][n];
+                }
+            }
             *(uint32_t*)(fb_row + bx) =
-                (uint32_t)p0 | ((uint32_t)p1 << 8) | ((uint32_t)p2 << 16) | ((uint32_t)p3 << 24);
+                (uint32_t)px[2] | ((uint32_t)px[3] << 8) | ((uint32_t)px[0] << 16) | ((uint32_t)px[1] << 24);
         }
+        ts_out_us += tsRenderUs() - tout;
         return;
     }
 

@@ -2893,8 +2893,7 @@ VPage/GYOffs. The live VCONFIG table read out of the dump:
   **ZX, 16c and NOGFX lines are EXACT** (their pixels are `{gpal, n}` by
   construction); a 256c band is exact inside its own gpal bank and approximated
   to 16 colours otherwise. Known limits of the mixed frame, all in the pair
-  half: the TSU is dropped (`wantTsu` excludes TEXT — no known title mixes them),
-  TEXT itself ignores the per-line PalSel (the pair palette is one bank per apply,
+  half: TEXT ignores the per-line PalSel (the pair palette is one bank per apply,
   and the two this demo alternates are identical), and `profiPaletteApplyPending`
   applies at v_sync, which on TS-Conf leads blanking by `TS_VSYNC_LEAD_LINES` —
   so a palette animated every frame tears at a fixed raster position near the
@@ -8701,6 +8700,310 @@ on real hardware — the SMUC clock at #DFBA versus the Pentagon/Karabas one at
 - NVRAM (0x0E–0xFF + reg B; full 8-bit index — Karabas exposes 240 DS1307 cells, no `&0x3F` mask or high cells would alias onto the time regs) persisted to `CONFIG_DIR/cmos.nvr` (256 bytes; old 64-byte files still load): `loadNVRAM()` at init, dirty-flushed from main loop via `RTC::flushNVRAM()`.
 - `RTC_PORT_TRACE` CMake option (default OFF) logs every `..F7` IN/OUT for debugging.
 - **Toggle**: Devices → **"CMOS + NVRAM"** (renamed from "RTC + NVRAM" 2026-09-07; Yes/No → `Config::rtc_enabled`, NVS key still `rtc_enabled`, default **off**). It governs **every battery-backed chip in the firmware**: the Pentagon/Profi **Mr Gluk** MC146818 (`#DFF7`/`#BFF7`), the **Karabas-Pro native** DS1307 path (`#FF`/`#BF` under CPM+ROM14), and — since 2026-09-07 — whether the Scorpion's **SMUC** card is fitted at all (its MC146818 + 24LC16; see the SMUC section). Two deliberate non-members: **TS-Conf**, where those same Gluk ports are the ZX-Evo AVR and MUST stay live or TS-BIOS sits in an invisible Setup, and SNTP (Network → Sync time / the boot auto-sync), which only *writes* the clock when the option is on. Machines with no clock (48K/128K/+2/+3/+3e/Byte) show the row and ignore it. When off, the Gluk/Karabas ports still RESPOND STATICALLY (not bypassed): reads float 0xFF (Gluk shows "NO CMOS"; Karabas clock shows FF), but status regs A/C read UIP/flags clear so the Karabas ROMain boot's MC146818 "wait until UIP clears" loop can't hang (was the "ROMain won't start with RTC off" bug); register-select is still latched, data writes swallowed (`RTC::readDisabled()`, four handlers in Ports.cpp).
+
+## VDOS: the FPGA swaps the TR-DOS ROM for RAM page 0xFF (2026-09-18, NOT hw-tested)
+
+TS-Conf's virtual floppies are not an FDC emulation at all. FDDVirt (`#29`)
+marks drives 0-3 virtual (b3:0) and opens the controller ports outside TR-DOS
+(b7, OPEN_VG); when the TR-DOS ROM then touches `#1F/#3F/#5F/#7F/#FF` with a
+virtual drive selected, the FPGA **puts RAM page 0xFF in window 0** — writable,
+ROM gone, the DOS signal held up — so the guest's own handler takes over at the
+address right after the access, does the work and leaves by touching one of
+those ports again. That is what Wild Commander's `MOUNTER.WMF` (Alex Rider's
+vDOS) uses to serve mounted TRD/SCL images, and what `TRDUMP.WMF` and the
+"TR-DOS Only" menu entries need.
+
+`TsConf::fddPortIo` (called first thing by both port paths, behind a one-test
+`(addr & 0x1F) == 0x1F` filter) is `zports.v` line for line:
+
+```
+fddvrt = fddvirt[3:0];  open_vg = fddvirt[7];  virt_vg = fddvrt[drive_sel_raw]
+vg_wen   = (dos || open_vg) && !vdos && !virt_vg          // controller selected
+vg_wrDS  = iowr && vgsys_port && (dos || open_vg)         // drive latch, NOT gated
+vdos_on  = iordwr && (vg_port || vgsys_port) && dos && !vdos && virt_vg
+vdos_off = iordwr &&  vg_port && vdos
+```
+
+- **`virt_vg` uses the drive selected BEFORE this access.** `drive_sel_raw` is a
+  clocked latch, so writing a virtual drive number to `#FF` does not itself
+  enter VDOS — the NEXT controller access does. The latch is not gated by
+  `vdos` or `virt_vg` either: that is how the handler in page 0xFF chooses
+  which virtual drive it is serving.
+- **Both transition accesses are invisible to the WD1793** (`vg_wen` is 0
+  during each), so they are eaten here. An eaten read of a controller register
+  answers **0xFF** — `zports.v`'s read mux has no entry for the four VG
+  registers, so they fall to its `default: dout = 8'hFF` when the chip is not
+  selected. A **read of `#FF` is never eaten**: its INTRQ/DRQ bits come from
+  the FPGA, not from the chip's data bus, and the RTL does not gate them.
+- **`dos_off` gained the RTL's `!vdos` term** (`zmem.v`), or the handler would
+  drop TR-DOS the moment it called out of window 0 — and vDOS does.
+- The window-0 override sits in `setBanks` (page 0xFF, and RAM even with
+  `W0_RAM`=0), the write-protect bit is suppressed in `tsUpdateWrGate`
+  (`ramwr_en = !win0 || w0_we || vdos`) and the DRAM cache rows are rebuilt
+  with window 0 as RAM. With less than 4 MB configured page 0xFF aliases down
+  like every other page number here.
+- **DELIBERATE DEVIATION: the hardware delays the window-0 swap to the next
+  opcode fetch** (`vdos = opfetch ? pre_vdos : vdos_r`, whose own comment says
+  "due to INIR that writes right after iord cycle"); we switch inside the
+  access. The two differ only for a block instruction whose memory half lands
+  in window 0 — a sector read into 0x0000-0x3FFF, i.e. into the ROM the trigger
+  came from. Every opcode fetch after the triggering instruction comes from
+  page 0xFF either way, which is the part the handler depends on.
+- Checked by sweeping all 98304 combinations of (fddvirt, drive_sel, dos, vdos,
+  port, direction) against those equations transcribed independently from the
+  Verilog; four hand-applied mutations (dropping the `!vdos` in `vg_wen`, the
+  `virt` in `vdos_on`, the `#FF`-read exemption, and letting `#FF` exit VDOS)
+  each fail it. That is a truth-table check only — the paging half is checked
+  by inspection, so the first hardware run should look for `[VDOS] FDDVirt ...`
+  and `[VDOS] on/off` in the log (the first dozen transitions are logged in an
+  ordinary build; `TS_VIDEO_TRACE` carries the rest, and the memory dump's
+  TS-Conf block prints `vdos=`).
+
+## DMA device IDE (ctrl 03/0B): the DMA owns the ON-BOARD connector (2026-09-18, NOT hw-tested and probably untestable)
+
+The last of the Wild Commander gaps, and the reference answers every question
+about it — `pentevo/fpga/current/common/ide.v` is 120 lines and the DMA is one of
+its two masters:
+
+```verilog
+assign ide_out = dma_req ? dma_out : z80_out;
+assign ide_a   = dma_req ? 3'b0    : z80_a;      // <- the DATA register, always
+wire cs0_n = dma_req ? 1'b0 : z80_cs0_n;
+wire cs1_n = dma_req ? 1'b1 : z80_cs1_n;
+```
+
+- **One whole 16-bit word per device access, no latch and no byte order to
+  choose.** `dma.v` wires IDE as `ide_in[15:0] -> data` / `ide_out = data` and its
+  `dev_stb` takes `ide_int_stb` on its own — the `byte_sw_stb`/`bsel` half-word
+  machinery is the SPI and WTPORT path, not this one. `IDE::read_data16()` /
+  `write_data16()` (IDE.h) are that access: two `read8(0)`/`write8(0)` steps of the
+  existing engine, low half first, which is the first sector byte because that is
+  what ATA puts on D0-D7. A sector therefore lands in RAM in file order.
+- **The drive is the ZX-Evo's OWN**, since `ide.v` arbitrates ONE connector
+  between the Z80 ports and the DMA, and that connector's Z80-side decode is
+  NEMO-style (`zports.v` `ide_even`). So `ideDmaOn()` is `IDE::portScheme ==
+  IDE::NEMO`: a disk reached through another card's port map — an SMUC on the bus,
+  which TS-Conf now offers — is not on that cable and is not what this DMA moves.
+- **With no drive the transaction still RUNS**, reads taking the open bus
+  (0xFFFF) and writes going nowhere. Dropping it (the old stub's `DMA_ST_NOP`,
+  where DMA_ACT never rises) hangs any guest that waits on DMA_ACT or the DMA
+  interrupt, which is a far worse failure than a buffer of 0xFF. Warn-once in the
+  log, so the 0xFFs have an explanation.
+- **Cost is FLAT, like SPI, and it is the IDE bus that sets it**: `ide.v` spends
+  6 fclk per access (`go` plus the five states of `st[4:0]` at 28 MHz) and the
+  DRAM half one cycle (4 fclk) — 10 fclk = **1.25 base T per word**, of which
+  only a quarter is DRAM, so `tsDmaEndWithVideo` (which removes the video
+  fetcher's share of DRAM) is the wrong model here. 256 words = a sector = ~320 T,
+  about 1.5 scanlines. `cyc` is still set to 1 so the `[PERF] dram: dma=` DRAM
+  counter stays honest.
+- **Deliberate deviations**: a real transfer is paced by the drive and needs DRQ
+  up, where our `read8(0)` answers 0xFF outside a transfer and auto-advances
+  through a multi-sector read — i.e. a driver that starts the DMA at the wrong
+  moment gets filler instead of a stall; and the SD access behind a sector read
+  stops the emulated Z80 for milliseconds while the modelled DMA_ACT is ~0.1 ms,
+  the same deviation every disk access here has. `tsDmaSteal` (a CPU access
+  stealing a DRAM cycle from a running DMA) still applies, slightly over-charging
+  a transfer that only wants a quarter of the DRAM — same as SPI.
+- **Same commit: device->RAM DMA now notes the VRAM write** (`tsVramDmaNote`) for
+  SPI as well as IDE. A sector of artwork landing in the bitmap is a re-index for
+  the `nb == 1` palette heuristic exactly as a bulk blit is; only the bulk path
+  did it before.
+- **Checked on the host** (scratchpad, not `tools/` — `TsConf.cpp` cannot be
+  host-compiled, so the test is a transcription and would rot there): the shipped
+  loop against an independent implementation of Unreal's own
+  `dma_ide_r`/`dma_ide_w` + `dma_next_burst` driven one memcyc at a time, over
+  8640 combinations of addresses, len, num, S/D_ALGN, ASZ and direction — the
+  device-access order, the RAM word paired with each, and the register file left
+  behind all agree. Three mutations each fail it: letting IDERAM step the source
+  address, letting RAMIDE step the destination, and a burst that ignores the
+  alignment window. The word order is checked separately against `read8(0)`.
+- **Hw check owed, and it may never come** (the owner's own "наверное проверить не
+  сможем"): nothing is known to drive this — WC's panel drivers are port drivers,
+  and its DMA IDE users are the ones that were out of reach while the stub stood.
+  If a title ever does: `[PERF] ts: dma=` should show the words, the `NGS`-style
+  warn-once line must be ABSENT (it means the scheme is not NEMO), and a sector
+  read into the bitmap must appear right way round rather than byte-swapped.
+
+## The SD write path: the card has to STOP saying "data accepted" (2026-09-18, NOT hw-tested)
+
+Wild Commander (TS-Conf, boots as `boot.$C` off the FAT card through TS-BIOS)
+read the card perfectly and **froze the machine the moment it saved `wc.ini`**,
+leaving the file gone after a forced reboot. The bug is one line of
+`DivMMC::mmc_read`'s CMD24 case: after the data-response token it answered
+**0x05 to every further read, for ever**. A real card answers 0x05 ONCE, then
+holds MISO low (0x00) while it programs, then 0xFF.
+
+- That difference is invisible to a driver whose busy-wait is "read while the
+  byte is 0x00", and it is a **permanent hang** for one that waits for the busy
+  phase to END by polling for 0xFF. WC's Z-Controller driver has BOTH loops —
+  `IN A,(C) / OR A / JR Z` after the response and an unbounded
+  `IN A,(C) / INC A / JR NZ` ("wait ready"), the latter being exactly the
+  "ожидание busy после завершения транзакции записи" its changelog added. The
+  read path was never affected because CMD17 ends with `mmc_read_index = -1`,
+  i.e. it does return to 0xFF.
+- Fixed by `mmc_wr_resp` (-1 none / 0 token / 1 busy / 2 ready), armed when a
+  block is stored — for CMD24 **and** every CMD25 block, which had no data
+  response at all (WC's error path for a bad response is `OUT (#0FAF),err` +
+  `JR $`, i.e. a dead hang with a coloured border — worth recognising). It is
+  read at the TOP of `mmc_read`, ahead of the command latch, because the latch
+  is now released as soon as the block's CRC bytes are in.
+- **Releasing the latch is the second half of the fix**: `mmc_index_command`
+  used to run past the end of the block for ever, so with CS held low across
+  commands the card went deaf to the NEXT command frame and the driver hung in
+  its R1 wait instead. Only a CS edge healed it.
+- Third, smaller: the 0xFE data token may be preceded by any number of 0xFF gap
+  bytes; the index now holds at the token slot until the token really arrives,
+  or the whole block shifts one byte per gap.
+- Checked on the host by transcribing the patched state machine and driving it
+  with WC's own byte sequence (CS, CMD24 frame, R1 wait, gaps, token, 512+CRC,
+  response, busy wait, ready wait, and a second command with CS held low). The
+  pre-fix model fails exactly at the ready wait — that is the hang. Re-derive it
+  before touching this area again; the file itself cannot be host-compiled (it
+  pulls FatFs and the SDK).
+
+### What Wild Commander still needs from us — CLOSED (analysed and finished 2026-09-18)
+
+The gap list is done. **VDOS / FDDVirt**, **TSU over TEXT** and **SMUC** were
+implemented the same day (three sections below). The three that remain are owner
+rulings, not open work — do NOT reopen them without a new request:
+
+- **DMA device IDE** (`ctrl 03/0B`) was first ruled out ("пункт 2 это логично, не
+  надо править") and then reopened the same day ("в принципе тоже можно поправить,
+  но наверное проверить не сможем") — it is IMPLEMENTED, see the section below,
+  and is the one piece here with no path to a hardware verdict.
+- **90x36 text** is not a code question ("решается не кодом"). RRES 360x288 on a
+  320x240 framebuffer shows the central 80x30 of it, so the answer is the user's
+  own setup: `TextMode=1` at 640x480, or the 720x576 video mode.
+- **The second ZC card** (cfg bit 3, `DRV=6`) will not be emulated — "всегда будет
+  без карты", i.e. that slot is expected to be empty on this hardware.
+
+Its whole keyboard goes through the ZX-Evo AVR PS/2 scancode log (Gluk reg `#F0`,
+type 2 — `ZxEvoAvr.cpp`), which WC being usable at all now confirms on hardware.
+
+## SMUC on TS-Conf: the ports are OPEN, and the card's clock is not the AVR (2026-09-18, NOT hw-tested)
+
+Wild Commander offers `IDEsmucMaster` / `IDEsmucSlave` as panel drives (`DRV=3`
+/ `DRV=4` in `wc.ini`) and its own changelog names the driver it ships as the
+one "под SMUC с открытыми портами" — so the card is a ZXBUS card on a ZX-Evo
+and its ports answer whatever the machine is doing. Two rules change against the
+Scorpion's, and both are forced by the machine rather than chosen:
+
+- **The card is FITTED by the IDE/HDD row alone** (`smucCardFitted`,
+  `smucCardConfigured`). On a Scorpion `Config::rtc_enabled` also fits it,
+  because there the MC146818 the user is switching on IS the SMUC's. On a ZX-Evo
+  "CMOS + NVRAM" means the machine's OWN Gluk clock — which is the AVR keyboard
+  controller (`ZxEvoAvr.cpp`) and is unconditionally live, or TS-BIOS sits in an
+  invisible Setup. Tying the card to it would have made the row mean two
+  different chips on one machine. The card's own MC146818 + 24LC16 come with the
+  card, as on a Scorpion.
+- **`smucActive()` has no DOSEN/SYSEN gate on TS-Conf.** A ZX-Evo has no `#1FFD`
+  SYSEN at all and enters TR-DOS only through the `#3Dxx` trap, so a gated card
+  would be invisible to anything running from RAM — which is every WC panel
+  driver. That IS the open-ports configuration, not a deviation from it.
+
+**The AVR hazard, and why the fix belongs to the PORT PAIR and not to the
+machine.** `RTC::readData/writeData` divert reg C/D/E and the `0xF0..0xFF`
+window to `ZxEvoAvr` whenever `Z80Ops::isTsconf` — correct for `#DFF7`/`#BFF7`
+and wrong for the SMUC's `#DFBA`, which is a plain MC146818 on a separate board.
+Both now take `bool avrExt` (default `true`, so every existing caller is
+unchanged) and the SMUC path passes `false`: the card's reg C keeps its real UF
+/ PF flags, its reg D/E are ordinary registers, and a driver that walks the
+`0xF0+` cells gets storage instead of a scancode log.
+
+- **Deliberate deviation**: on real hardware those are two chips; here they share
+  one `RTC::` register file AND one select latch (`RTC::sel`), so an interleaved
+  `OUT (#DFF7)` / `OUT (#DFBA)` sequence would confuse them. Nothing drives both
+  — WC's SMUC driver is a DISK driver and TS-BIOS never touches `#xxBA` — and the
+  alternative (letting `#DFBA` fall through) puts the card's clock write on the
+  ULA border, since every SMUC port has A0=0. The CMOS image is `cmos_TSConf.nvr`
+  either way, i.e. shared with TS-BIOS's own NVRAM; the 24LC16 gets its own
+  `nvram_TSConf.bin`.
+
+**Decode**: unchanged (`(address & 0x18A3) == 0x18A2 && !(address & 0x0040)`),
+swept against every other TS-Conf decode over all 65536 addresses on the host —
+512 accepted addresses, low bytes `A2 A6 AA AE B2 B6 BA BE`, all 16 documented
+ports reachable, and the ONLY collision is the generic even-port ULA path, which
+is expected and is exactly what the block's placement before it (and its
+`return`) exists for. It does not touch `#nnAF` (TS-Conf registers), `#xx1F`
+(the FDC/VDOS filter) or `#xxF7` (Gluk).
+
+**Note the ZX-Evo's OWN on-board IDE is NEMO-style** (`zports.v`: `ide_even =
+(loa[2:0]==3'b000) && (loa[3] != loa[4])`, plus `NIDE11`), and our `IDE::NEMO`
+scheme already answers on TS-Conf — so WC's `DRV=0` / `DRV=5` need nothing. SMUC
+is the second controller, not a replacement.
+
+**Hw check owed** (none of this has run): WC with `DRV=3` (and `DRV=4` for the
+slave) against a mounted `.hdf`, i.e. the panel listing a partition; the TS-Conf
+keyboard still working while the card is fitted (the `avrExt` split — a
+regression there reads as dead keys, since WC's whole keyboard is the AVR
+scancode log); TS-BIOS Setup still reaching its own NVRAM; `IDE/HDD = SMUC` with
+NO image mounted reading as "controller present, no drive" rather than hanging a
+probe; and the menu note on a machine that is neither Scorpion nor TS-Conf.
+Diagnostics: `-DSMUC_TRACE=ON` now also logs refused accesses on TS-Conf, and
+Hardware Info's `SMUC card` row says `open ports, CMOS + NVRAM + HDD` / `...,
+no HDD` there.
+
+## TSU over TEXT: in hires a pixel is its own LOW NIBBLE (2026-09-18, NOT hw-tested)
+
+`wantTsu` used to exclude TEXT frames outright, so Wild Commander's `CLOCK.WMF`
+(and anything else that puts tiles or sprites over an 80-column desktop) drew
+nothing. The hardware composites the TSU over EVERY mode — `video_render.v`
+picks `video1 = tsu_visible ? tsdata_in : ...` before it knows anything about
+hires — and two RTL facts make the emulation a per-framebuffer-byte override
+rather than a second palette path:
+
+- **The TSU line buffer is read at the LORES rate**: `video_sync.v`'s
+  `ts_raddr = hcount - hpix_beg_ts`, and `hcount` counts 7 MHz pixels in every
+  mode (`always @(posedge clk) if (c3)`), where the text renderer's own `psel`
+  advances on `pix_stb = tv_hires ? f1 : c3` = 14 MHz. So ONE TSU pixel covers
+  BOTH hires pixels of one packed-pair framebuffer byte, and a visible TSU pixel
+  simply replaces that byte with the pair DIAGONAL.
+- **In hires the palette high nibble is discarded.** `video_render.v` ends with
+  `vplex_out = hires ? {temp, video[3:0]} : video` and `video_out.v` reads it
+  back as `vdata = {palsel, plex_sel ? plex[3:0] : plex[7:4]}` — so a TSU
+  pixel's own 4-bit palette field never reaches the CRAM in a hires line; the
+  index is `{palsel, tsdata[3:0]}`, which is exactly what `profi_pair_lookup` is
+  indexed by in the TEXT branch (the pair palette IS the frame's gpal bank).
+  Visibility stays the RTL's `tsu_visible = |tsdata[3:0]`.
+
+So the TEXT branch of `tsRenderExec` composes the TSU line first and then, per
+character, overrides any of its four lores positions whose TSU nibble is
+non-zero with `profi_pair_lookup[n][n]`. Consequences worth knowing:
+
+- **A NOGFX line in a TEXT frame is still HIRES** (`tv_hires = pixrate[vmod]`
+  and `vmod` is the video mode, which NOGFX does not change), so it renders in
+  the same branch with its character layer replaced by the border byte instead
+  of falling into the generic lores path — `textNogfx`. Without that its TSU
+  pixels would go through `s_pairmap` (nearest of the 16 gpal colours) where the
+  hardware takes the low nibble exactly.
+- The **generic** path still maps a pair frame's non-TEXT lines through
+  `s_pairmap`, TSU pixels included. That is deliberate: those lines are LORES on
+  the hardware (a real ZX-Evo switches pixel clock per line, which we cannot —
+  the driver's pair tables are global), so the nearest-colour approximation is
+  the closer answer there than truncating to a nibble.
+- Nothing else needed changing: `tsRenderOverlaps`, `tsWatchedPage`, the
+  `TsuState`/SFILE snapshots and the tile-map prefetch (`ts_tmb`, allocated for
+  any whole-line mode) were all keyed on `ts_tsu_live` and never on the mode.
+- Cost on a TEXT frame that has no TSU layers up: zero (the compose is behind
+  `ts_tsu_live`). With them up it is one `tsuComposeLine` per line plus four
+  nibble tests per character. `[PERF] ts:` now attributes the text loop to `out`
+  and the compose to `tsu`, which it could not before.
+
+Checked on the host by transcribing the shipped loop and diffing it against an
+independent model built from the RTL above — a 2*w hires scanline, TSU sampled
+once per lores pixel, packed into pairs and stored through the `(k^2)` swizzle —
+over every (RRES, framebuffer width) pair including the two overhang cases, with
+and without NOGFX and the TSU: 12800 cases, 0 mismatches. Four hand mutations
+each fail it (TSU index from the whole byte, TSU sampled per hires pixel, the
+store order without `k^2`, and dropping the TSU on a NOGFX text line). The test
+is a transcription — `Video.cpp` cannot be host-compiled — so it lives in the
+session scratch rather than `tools/`, where it would rot silently.
+
+**Hw check owed**: `CLOCK.WMF` under Wild Commander (tiles/sprites over the
+80-column desktop), a plain TS-BIOS Setup entry (TEXT with no TSU — must be
+byte-identical to before), and Demorama's TEXT band inside its 256c screen (the
+mixed frame, where the TSU must NOT appear on the lores lines any differently
+than it did).
 
 ## FDI copy protection — physical damage emulation (`src/wd1793.cpp`)
 

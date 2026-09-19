@@ -16,11 +16,12 @@ Phase 1 scope — the machine core only:
   - FRAME interrupt with programmable HSINT/VSINT position, IM2 vector #FF.
   - SysConfig ZCLK 3.5/7/14 MHz -> ESPectrum::multiplicator.
   - CRAM/SFILE storage (written via #nnAF only in this phase).
-Phase 2 (2026-09-06) adds the DMA controller (RAM/BLT1/BLT2/FILL/CRAM/SFILE
-and SPI via the Z-Controller; IDE is a warn-once stub), the LINE and DMA
-interrupt sources with the hardware's priority/acknowledge rules, and the
-W0_WE write protect. Still inert: the TSU, 16c/256c/text video modes, VDOS,
-the read cache.
+Phase 2 (2026-09-06) adds the DMA controller (RAM/BLT1/BLT2/FILL/CRAM/SFILE,
+SPI via the Z-Controller and, since 2026-09-18, the on-board IDE), the LINE and
+DMA interrupt sources with the hardware's priority/acknowledge rules, and the
+W0_WE write protect. Phase 3/4 added the 16c/256c/text video modes and the
+TSU; the read cache is modelled by the DRAM timing model (TsDramCache.h), and
+VDOS (virtual floppies) by fddPortIo below.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -80,7 +81,7 @@ public:
         uint8_t  cacheconf;
         uint8_t  memconf;      // b0 ROM128, b1 W0_WE, b2 !W0_MAP, b3 W0_RAM, b7:6 LCK128
         uint8_t  fmaddr;       // b3:0 window, b4 enable (stored; hooked in phase 2)
-        uint8_t  fddvirt;      // stored; VDOS is phase 4+
+        uint8_t  fddvirt;      // b3:0 virtual drives, b7 OPEN_VG (see vdosLive)
         uint8_t  intmask;      // b0 FRAME, b1 LINE, b2 DMA
         uint8_t  hsint;        // FRAME INT pixel position (0..223 valid)
         uint16_t vsint;        // FRAME INT line position, 9 bit (0..319 valid)
@@ -157,6 +158,18 @@ public:
     // has already put the register file back to its tsinit values.
     static void bootRom(uint8_t page, bool lock48);
     static void trdosTrap(uint8_t pcH); // check_trdos() replacement (Z80_JLS.cpp)
+
+    // ---- VDOS / virtual floppies (FDDVirt #29) ---------------------------
+    // zports.v + zmem.v. FDDVirt b3:0 mark a drive VIRTUAL, b7 is OPEN_VG (the
+    // WD1793 ports answer outside TR-DOS as well). When the TR-DOS ROM touches
+    // a controller port while a virtual drive is selected, window 0 becomes RAM
+    // page 0xFF — writable, ROM gone, the DOS signal held — so the handler the
+    // guest has put there takes over AT THE ADDRESS AFTER the access, emulates
+    // the operation and hands back by touching a controller port again. That is
+    // how Wild Commander's MOUNTER serves mounted TRD/SCL images.
+    static bool vdosLive;                       // the VDOS signal
+    enum FddIo : uint8_t { FDD_PASS, FDD_EATEN };  // EATEN: the WD1793 must not see this access
+    static FddIo fddPortIo(uint16_t addr, bool write, uint8_t data);
 
     // Interrupt controller (zint.v). Three latched sources: FRAME (the
     // programmable 32-clock window at VSINT/HSINT), LINE (every line start

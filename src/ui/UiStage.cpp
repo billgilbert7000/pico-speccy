@@ -1581,13 +1581,15 @@ void commit(CommitReport& rep) {
         if (!rep.note) rep.note = " IDE turned off: esxDOS needs the same ports ";
     }
 
-    // SMUC is a Scorpion card: Ports::smucPortRead/Write are gated on
-    // Z80Ops::isScorpion, so picking that scheme on another machine leaves the
-    // menu row set and the ports dead. Say so instead of forcing a scheme back —
-    // the user may be setting up the card before switching machine.
-    if (bmGet(g_dirty, SET_IDE_SCHEME) && g_val[SET_IDE_SCHEME] == IDE::SMUC &&
-        ((staged(SET_MACHINE) >> 8) & 0xFF) != A_SCORP) {
-        if (!rep.note) rep.note = " SMUC is a Scorpion card ";
+    // SMUC answers on a Scorpion and on TS-Conf (a ZXBUS card there, which is
+    // what Wild Commander's IDEsmuc panel drivers expect) — everywhere else
+    // Ports::smucPortRead/Write decline and the row would sit set with the ports
+    // dead. Say so instead of forcing a scheme back: the user may be setting the
+    // card up before switching machine.
+    if (bmGet(g_dirty, SET_IDE_SCHEME) && g_val[SET_IDE_SCHEME] == IDE::SMUC) {
+        const uint8_t a = (staged(SET_MACHINE) >> 8) & 0xFF;
+        if (a != A_SCORP && a != A_TSCONF)
+            if (!rep.note) rep.note = " SMUC is a Scorpion / TS-Conf card ";
     }
 
     if (bmGet(g_dirty, SET_GS_MODE) && g_val[SET_GS_MODE] && Config::esxdos == 2) {
