@@ -578,11 +578,14 @@ option(AY_STEREO_SLOT "AY: share one SRAM slot between the three stereo mixers i
 # the ASSERTs in the script. AUTO sizes each window from the options that feed it,
 # because spare bytes ARE wasted on a session that loads the window (they are
 # heap on every other one). Measured on PICO_DV/MinSizeRel 2026-09-10:
-#   .tsovl  14 724 B on PICO_DV/VGA_HDMI, but 16 900 B on a SOFTTV build — the
-#           renderer compiles differently per display variant, so AUTO has to
-#           cover the WORST variant, not the one you happen to be building. That
-#           cost one broken build_all run; re-measure across variants after
-#           touching the renderer.
+#   .tsovl  23 520 B (13 460 loaded + 10 060 .tsovl_bss) on 2026-09-19, and it
+#           is now the SAME on every variant — VGA-HDMI, SOFTTV, TFT_ST7789,
+#           ZERO2-PIOUSB and MURM_W all measure byte for byte identical, because
+#           the 2026-09-13 renderer split moved the display-dependent halves to
+#           flash. It was NOT always so (14 724 B on PICO_DV against 16 900 on a
+#           SOFTTV build in 2026-09-10, which cost one broken build_all run), so
+#           re-measure ACROSS VARIANTS after touching the renderer rather than
+#           trusting this line.
 #   .gsovl  redcode 13 900 + GS.cpp 9 932 + NgsSd 1 444 + NgsMp3 146 = 25 422
 #           (identical on SOFTTV — only the TS window varies)
 # Override with a number or an ld size suffix if an ASSERT fires; re-measure with
@@ -592,29 +595,44 @@ set(GSOVL_WIN_SIZE "AUTO" CACHE STRING "Size of the GS/NeoGS code overlay window
 set(DMAOVL_WIN_SIZE "AUTO" CACHE STRING "Size of the Z80 DMA code overlay window, or AUTO (rp2350-memmap.ld)")
 
 if (TSOVL_WIN_SIZE STREQUAL "AUTO")
+    # Each term is ONE contributor of the window, measured from the map file
+    # (`awk '/^\.tsovl/{p=1} ...'` on <elf>.map gives the per-object split; the
+    # ELF-level totals come from `arm-none-eabi-size -A <elf> | grep tsovl`).
+    # Figures below are 2026-09-19, MinSizeRel, and identical on all five
+    # variants measured — see the note above before assuming that still holds.
     set(_TSOVL_BYTES 0)
     if (TSCONF_RENDER_IN_RAM)
-        # Video.cpp's .tsovl measured 6912 B on PICO_DV/VGA_HDMI after the 2026-09-13
-        # renderer split (tsRenderExec at -O2 without unrolling, the GFXOVR merge in
-        # flash); it was 14 776 B before. 10 KB leaves ~3 KB for the fatter variants.
-        math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 10240")
+        # Video.cpp's .tsovl: 8068 B, plus its 28 B .tsovl_ro and most of the
+        # 248 B of linker veneers the window needs for calls out of it. It was
+        # 14 776 B before the 2026-09-13 renderer split (tsRenderExec at -O2
+        # without unrolling, the GFXOVR merge left in flash).
+        math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 9216")
     endif()
     if (TSCONF_HOT_IN_RAM)
-        math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 3840")
+        # TsConf.cpp's .tsovl: 4556 B (portRead/portWrite, dmaStatus/dmaStart/
+        # dmaExecBulk, tsIntPoll, endFrame, fmWrite, cpuWriteGate). It was 3840
+        # here and the DMA's IDE device (2026-09-18) is what took it over — the
+        # term had in fact been under-counting for a while and was living on the
+        # renderer term's slack, which is exactly how an AUTO that is a sum of
+        # lumped terms fails: raise the term whose CODE grew, not the total.
+        math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 5632")
     endif()
     # PERF_TRACE pulls TsConf::intTrace + the INT-ring code into the window as
-    # well (measured +2950 B). Without this the ASSERT fires on every PERF build,
-    # which is exactly when you need one.
+    # well (measured +2572 B: TsConf +2484, Video +80). Without this the ASSERT
+    # fires on every PERF build, which is exactly when you need one.
     if (PERF_TRACE)
         math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 3072")
     endif()
-    # TS-Conf-only DATA rides in the window too (.tsovl_data loaded, .tsovl_bss
-    # NOLOAD): the ts256 palette-bank tables, the DRAM-cache rows/tags, the TSU
-    # line buffers and s_pairmap — 7264 B measured 2026-09-17 (`arm-none-eabi-size
-    # -A <elf> | grep tsovl`; the whole window was 22 352 B against a 22 272 B
-    # AUTO, i.e. it overflowed by 80 — the ASSERT in rp2350-memmap.ld is what
-    # catches this, and the term below is the one to raise).
-    math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 9216")
+    # TS-Conf-only DATA rides in the window too and is NOT gated by either
+    # option above (the TS_OVL_BSS/TS_OVL_DATA macros are unconditional), hence
+    # a flat term: .tsovl_bss 10 060 B (TsConf 2600 = the DRAM-cache tags and
+    # the ts256 reduce tables, Video 7460 = the ts256 palette-bank maps, the TSU
+    # line buffers, s_pairmap, ts_band_slot) + .tsovl_data 560 B (the DRAM-cache
+    # rows' 0xFF fill and the row->page maps, loaded so a claim re-initialises
+    # them from flash) = 10 620 B.
+    math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 11264")
+    # 26 112 B against 23 520 B in use, i.e. ~2.5 KB of slack — spent only on a
+    # TS-Conf session, since every other machine gets the whole window as heap.
     set(TSOVL_WIN_SIZE_EFFECTIVE ${_TSOVL_BYTES})
 else()
     set(TSOVL_WIN_SIZE_EFFECTIVE ${TSOVL_WIN_SIZE})

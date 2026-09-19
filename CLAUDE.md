@@ -8823,6 +8823,25 @@ wire cs1_n = dma_req ? 1'b1 : z80_cs1_n;
   If a title ever does: `[PERF] ts: dma=` should show the words, the `NGS`-style
   warn-once line must be ABSENT (it means the scheme is not NEMO), and a sector
   read into the bitmap must appear right way round rather than byte-swapped.
+- **It overflowed the `.tsovl` window, and the AUTO arithmetic was re-derived per
+  term (2026-09-19).** `TsConf::dmaStart` is `TS_HOT`, so the new IDE arms landed
+  in the TS-Conf code overlay and the linker ASSERT fired. Measured with the
+  window forced wide (`-DTSOVL_WIN_SIZE=32768`, then `arm-none-eabi-size -A <elf>
+  | grep tsovl` plus the per-object split out of `<elf>.map`): **23 520 B in use**
+  = TsConf.cpp code 4556 + Video.cpp code 8068 + veneers 248 + `.tsovl_ro` 28 +
+  `.tsovl_data` 560 + `.tsovl_bss` 10 060, and **26 096 B with PERF_TRACE**. The
+  CMake terms are now 9216 render / 5632 hot / 11 264 flat data (+3072 PERF) =
+  26 112, i.e. ~2.5 KB of slack, spent only on a TS-Conf session.
+  Two things worth keeping from it:
+  **(a) a lumped AUTO hides which term is wrong** — the hot term had been 3840
+  against 4556 already in use and was living on the renderer term's spare, so the
+  IDE arms merely pushed the TOTAL over; raise the term whose code grew, not the
+  sum. **(b) The per-display-variant spread is GONE**: VGA-HDMI, SOFTTV,
+  TFT_ST7789, ZERO2-PIOUSB and MURM_W all measure byte for byte identical since
+  the 2026-09-13 renderer split moved the display-dependent halves to flash (it
+  was 14 724 vs 16 900 B in 2026-09-10, which cost a broken build_all run) — so
+  the "cover the worst variant" rule still stands, it just currently costs
+  nothing. All six of those builds were re-linked on AUTO to confirm.
 
 ## The SD write path: the card has to STOP saying "data accepted" (2026-09-18, NOT hw-tested)
 
