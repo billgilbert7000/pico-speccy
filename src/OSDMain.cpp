@@ -141,8 +141,8 @@ static string osdConvertDlsToBank(const string& dlsPath) {
     // A bank the board cannot place is written to SD but can never be bound
     // (scanBanks/provision reject it) — delete it and warn, don't select it. The cap is
     // MidiSynth::maxBankBytes(), NOT the flash partition: with PSRAM storage on a butter
-    // board the bank lives in the butter arena, which holds banks well past the
-    // 1.6875 MB partition (DLSbyXG.dls converts to ~2.0 MB and used to be deleted here).
+    // board the bank lives in the butter arena, which holds banks well past the ~1.6 MB
+    // flash region (DLSbyXG.dls converts to ~2.0 MB and used to be deleted here).
     size_t bankSz = 0;
     FIL* bf = fopen2(outBin.c_str(), FA_READ);
     if (bf) { bankSz = (size_t)f_size(bf); fclose2(bf); }

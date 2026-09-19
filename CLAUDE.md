@@ -5380,15 +5380,24 @@ warm reboot" is exactly the expected shape.
 - Still unaddressed, same family: butter PSRAM M1 timing is only retimed AFTER the
   `cpu_mhz` switch while core1 (GS, video) may be fetching from PSRAM during it.
 
-## Flash ceiling: the firmware must stay below the GM.DLS partition (2026-09-06, build boots + IDEDOS hw-confirmed on DVp2)
+## Flash ceiling: the firmware competes with the GM.DLS bank (partition made DYNAMIC 2026-09-20, NOT hw-tested)
 
-`rp2350-memmap.ld` ASSERTs `__flash_binary_end <= __gm_bank_start` — on GMX builds
-(every board) that is **2490368 B** (4 MB − 1.625 MB; it was 2424832 B = 4 MB − 1.6875 MB
-until 2026-09-06, when the embedded 64 KB TS-Conf TS-BIOS ROM took another 64 KB from
-the partition — the stock converted gm.dls is 1668026 B, so 35 KB of margin remain
-there and NO further shrink is possible without a smaller bank). The failure looks like
-"ld returned 1" after a healthy-looking memory table; the actual message is
-`ERROR: firmware overflowed into the gm_bank flash partition`, one line above it.
+**The GM.DLS bank is no longer a fixed partition.** `rp2350-memmap.ld` now derives
+it: `__gm_bank_start = ALIGN(__psramrom_end, 4096)`, `__gm_bank_size = top of flash −
+that`. The firmware and the bank take from one pool instead of meeting at a
+hand-maintained address, and two ASSERTs bound it (see the next subsection). The
+history below is kept because it is the argument FOR the change — the base was moved
+by hand four times (128 KB in 2026-07, 128 KB in 2026-08, 64 KB on 2026-09-06,
+32 KB on 2026-09-19), every time after a variant had already failed to link, and the
+4-12 KB of slack between the firmware end and the base was thrown away each time.
+
+Until then `rp2350-memmap.ld` ASSERTed `__flash_binary_end <= __gm_bank_start` — on
+GMX builds (every board) that was **2490368 B** (4 MB − 1.625 MB; it was 2424832 B =
+4 MB − 1.6875 MB until 2026-09-06, when the embedded 64 KB TS-Conf TS-BIOS ROM took
+another 64 KB from the partition — the stock converted gm.dls is 1668026 B). The
+failure looked like "ld returned 1" after a healthy-looking memory table; the actual
+message was `ERROR: firmware overflowed into the gm_bank flash partition`, one line
+above it — and the same rule applies to the two ASSERTs that replaced it.
 Merging the +3/+3e ROMs (~86 KB) overflowed it by 23 KB. Fixed by dropping ~89 KB
 of library dead weight rather than shrinking the partition again (which
 re-provisions every user's wavetable bank from SD):
@@ -5465,6 +5474,80 @@ given up, and `__gm_bank_size` did NOT move — the GM.DLS partition keeps its
   Both are now the binding constraint: there is no third 32 KB to take from the
   bank, so the next feature of this size has to shrink the firmware. See the
   Scorpion GMX section for the full accounting.
+
+### The dynamic bank region: two floors, and where every board sits (2026-09-20, NOT hw-tested)
+
+`__gm_bank_start = ALIGN(__psramrom_end, 4096)`, `__gm_bank_size` = the rest of flash.
+The `DEFINED(__gmx_rom_in_flash)` ternary and the `--defsym` that fed it are gone —
+without the GMX ROM the region simply grows by itself. Two ASSERTs bound it and they
+are DIFFERENT KINDS OF STATEMENT, which is the part worth keeping:
+
+- **hard, not a knob**: `__gm_bank_end - __psramrom_start >= 1632 KB`. That is the
+  EXTENDED window — what a board with no QSPI PSRAM gets after trading the GMX +
+  TS-Conf ROM overlay (`FlashRoms::extendedLive()`), i.e. the largest a bank can ever
+  be on any board. Below it no configuration can hold a stock gm.dls (1668026 B,
+  rounded up to a 4 KB multiple = 1632 KB), so it is broken rather than traded.
+- **soft, `GM_BANK_MIN_KB`, default 1632**: the plain region, i.e. exactly the wall the
+  fixed partition used to be. Kept as the default so this change moves no board.
+
+**Lowering the soft floor is nearly free and the reason is worth reading before the
+next flash squeeze.** Between the two floors: a no-butter board just trades its
+unreachable ROMs sooner (nothing lost — GMX and TS-Conf are gated off there anyway),
+and a butter board never notices because `Buffer` puts the bank in the arena and the
+flash region goes unused. The one corner that pays is butter present but its arena too
+small for the bank — Murmuzavr at 32 MB reserves all but the 512 KB minimum — and
+there the bank is refused with a log line, not a crash.
+
+Measured over all 14 variants (MinSizeRel, 2026-09-20). `free@1632` is what the build
+has before the default floor stops it; `free@min=0` is what the same build has before
+the HARD floor does:
+
+| variant | fw size | bank region | free@1632 | ext. window | free@min=0 |
+|---|---|---|---|---|---|
+| m2p2 ILI9341 / ST7789 | 2473820 | 1720320 | 49152 | 2088960 | 417792 |
+| m1p2 ILI9341 / ST7789 | 2477916 | 1716224 | 45056 | 2084864 | 413696 |
+| m2p2 TV-SOFT | 2482012 | 1712128 | 40960 | 2080768 | 409600 |
+| m1p2 TV-SOFT | 2486108 | 1708032 | 36864 | 2076672 | 405504 |
+| DVp2 VGA-HDMI | 2502492 | 1691648 | 20480 | 2060288 | 389120 |
+| m1p2 / m2p2 / PCp2 / z0p2 VGA-HDMI | 2506588 | 1687552 | 16384 | 2056192 | 385024 |
+| **z0p2 VGA-HDMI-PIOUSB** | 2522972 | 1671168 | **0** | 2039808 | 368640 |
+| m1p2w / m2p2w (16 MB) | 2789212 | **13987840** | 12316672 | 14356480 | 12685312 |
+
+Three things that table says:
+
+- **z0p2-PIOUSB sits exactly ON the default floor.** Not a regression from the dynamic
+  region: the firmware grew ~300 B (the refusal guard in `provisionAtBoot`) and crossed
+  a 4 KB page, and `.psramroms : ALIGN(4096)` moves everything after it by a whole page
+  — so a few hundred bytes of code always shows up as 4096 here. **Any further growth
+  on that variant needs `GM_BANK_MIN_KB` lowered** (or `GMX_IN_FLASH=0` /
+  `PROFROM_IN_FLASH=0`), which is the change this rework exists to make cheap.
+- **The 16 MB boards were the clearest win**: the bank went 1671168 → 13987840 B with
+  no board branch at all. The old `__gm_bank_size` constant handed them 1.59 MB and
+  left ~12 MB of flash unreachable by anything.
+- **The extended window barely moved and that is expected**: it is fixed by where
+  `.psramroms` starts, i.e. by the size of the NON-ROM firmware, which this change does
+  not touch. So a floor change buys firmware headroom, NOT bank ceiling — DLSbyXG
+  (2052616 B) still does not fit on z0p2-PIOUSB (2039808) or DVp2 (2060288 fits by
+  7672 B). Growing the CEILING is the ROM-tier idea, a separate job.
+
+**A bank that cannot be placed is now announced** (`MidiSynth::provisionAtBoot`):
+`" GM.DLS bank not installed: N KB, M KB available "` as a bootNotice plus a log line
+carrying the flash region and arena sizes separately. It sits AFTER `loadBank`, not
+before it, and that placement is load-bearing — `selectedBankBytes()` deliberately
+ignores the cap (`extendedLive()` needs the true size to decide the ROM trade) while
+`openValidSdBank()` skips an oversized pick and falls back to a default bank, so a
+check up front refuses boots that in fact had a bank to install. The write path itself
+was never at risk: `Buffer::flashErase`/`flashProgram` clamp to the registered window
+and `Buffer::alloc` refuses a bank larger than the pool. What the notice adds is the
+ANSWER to "MIDI went quiet after an update", which the dynamic region makes reachable:
+the base moves with code size, so a flash-resident bank does not survive a firmware
+update and re-provisions from SD (README says so now — it used to promise the
+opposite).
+
+**4 KB alignment is enough** even though `Buffer::load` erases in 64 KB blocks: the
+bootrom's `flash_range_erase` takes the block size as an argument and does the
+unaligned head and tail with sector erases. The SDK only requires offset and count to
+be 4 KB multiples, and `__gm_bank_size` is one by construction.
 
 ## A GM.DLS bank bigger than the flash partition is still playable in PSRAM (hw-confirmed 2026-09-09)
 

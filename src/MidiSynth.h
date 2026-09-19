@@ -45,7 +45,7 @@ public:
     // The biggest bank this board can actually BIND, i.e. what the picker and the
     // .dls converter must measure against. The flash partition is only the floor: with
     // PSRAM storage on a butter board the bank lands in the butter arena, which is
-    // usually several MB — a bank that overflows the 1.6875 MB partition is perfectly
+    // usually several MB — a bank that overflows the flash region is perfectly
     // playable there, and gating on the partition alone silently hid it from the
     // picker (DLSbyXG.dls converts to ~2.0 MB). Flash storage pins it to the partition.
     static size_t maxBankBytes();

@@ -25,6 +25,7 @@
 #include "Buffer.h"              // tiered allocator: butter PSRAM, else flash partition
 #include "MemESP.h"              // butter_psram_size()
 #include "Debug.h"
+#include "OSDMain.h"        // bootNotice — a refused bank must be visible without a UART
 #include <string>
 #include <vector>
 
@@ -265,7 +266,8 @@ size_t MidiSynth::selectedBankBytes() {
     return 0;
 }
 
-// What a bank may weigh here. The flash partition (1.6875 MB on a GMX build) is the
+// What a bank may weigh here. The flash region — everything above the firmware to the
+// top of flash, ~1.6 MB on a 4 MB board and ~13.6 MB on a 16 MB one — is the
 // FLOOR, not the limit: with PSRAM storage the bank is copied into the butter arena
 // and never touches flash, so on a butter board the arena is the real ceiling. Gating
 // on the partition alone made every bank above it invisible in the picker and made the
@@ -327,7 +329,35 @@ void MidiSynth::provisionAtBoot() {
     // Pre-video, single core → a flash write is permitted here.
     if (loadBank(force, /*mayWriteFlash=*/true)) return;
 
-    // No usable SD bank → bind whatever is already persisted in the flash partition.
+    // Nothing was installed. If a bank IS selected, say WHY, with both numbers — the
+    // flash region is DYNAMIC since 2026-09-20 (rp2350-memmap.ld: firmware end .. top
+    // of flash), so a firmware update can shrink it under a bank the user chose months
+    // ago, and until now the only report of that was a Debug::log line, which needs a
+    // UART to read. The write path itself cannot overrun (Buffer::flashErase/
+    // flashProgram clamp to the registered window, and Buffer::alloc refuses a bank
+    // larger than the pool) — what this adds is the ANSWER, not the safety.
+    //
+    // It has to sit AFTER loadBank, not before it: selectedBankBytes() deliberately
+    // ignores the cap (extendedLive() needs the true size to decide the ROM trade),
+    // while openValidSdBank() skips an oversized pick and falls back to a default
+    // bank — so a check up front would refuse a boot that in fact had a bank to
+    // install. maxBankBytes() is max(flash region, butter arena) and follows the
+    // trade, so it is the honest ceiling on every board.
+    if (const size_t want = selectedBankBytes()) {
+        const size_t cap = maxBankBytes();
+        Debug::log("MidiSynth: bank %uKB NOT installed - %uKB available "
+                   "(flash region %uKB, PSRAM arena %uKB)",
+                   (unsigned)(want >> 10), (unsigned)(cap >> 10),
+                   (unsigned)(FlashRoms::bankCapacity() >> 10),
+                   (unsigned)(Buffer::butterArenaBytes() >> 10));
+        // Deliberately not worded as "too big": a failed read or a full arena lands
+        // here too, and the two numbers say which it was without claiming either.
+        OSD::bootNotice((std::string(" GM.DLS bank not installed: ") +
+                         std::to_string(want >> 10) + " KB, " +
+                         std::to_string(cap >> 10) + " KB available ").c_str());
+    }
+
+    // No usable SD bank → bind whatever is already persisted in the flash region.
     bindFromFlash();
 }
 

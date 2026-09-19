@@ -204,7 +204,7 @@ Four modes are available:
   - **Organ** — All square wave (75% duty), sustained tone with minimal decay.
   - **Music Box** — Triangle wave with fast decay and low sustain — delicate and percussive.
   - **Synth** — All saw wave with medium low-pass filter.
-- **GM.DLS Wavetable** — A fixed-point General MIDI **wavetable** synthesizer that plays a real GM sound bank, for far more realistic instruments than the procedural Software synth. No external hardware. You supply the bank (`gm_bank.bin`): pack it once on a PC, copy it to the SD card, and select this mode — the device installs the bank into a dedicated flash partition on the next boot (one-time write, ~20–30 s, LED blinks). The bank then persists across reboots and firmware updates.
+- **GM.DLS Wavetable** — A fixed-point General MIDI **wavetable** synthesizer that plays a real GM sound bank, for far more realistic instruments than the procedural Software synth. No external hardware. You supply the bank (`gm_bank.bin`): pack it once on a PC, copy it to the SD card, and select this mode — on a board with QSPI PSRAM the bank is loaded into PSRAM at every boot, and on one without it the device installs it into the flash left above the firmware (one-time write, ~20–30 s, LED blinks) where it persists across reboots. A firmware update moves that region, so a flash-installed bank is simply re-installed from the SD card on the first boot after it — keep the `.bin` on the card. A bank too large for the space available is refused with a message naming both figures.
 
 ### GM.DLS instrument bank
 

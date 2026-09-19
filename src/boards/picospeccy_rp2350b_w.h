@@ -19,8 +19,8 @@
 //      pins are NOT the Pico 2 W defaults (23/24/25/29) but GPIO36-39 — see the
 //      WIRELESS block below, read off the Waveshare schematic.
 //   2. 16 MB of flash instead of 4 MB. That is what makes the ~230 KB CYW43
-//      firmware blob affordable: with __gmx_rom_in_flash the gm_bank partition
-//      takes 1.6875 MB off the top, leaving ~2.3 MB on a 4 MB board (which main
+//      firmware blob affordable: the gm_bank region is everything above the firmware
+//      (rp2350-memmap.ld), which on a 4 MB board leaves ~2.4 MB for it (which main
 //      already overflowed once, see rp2350-memmap.ld) against ~14.3 MB here.
 //   3. QSPI PSRAM pads with CS on GPIO47 — the same pin PICO_DV/ZERO2 already use
 //      for butter PSRAM. The chip is NOT fitted from the factory; the board arms

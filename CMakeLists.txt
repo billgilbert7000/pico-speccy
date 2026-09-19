@@ -205,9 +205,10 @@ include(pico_sdk_import.cmake)
 
 SET(PROJECT_NAME speccy)
 # 16 MB on the RP2350B-Plus-W module, 4 MB everywhere else. This is what buys room
-# for the ~230 KB CYW43 firmware blob: with __gmx_rom_in_flash the gm_bank partition
-# takes 1.6875 MB off the top (rp2350-memmap.ld), leaving ~2.3 MB of firmware
-# partition on 4 MB — which main has already overflowed once — against ~14.3 MB here.
+# for the ~230 KB CYW43 firmware blob: the GM.DLS bank takes everything above the
+# firmware (rp2350-memmap.ld), and on 4 MB the firmware has ~2.4 MB before it eats
+# into the GM_BANK_MIN_KB floor — a bound main has already overflowed once — against
+# ~14.3 MB here, where the same rule leaves the bank a 13.6 MB tail by itself.
 if(PICOSPECCY_WIFI)
     set(FLASH_SIZE 16384)
 else()
@@ -787,6 +788,18 @@ endif()
 message(STATUS "Code overlays: .tsovl ${TSOVL_WIN_SIZE_EFFECTIVE} B, .dmaovl ${DMAOVL_WIN_SIZE_EFFECTIVE} B, .gsovl ${GSOVL_WIN_SIZE_EFFECTIVE} B")
 
 
+# The GM.DLS bank is everything above the firmware, to the top of flash — a dynamic
+# region since 2026-09-20, not a fixed partition (rp2350-memmap.ld has the full
+# reasoning). This is the floor the build refuses to fall below: 1632 KB = the stock
+# converted gm.dls (1668026 B) rounded up to a 4 KB multiple, i.e. exactly what the
+# old fixed partition guaranteed. It is a POLICY number — on a board with no QSPI
+# PSRAM the bank can trade the GMX + TS-Conf ROM overlay for ~2.0 MB instead, and on a
+# board WITH it the bank lives in the butter arena and never touches flash — so
+# lowering it hands flash to the firmware and costs the flash bank only on a butter
+# board whose arena is already full. Read the __gm_bank_min comment before doing that.
+set(GM_BANK_MIN_KB 1632 CACHE STRING "Minimum GM.DLS bank region, KB (rp2350-memmap.ld __gm_bank_min)")
+message(STATUS "GM.DLS bank region: >= ${GM_BANK_MIN_KB} KB (dynamic: firmware end .. top of flash)")
+
 configure_file("${CMAKE_SOURCE_DIR}/rp2350-memmap.ld" "${CMAKE_BINARY_DIR}/rp2350-memmap.ld" @ONLY)
 pico_set_linker_script(${PROJECT_NAME} "${CMAKE_BINARY_DIR}/rp2350-memmap.ld")
 
@@ -798,19 +811,20 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE FLASH_SIZE=${FLASH_SIZE})
 # plugged-in Pico 2 MODULE, not of the carrier board (a Murmulator 1 takes a module
 # with PSRAM on XIP CS1 = GPIO19 just fine), so the gate is the RUNTIME butter
 # probe: without a chip the GMX pick falls back to Yellow PCB
-# (Config::requestMachine + resolveConstraints). The linker shrinks the GM.DLS
-# partition to 1.59375 MB (rp2350-memmap.ld, __gmx_rom_in_flash) so firmware + ROM
-# fit below it — the stock converted gm.dls bank (1668026 B) fits with only 3142 B
-# to spare since 2026-09-19, when the partition gave up another 32 KB to pay for
-# the ProfROM GMX v5.44 image; a previously provisioned bank at the old address
-# fails the header check and re-provisions from SD. GMX_IN_FLASH=0 remains an
-# escape hatch (drops the ROM, the menu rows and the partition shrink together).
+# (Config::requestMachine + resolveConstraints). Its ~328 KB come straight out of
+# what is left for the GM.DLS bank, which is now everything above the firmware
+# (rp2350-memmap.ld): on 4 MB that leaves the bank ~1.60-1.61 MB against the
+# GM_BANK_MIN_KB floor of 1632 KB, i.e. the same few KB of slack the old fixed
+# partition had, but the wall is one number instead of a partition base. A bank
+# already programmed at a different base fails the header check and re-provisions
+# from SD. GMX_IN_FLASH=0 remains an escape hatch (drops the ROM and the menu rows;
+# the bank region grows by itself).
 target_compile_definitions(${PROJECT_NAME} PRIVATE GMX_IN_FLASH=1)
 # Scorpion PROF-ROM v4.44s (romset "ZS-1024 + ProfROM"): ~225 KB of flash for the
-# 256 KB image (tools/rom_pack.py prof). It rides the GM.DLS partition shrink the
-# GMX ROM above already asks for, so PROFROM_IN_FLASH=1 needs no defsym of its
-# own — but it does assume GMX_IN_FLASH=1; turning GMX off while leaving this on
-# would put firmware + ROM back above the old partition base.
+# 256 KB image (tools/rom_pack.py prof). Like every other ROM it comes out of the
+# GM.DLS bank region, which shrinks to match — with both ROMs in, a 4 MB board sits
+# a few KB above the GM_BANK_MIN_KB floor, so this and GMX_IN_FLASH are the two
+# switches to reach for first when the firmware next needs flash.
 target_compile_definitions(${PROJECT_NAME} PRIVATE PROFROM_IN_FLASH=1)
 # ZX Spectrum +3 (divIDE): Garry Lancaster's +3e/IDEDOS ROM built for a divIDE card
 # (the `div` build of p3eroms v1.43, English) instead of the +3e's own 8-bit interface.
@@ -829,7 +843,6 @@ else()
     message(STATUS "+3 (divIDE) ROM: not packed (see tools/rom_pack.py plus3div) - romset disabled")
 endif()
 target_compile_definitions(${PROJECT_NAME} PRIVATE PLUS3DIV_IN_FLASH=${PLUS3DIV_IN_FLASH})
-target_link_options(${PROJECT_NAME} PRIVATE -Wl,--defsym=__gmx_rom_in_flash=1)
 target_compile_definitions(${PROJECT_NAME} PRIVATE CONFIG_BOARD_TAG="${CONFIG_BOARD_TAG}")
 
 # Scorpion port #FF trace (see Ports.cpp `#if SCORP_FF_TRACE`): logs every IN/OUT
