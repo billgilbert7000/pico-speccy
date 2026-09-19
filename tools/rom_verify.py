@@ -13,7 +13,7 @@
 # change to rom_pack.py, to a ROM source, or to a base choice:
 #
 #     python3 tools/rom_verify.py
-import os, sys
+import os, re, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rom_pack import load_rom, apply_overlay
 
@@ -102,6 +102,33 @@ for i in range(16):
 prof = b''.join(prof_banks)
 check('ProfROM v4.44s image', prof, dump('scorpion/src/profrom.bin'))
 check('ProfROM v4.44s CRC32', '%08X' % (zlib.crc32(prof) & 0xffffffff), '9812C53C')
+
+# Scorpion GMX (romset R_SCORP_GMX), reassembled the way requestMachine binds it and
+# gmxTapUpdate registers it: the 32 {data, overlay} rows are READ OUT OF THE GENERATED
+# TABLE rather than hardcoded here, so a packer that emits the right arrays under the
+# wrong binding still fails. Several banks share a base (the firmware re-registers the
+# live bank's overlay on every romInUse change), which is exactly what a per-bank check
+# against the dump cannot be trusted to catch on its own — so the whole 512 KB image is
+# compared, with a pinned CRC for the image identity.
+print("Scorpion GMX ProfROM v5.44 (32 banks from the generated table):")
+gmx_tbl = open(os.path.join(R, 'scorpion', 'scorpion_gmx_banks.h'), encoding='latin-1').read()
+rows = re.findall(r'\{\s*(\w+)\s*,\s*(\w+)\s*\}\s*,\s*//\s*plane', gmx_tbl)
+if len(rows) != 32:
+    fails.append('GMX table rows'); print("  FAIL GMX table: %d rows, want 32" % len(rows))
+gmx_syms = {'gb_rom_0_pentagon_128k': base_pent,
+            'gb_rom_1_sinclair_128k': s128_1,
+            'gb_rom_4_trdos_504t':    base_trdos}
+def gmx_sym(sym):
+    if sym not in gmx_syms:
+        gmx_syms[sym] = arr('scorpion/scorpion_gmx_rom.c', sym)
+    return gmx_syms[sym]
+gmx_banks = []
+for dsym, osym in rows:
+    data = gmx_sym(dsym)
+    gmx_banks.append(data if osym == 'nullptr' else apply_overlay(data, gmx_sym(osym)))
+gmx = b''.join(gmx_banks)
+check('GMX v5.44 image', gmx, dump('scorpion/src/profrom_gmx_v5s.bin'))
+check('GMX v5.44 CRC32', '%08X' % (zlib.crc32(gmx) & 0xffffffff), '6E9FD318')
 
 # The ZX-Evo BIOS sets we ship, reassembled from what is actually in flash. Page 0 is
 # the only page with a patch (the Setup footer's exit key); pages 1-3 must be verbatim.

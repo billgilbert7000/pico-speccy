@@ -327,7 +327,7 @@ SECTIONS
      * Both machines gate on BUTTER/QSPI PSRAM at runtime (mach_scorpOpts's
      * butter_psram_size(), p_showTsconf's >= 1 MB) — SPI PSRAM on a MURM1 carrier
      * does not qualify for either — so on a board whose module carries no QSPI
-     * PSRAM these ~370 KB are unreachable for the whole life of that firmware.
+     * PSRAM these ~360 KB are unreachable for the whole life of that firmware.
      * Config::midi_storage == 2 therefore lets the GM.DLS bank START HERE instead
      * of at __gm_bank_start and swallow them (plus the alignment gap above), which
      * is what makes a ~2 MB bank fit on a 4 MB board. Same arbitration the bank
@@ -360,14 +360,20 @@ SECTIONS
      * the UF2 (keeps the firmware UF2 small). The device writes it at runtime via
      * flash_range_program (MidiSynth::provision) and reads it via XIP. */
     /* __gmx_rom_in_flash (every board; QSPI PSRAM is a property of the plugged-in
-     * Pico module, so the Scorpion GMX boot ROM — ~345 KB after dedup/overlays —
-     * ships everywhere and GMX gates at runtime): the partition is 1.625 MB so
-     * firmware + ROM fit below it. The stock converted gm.dls (1668026 B) still
-     * fits with ~35 KB margin; larger custom banks that used the old 2.375 MB
-     * ceiling no longer install. The 0x240000 branch survives only for the
-     * GMX_IN_FLASH=0 escape hatch (CMakeLists), and keeps main's 2026-08-31
-     * value — without the ROM the firmware needs that partition back. */
-    __gm_bank_size  = DEFINED(__gmx_rom_in_flash) ? 0x1A0000 : 0x230000;   /* 1.625 / 2.1875 MB (both 64 KB less since 2026-09-06: the embedded 64 KB TS-Conf TS-BIOS ROM; the stock converted gm.dls is 1668026 B, margin 35 KB on GMX builds); multiple of 4 KB. Holds converted .dls banks (gm.dls ~1.59 MB fits with margin). The non-GMX branch was 2.5 MB, then 2.375 MB — 128 KB handed to the firmware partition for the new fullscreen UI (2026-07-26) and another 128 KB for the Byte test-ROM overlay (2026-08-31, m1p2 VGA-HDMI and z0p2 PIOUSB had overflowed by 2 KB / 13 KB); moving the start is safe: gm_bank_view() fails the header check on stale data and the bank re-provisions from SD. */
+     * Pico module, so the Scorpion GMX boot ROM — ~328 KB after dedup/overlays —
+     * ships everywhere and GMX gates at runtime): the partition is 1.59375 MB so
+     * firmware + ROM fit below it. MARGIN IS NOW 3142 B over the stock converted
+     * gm.dls (1668026 B): the partition gave up 32 KB on 2026-09-19 to pay for
+     * ProfROM GMX v5.44, whose image barely deduplicates (335678 B against the
+     * old 296553 — see GMX_OVL_DIFF_MAX in tools/rom_pack.py), and ZERO2-PIOUSB
+     * had 10620 B of flash headroom. So a converted bank even slightly larger
+     * than the stock gm.dls no longer installs — the next feature that needs
+     * flash must come out of the firmware side, not out of here. Larger custom
+     * banks that used the old 2.375 MB ceiling stopped installing in 2026-09.
+     * The 0x230000 branch survives only for the GMX_IN_FLASH=0 escape hatch
+     * (CMakeLists), and keeps main's 2026-08-31 value — without the ROM the
+     * firmware needs that partition back. */
+    __gm_bank_size  = DEFINED(__gmx_rom_in_flash) ? 0x198000 : 0x230000;   /* 1.59375 / 2.1875 MB (the GMX branch is 64 KB less since 2026-09-06 — the embedded 64 KB TS-Conf TS-BIOS ROM — and another 32 KB less since 2026-09-19 — ProfROM GMX v5.44; the stock converted gm.dls is 1668026 B, margin 3142 B on GMX builds); multiple of 4 KB. Holds converted .dls banks (the stock gm.dls, 1.59 MB, fits with 3 KB to spare on GMX builds). The non-GMX branch was 2.5 MB, then 2.375 MB — 128 KB handed to the firmware partition for the new fullscreen UI (2026-07-26) and another 128 KB for the Byte test-ROM overlay (2026-08-31, m1p2 VGA-HDMI and z0p2 PIOUSB had overflowed by 2 KB / 13 KB); moving the start is safe: gm_bank_view() fails the header check on stale data and the bank re-provisions from SD. */
     __gm_bank_start = ORIGIN(FLASH) + LENGTH(FLASH) - __gm_bank_size;
     __gm_bank_end   = ORIGIN(FLASH) + LENGTH(FLASH);
     ASSERT(__flash_binary_end <= __gm_bank_start,

@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """Unpack the Scorpion GMX boot-ROM loader's LZ streams (gmx13500.rom plane 0 bank 0).
 
-The GMX loader ("MLoader") is a bit-stream LZ77 packer whose unpacker lives at
+APPLIES TO THE OLD IMAGE ONLY. The shipped ROM moved to ProfROM GMX v5.44 on
+2026-09-19, whose plane 0 is a different program ("TMgmx(r) Loader V2.00", 2024)
+with the magic-shift read inlined at 0x00F0 and no RST 0x18 stream unpacker at
+0x0178 — the offsets below are v5.00's (MAME gmx13500.rom, CRC32 47C9DF88), which
+is no longer in the tree. Kept because the boot chain documented in CLAUDE.md was
+read with it, and because the file is the record of that format; point it at a
+v5.00 dump, not at src/roms/scorpion/src/profrom_gmx_v5s.bin.
+
+The v5.00 GMX loader ("MLoader") is a bit-stream LZ77 packer whose unpacker lives at
 ROM 0x0178 (reached via RST 0x18 with HL = stream, DE = destination). Streams are
 named by the words at ROM 0x0008 (0x01E1 -> stage 1, unpacked to RAM 0x5C01) and
 by the inline `LD HL,0x101F` at ROM 0x012D (stage 2: the red-border panic blinker).
@@ -70,7 +78,7 @@ def unlz(rom, src):
 
 
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else 'src/roms/scorpion/src/gmx13500.bin'
+    path = sys.argv[1] if len(sys.argv) > 1 else 'gmx13500.bin'   # v5.00 dump; NOT the shipped image
     outdir = sys.argv[2] if len(sys.argv) > 2 else '/tmp'
     rom = open(path, 'rb').read()[:16384]        # plane 0 bank 0
     for src, dest in ((0x01E1, 0x5C01), (0x101F, 0x5C01)):

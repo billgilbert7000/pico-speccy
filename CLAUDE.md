@@ -5246,7 +5246,7 @@ given up, and `__gm_bank_size` did NOT move — the GM.DLS partition keeps its
 - **Verify at the ELF, not just in the packer.** The packer's own check compares
   against the arrays it is holding in memory, so it cannot catch an emitter or
   binding mistake. Reconstructing all 32 banks from the linked ELF through
-  `scorpion_gmx_banks.h` and diffing against `gmx13500.bin` does (it came back
+  `scorpion_gmx_banks.h` and diffing against the shipped `.bin` does (it came back
   byte-identical). NB the Sinclair bases are internal-linkage C++ arrays, so in
   `nm` output they are `_ZL22gb_rom_1_sinclair_128k`, not the plain name.
 - Still on the table if this recurs, in descending order of ugliness: the TR-DOS
@@ -5254,7 +5254,16 @@ given up, and `__gm_bank_size` did NOT move — the GM.DLS partition keeps its
   coupling); `gmx_p4b3` ~ `prof_p0b3` differ by 14 and `profi_bank_ff` ~
   `gmx_p2b1` by 45, but those are the cross-romset folds CLAUDE.md deliberately
   refuses, since one romset's flash layout must not depend on another's build
-  switch.
+  switch. (The `gmx_*` halves of those two pairs are v5.00's banks and are gone
+  as of 2026-09-19.)
+- **That margin was spent again on 2026-09-19, and this time the partition paid
+  too**: the GMX ROM moved to ProfROM GMX v5.44, whose image barely deduplicates
+  (+82 KB at the old settings). `GMX_OVL_DIFF_MAX` went 1024 → 8192 and
+  `__gm_bank_size` 1.625 → 1.59375 MB, leaving the stock converted gm.dls
+  **3142 B** in its partition and ZERO2-PIOUSB **4260 B** of firmware headroom.
+  Both are now the binding constraint: there is no third 32 KB to take from the
+  bank, so the next feature of this size has to shrink the firmware. See the
+  Scorpion GMX section for the full accounting.
 
 ## A GM.DLS bank bigger than the flash partition is still playable in PSRAM (hw-confirmed 2026-09-09)
 
@@ -5310,9 +5319,19 @@ by `flash_range_program` in `provisionAtBoot()`, pre-`VIDEO::Init`, one core).
   for the life of that firmware. **Profi/Karabas are deliberately NOT in the set** —
   `p_showProfi` accepts SPI PSRAM, so they stay useful on MURM1.
 
-Measured per board (all 14 variants link): flash bank ceiling **1 703 936 →
-2 088 960…2 134 016 B**, i.e. **+385…430 KB**, and **DLSbyXG (2 052 616 B) then fits
-everywhere**, worst case z0p2-PIOUSB with 36 KB to spare. Firmware headroom below the
+Measured per board **as of 2026-09-13** (all 14 variants link): flash bank ceiling
+**1 703 936 → 2 088 960…2 134 016 B**, i.e. **+385…430 KB**, and **DLSbyXG
+(2 052 616 B) then fits everywhere**, worst case z0p2-PIOUSB with 36 KB to spare.
+**Both halves of that have since moved and the DLSbyXG claim is now FALSE on the
+tightest board** (measured 2026-09-19): the traded window is
+`flash_end - __psramrom_start`, which shrinks as the firmware in front of it grows,
+and on z0p2-PIOUSB it is **2 043 904 B** — 8712 B short of DLSbyXG. That is ordinary
+firmware growth since then (the section above names the +3div ROM and the 90/75 Hz
+modes as what overflowed on 2026-09-16; not separately attributed), NOT the 2026-09-19 GM.DLS
+shrink, which moves `__gm_bank_start` and leaves the traded window untouched; the
+UNtraded partition is the one that went 1 703 936 → **1 671 168**. Re-measure both
+from the ELF (`nm` for `__psramrom_start` / `__gm_bank_start`) before quoting a
+capacity. Firmware headroom below the
 bank pays the 4 KB alignment: 8 804 → 6 968 B on z0p2-PIOUSB, 32 100 → 23 352 on DVp2
 (1.8–9 KB depending on where the boundary falls). W boards are listed for completeness
 only — 16 MB of flash makes the trade pointless there; the right fix for them is
@@ -6862,19 +6881,72 @@ move "Last" — that is what the "1024 and ProfROM sit BEFORE the conditional GM
 entry" rule buys.
 
 - **ROM is EMBEDDED in flash, deduplicated + overlaid** (`#if GMX_IN_FLASH`,
-  all boards): the 512 KB GMX boot ROM
-  (`src/gmx13500.bin` = MAME gmx13500.rom, CRC 47c9df88) costs **~345 KB of
-  flash, not 512** — `tools/rom_pack.py gmx` (`pack_gmx`) splits it into 32
-  16K banks, folds the 6 exact duplicates (planes 2/3, the flashtool planes,
-  are near-mirrors), and stores 5 banks as RomOverlay patches over ROMs already
-  in flash: p1b0 ≡ Pentagon ROM0 exactly (since 2026-09-09 that IS the family base,
-  so the bank binds it with a nullptr overlay), p1b1/p4b1 over `sinclair_128k_1`
-  (19/182 B), p4b0 over the Pentagon base (468 B), p1b2(≡p1b3) over the TR-DOS
-  5.04T base (534 B); p4b3 stays
-  raw (3856 diff bytes > the 1 KB threshold — not worth a wide run list on the
-  TR-DOS fetch path). The packer reconstructs all 512 KB and compares at pack
-  time. Emits `scorpion_gmx_rom.c` (raw banks + new overlays, plain C) and
-  `scorpion_gmx_banks.h` (the `gb_rom_scorpion_gmx_banks[32]` {data, overlay}
+  all boards). **The image is ProfROM GMX v5.44.9643 since 2026-09-19, and the
+  owner's verdict that day was "работает"** — not itemised beyond that, so read
+  it as "the machine boots and runs on the new firmware"; a second run the same
+  day confirmed **F11** specifically (see the REVERTED section below).
+  (`src/roms/scorpion/src/profrom_gmx_v5s.bin` = `ProfRomGMX_v5s.rom`,
+  CRC32 6E9FD318, pinned in `pack_gmx` and in `rom_verify.py`). It was MAME's
+  `gmx13500.rom` ("GMX Boot Rom 1.3 V5.00", CRC32 47C9DF88) until then, and
+  EVERY hardware finding in the GMX sections below was made on that one. What
+  changed: plane 0 is a different program ("TMgmx(r) Loader V2.00", 2024 LW/PLM)
+  over a patched GMX **5.01**, plane 3 is a real BASIC/TR-DOS set with RRL
+  fastboot where v5.00 mirrored plane 2, and planes 4-7 are ProfROM **5.44s**
+  where v5.00 carried ProfROM 4.01. Per the author's own readme the GMX ProfROM
+  "is based on a patched 5.01 in which only the Scorpion firmware at
+  #40000-#7FFFF is replaced". Plane map of the shipped image: 0 loader,
+  1 Pentagon-flavoured 128 + TR-DOS 5.03, 2 flash tool + font, 3 the RRL set
+  (`/RRL/BOOT.$C`, `FASTBOOT.INI`, `SHELL.RRL`), 4 BASIC/TR-DOS + Analyser,
+  5 "MOA Shadow Service Monitor 2022-2025 v5.44s modified by PL", 6-7 the
+  ~130 KB ROM disk.
+- **The archive ships a second image, `ProfRomGMX_v5se.rom`, and we deliberately
+  do NOT take it**: "e" = ВГ93 emulation over the HDD pseudo-disks, which is for
+  a machine WITHOUT a working FDC — with it, direct WD1793 programming against
+  real disks stops working and `#3D13` access is "substantially slowed" (the
+  archive's `file_id.diz`). We emulate a full WD1793 with TRD/SCL/FDI images, so
+  the plain `v5s` is the right build. The two differ only in planes 4-7 and cost
+  the same flash (380849 vs 380807 B unpacked), so swapping is one `.bin` + the
+  CRC in `pack_gmx`.
+- **Flash: 335678 B, and it cost the GM.DLS partition another 32 KB.** The new
+  image barely deduplicates — **30 of its 32 banks are unique** and the pairwise
+  diffs between them are 15-16 KB, against v5.00's near-empty plane 3 and
+  mirrored flash-tool planes — so at the old `GMX_OVL_DIFF_MAX = 1024` it packed
+  to **380807 B against v5.00's 296553**, i.e. +82 KB on boards that had 10-31 KB
+  of headroom. Two changes pay for it, both deliberate: the threshold is
+  **8192** (folds p0b3/p2b3/p3b3/p4b3 into overlays of up to 81 runs → 335678 B;
+  the old "not worth a wide run list on the TR-DOS fetch path" rationale no
+  longer binds, because GMX is only OFFERED on a board with butter PSRAM and
+  `MemESP::materializeOverlays` flattens the live overlay into a PSRAM page
+  there — and raising it further LOSES again, 12288 → 347781 B), and
+  `__gm_bank_size` drops 1.625 MB → **1.59375 MB** (`rp2350-memmap.ld`).
+  **Both margins are now thin and that is the standing constraint**: the stock
+  converted gm.dls (1668026 B) has **3142 B** left in its partition, and
+  ZERO2-PIOUSB links with **4260 B** of flash to spare — the next flash-sized
+  feature has to come out of the firmware, not out of the partition. All 14
+  variants link (2026-09-19, ceiling 2 523 136 B on the 4 MB boards): z0p2-PIOUSB
+  4260, the six VGA_HDMI images 20 644, DVp2 24 740, the SOFTTV/TFT ones
+  45-58 KB, W boards ~12 MB. Deflate was
+  measured as the alternative and does not beat it (the image compresses to
+  325579 B whole, 351853 per bank, against 335678 packed — v5.00 compressed to
+  207273, which is the difference in redundancy, not in the coder).
+- **Packing** (`tools/rom_pack.py gmx`, `pack_gmx`): 32 16K banks → 19 raw +
+  10 overlays + 2 exact duplicates + p1b0, which is byte-identical to Pentagon
+  ROM0 and therefore binds the base with a **nullptr** overlay (since 2026-09-09
+  that IS the family base). Overlay bases are `gb_rom_0_pentagon_128k`
+  (p3b0/p4b0), `gb_rom_1_sinclair_128k` (p1b1/p3b1/p4b1), `gb_rom_4_trdos_504t`
+  (p1b2/p3b3/p4b3) and two of GMX's own raw banks (p0b1 → p0b3, p2b1 → p2b3 —
+  the self-referential dedup `pack_prof` has always had). The packer
+  reconstructs all 512 KB and compares at pack time, and **`rom_verify.py` now
+  repeats it against the GENERATED files**, reading the 32 `{data, overlay}`
+  rows out of `scorpion_gmx_banks.h` rather than hardcoding them — so a packer
+  that emits the right arrays under the wrong binding fails there (both
+  mutations checked). The ELF check the section on the flash ceiling asks for is
+  **`tools/gmx_elf_check.py <board>.elf`** now, instead of being re-derived each
+  time: it objcopies the linked firmware, resolves the 32 rows through `nm` (the
+  Sinclair bases appear as `_ZL22...`), applies the overlays and diffs the 512 KB,
+  naming the offending planes on a mismatch. Run on z0p2-PIOUSB, DVp2 and m1p2 for
+  this image — byte-identical on all three. Emits `scorpion_gmx_rom.c` (raw banks + new overlays,
+  plain C) and `scorpion_gmx_banks.h` (the `gb_rom_scorpion_gmx_banks[32]`
   table — a C++ header because the Sinclair bases are header-defined
   internal-linkage arrays a .c cannot reference). Binding: requestMachine
   assigns rom[0..31] = .data, `romInUse = (plane << 2) | bank`. **Overlay
@@ -6883,7 +6955,10 @@ entry" rule buys.
   calls `gmxRegisterLiveOverlay(romInUse)` on every ROM bank change (all sites
   already funnel through it / gmxTapRecheck; the two NMI-DOS romInUse writes in
   Z80_JLS.cpp gained rechecks). Only the live page-0 pointer is ever consulted,
-  so stale entries for unpaged bases are harmless. **`gmxRegisterLiveOverlay`
+  so stale entries for unpaged bases are harmless. Note the flat-page cache is
+  8 slots and there are now 10 GMX overlays, so a firmware that cycles through
+  all of them will thrash it — correctness is unaffected (`romPeek` falls back
+  to the run list), only the first read after a switch is slower. **`gmxRegisterLiveOverlay`
   lives in Config.cpp, and ONLY Config.cpp may reference the bank table**: the
   Sinclair halves are internal-linkage, so a second referencing TU embeds 32 KB
   of private copies whose ADDRESSES the pointer-keyed registry never matches —
@@ -6891,16 +6966,25 @@ entry" rule buys.
   the overlays (caught by nm before it shipped). Also fixed here: the
   unconditional rom[4] TR-DOS tail in requestMachine is skipped on GMX — it was
   clobbering plane 1 bank 0 (romInUse 4) and would fight the GMX 505d overlay.
-  To make room, **GMX builds shrink the GM.DLS flash partition 2.375 MB →
-  1.625 MB** (1.6875 MB until the TS-BIOS ROM landed 2026-09-06; `rp2350-memmap.ld`, `--defsym=__gmx_rom_in_flash=1` from
-  CMakeLists): the stock converted gm.dls bank (~1.59 MB) still fits with
-  ~100 KB margin, MidiSynth reads the bounds from the linker symbols so nothing
-  else changes, and a bank provisioned at the OLD address fails the header
-  check and re-provisions from SD. Firmware headroom on GMX builds ≈ 413 KB
-  (limit 2.3125 MB, firmware ~1.91 MB). An earlier SD-loaded-into-butter
+  MidiSynth reads the partition bounds from the linker symbols so nothing else
+  changes, and a bank provisioned at the OLD address fails the header check and
+  re-provisions from SD. An earlier SD-loaded-into-butter
   version of this ROM was replaced — it worked but cost a boot-ordering dance
   (requestMachine runs before Buffer::initPools). `Buffer::butterPoolReady()`
   (kept) is the arena-readiness query from that round.
+- **What the v5.44 swap covers on hardware, and what it does not.** Confirmed
+  2026-09-19: the machine boots and runs, and F11 does. That much also settles
+  the two things our emulation actually drives through the rewritten loader —
+  the 8-bit magic-shift read from `#78FD` (now inlined at p0b0 0x00F0 instead of
+  a CALL at 0x013F) and the boot descriptors at 0x1FEE, whose names, D/E bytes
+  and checksums are byte-identical to v5.00's (`DK_test` → plane 2, `PentaGON`
+  → plane 1, `Work Sch` → default plane 4; only p0b0's own descriptor moved
+  00/00 → FF/FF, i.e. "unset" = plane 4 instead of "stay in the loader"). Still
+  NOT itemised by any run: the 640x200x16 gfx_ext mode, the service monitor's
+  plane-4/5 thunk dance, TR-DOS out of the plane's own bank, the RRL/fastboot
+  set that is new in plane 3, the ROM disk in planes 6-7, and SMUC — which on
+  this image is ProfROM 5.44's driver, a THIRD generation after the 4.01 the
+  decode was read from and the 4.44s the other romset ships.
 - **2 MB RAM**: page = `(DFFDgmx&7)<<4 | (1FFD.D4)>>1 | (7FFD&7)` (`scorpionC000Page`,
   one helper for all three writer ports) + #78FD pages CPU bank 2 (0x8000!) as
   `value ^ 2`. Needs MEM_PG_CNT=128 — raised in setup for a persisted GMX pick and
@@ -7061,6 +7145,17 @@ entry" rule buys.
 The whole hand-off is understood now; `tools/gmx_unlz.py` unpacks the loader so it
 can be disassembled (`tools/z80disasm.py`). Do NOT re-derive it.
 
+**ALL OF THIS WAS READ OUT OF v5.00, which is no longer the shipped image** (see
+the ROM bullet above: ProfROM GMX v5.44 since 2026-09-19). The v5.44 loader is a
+different program — "TMgmx(r) Loader V2.00", no RST 0x18 stream unpacker at
+0x0178, the magic-shift read inlined at 0x00F0 — so the ADDRESSES below are
+v5.00's and `gmx_unlz.py` will not run on the shipped file. The two things that
+are byte-for-byte the same, and that our emulation is what drives, are the
+**magic-shift protocol** (eight `IN (#78FD)` bit-0 samples after a port-#00 write
+with D3) and the **boot descriptors** (same names, D/E and checksums; only p0b0's
+own pair moved 00/00 → FF/FF). Read this section for the MECHANISM, not for the
+offsets.
+
 - **p0b0 is a two-stage LZ loader.** ROM 0x00FE: `OUT (#7EFD),0x84` (turbo on,
   plane 0, magic disabled) → `CALL 0x013F` reads the **magic shift register** as
   eight `IN (#78FD)` bit-0 samples → `RST 0x18` unpacks the stream named by the
@@ -7080,10 +7175,12 @@ can be disassembled (`tools/z80disasm.py`). Do NOT re-derive it.
   0x1FF0-0x1FF9 = a 10-char name, 0x1FFA = checksum, 0x1FE6 = date. `0x5D54`
   reads D/E, `0x5D32` writes **E & 0xF0 to #7EFD (the plane!)** and `0x5D4C`
   writes `(D & 0xF0) | (magic & 7)` to port #00; `E == 0xFF` means "unset" and
-  defaults to **`A=0x40`, i.e. plane 4**. Then `JP 0x0000`. In gmx13500.rom the
-  three profiles are p0b1 "DK_test" → plane 2 (erased in this image), p0b2
+  defaults to **`A=0x40`, i.e. plane 4**. Then `JP 0x0000`. In both images the
+  three profiles are p0b1 "DK_test" → plane 2 (erased in v5.00), p0b2
   "PentaGON" → plane 1, p0b3 "Work Sch" → **plane 4**; p0b0's own bytes are
-  00/00 (staying in the loader). **Plane 4 is ProfROM 4.01, NOT the v2.94 set**
+  00/00 in v5.00 (staying in the loader) and FF/FF in v5.44 (unset = plane 4).
+  **In v5.00 plane 4 is ProfROM 4.01, NOT the v2.94 set** (v5.44 carries ProfROM
+  5.44s there instead)
   (an earlier note here said v2.94 and it was wrong, corrected 2026-09-04 by
   diffing the images): GMX banks 17 and 19 are BYTE-IDENTICAL to
   `scorp401-520F4C15.rom` banks 1 and 3, bank 16 differs by 4 bytes — against
@@ -7204,29 +7301,47 @@ Two things came out of that diff:
   state, and the monitor's loop must be polling something — that half of the
   conversation was invisible.
 
-### FIXED (hw-confirmed 2026-08-31): GMX F11 zeroes all guest RAM
+### REVERTED 2026-09-19 (hw-confirmed): GMX F11 used to zero all guest RAM
 
-`ESPectrum::reset`, gated on `g_scorp_gmx`: one `mem_desc_t::cleanup()` per page
-(the existing per-page zero — handles POINTER/butter/SPI/swap backings), ~2 MB on
-butter, timed in the `[RESET] GMX cold boot:` line. That is the whole fix: with the
-firmware's warm-boot state gone it takes its cold path — memory test, monitor,
-128 menu — and F11 after HQ works.
+**The wipe is GONE (owner's call: "F11 for Scorpion GMX works like F12 — let's
+roll back this wrong fix"), and F11 WORKS WITHOUT IT on ProfROM GMX v5.44**
+(owner, same day, asked and answered about F11 specifically). So on the shipped
+firmware the machine reset needs no help: the wipe was compensating for
+something in v5.00, not for anything our reset does wrong.
 
-**It is deliberately NOT faithful** (a real Scorpion's reset button leaves RAM
-alone) and it is deliberately **GMX-only**:
-- nothing else here has firmware that trusts RAM across a reset, and
-- on other machines a reset that wipes RAM would break software that relies on the
-  opposite — a TR-DOS/Gluk RAM disk, a monitor's saved state — so do NOT widen
-  this to all Scorpion romsets or all machines.
-Side effect worth knowing: F11 now blanks the screen (pages 5/7 go with the rest)
-instead of leaving the last frame up until the first repaint.
+From 2026-08-31 to 2026-09-19 `ESPectrum::reset`, gated on `g_scorp_gmx`, ran
+one `mem_desc_t::cleanup()` per page — ~2 MB of memset, logged as `[RESET] GMX cold boot:` — so the GMX firmware would always
+find a blank machine, skip nothing, and come up through its memory test, monitor
+and 128 menu. It did fix the HQ hang below on hardware, and it was wrong: **F11
+is a RESET, not a power cycle.** A real Scorpion's reset button leaves RAM alone
+(README says so for every other machine, next to the DRAM power-on garbage), so
+GMX was the one machine where F11 and F12 did the same thing, and the user's own
+state went with it. The code keeps a short comment at the old site so it is not
+re-added by reflex.
+
+Consequences, which are the pre-2026-08-31 ones:
+- **The HQ hang below is OPEN again — on paper.** It was never diagnosed; the
+  wipe only removed its trigger, and it has not been reproduced on v5.44 (nor
+  looked for: the hardware run that cleared F11 was not "F11 after HQ"). If it
+  returns, fix it at the cause: the mechanism is understood (an IM1 interrupt taken while the monitor's plane-4/5 thunk dance
+  has plane 5 bank 1 paged, which has no 0x0038 handler — see the next two
+  sections), and what is NOT understood is why the firmware's own dance is
+  interrupt-open at all. Our best suspect is still recorded there: we run the
+  GMX firmware at HALF the clock it asks for whenever the user's turbo is off,
+  because `#7EFD` D7 is gated on `ESPectrum::multUser` — so twice as much of its
+  code has to fit between two 50 Hz interrupts as the author allowed for.
+- F11 leaves the last frame on screen again instead of blanking it.
+- **Both of those are v5.00 observations**, and v5.44's plane 4-7 firmware is a
+  different generation (ProfROM 5.44s, not 4.01), so the HQ hang may not exist
+  there at all. What IS tested on v5.44 is plain F11.
 
 **Open oddity, if this ever needs revisiting:** a full firmware reboot (F12) also
 leaves guest RAM alone — butter PSRAM survives a watchdog reboot and `assign_ram`
-does not clear pages — yet F12 recovers fine. So the discriminator the firmware
-actually keys on must live somewhere F12 happens to reinitialise (the SRAM-backed
-`.ram_128k` pages 0-7, or a heap page that comes back different), not in butter.
-Nobody has needed to find out which byte it is.
+does not clear pages — yet F12 recovered where F11 did not. So the discriminator
+the firmware actually keys on must live somewhere F12 happens to reinitialise (the
+SRAM-backed `.ram_128k` pages 0-7, or a heap page that comes back different), not
+in butter. Nobody has needed to find out which byte it is, and that question is
+the way back into the HQ bug.
 
 ### …and the mechanism, from the heartbeat (hw 2026-08-31)
 
@@ -7517,8 +7632,13 @@ disassembly of the real driver (ProfROM 4.01 plane 1 bank 3 = GMX plane 5 bank 3
 which we already ship) — and the decode was diffed against Unreal's masks over
 **all 65536 addresses, 0 mismatches**. The shipped ProfROM is v4.44s since
 2026-09-19 and its driver is still in plane 1 bank 3 with the same port shape
-(more 16-bit #D8/#D9 transfers); GMX plane 5 is untouched, so the 4.01 driver
-this model was read from is still in the tree either way.
+(more 16-bit #D8/#D9 transfers). **The 4.01 driver this model was read from is no
+longer in the tree at all** — the GMX image moved to ProfROM GMX v5.44 the same
+day, so its plane 5 is 5.44s, not 4.01. Nothing about the port map is known to
+have moved in either firmware, but if SMUC ever misbehaves on GMX again, note it
+is now a THIRD driver generation and neither of the two in flash is the one the
+decode was derived from; the archived 4.01 image (CRC 91F513AB) is where to go
+back to.
 
 - **Outer decode `A12=A11=A7=A5=A1=1, A0=0`** (low byte #BA/#BE) inside the DOS
   address space; A6 must be 0. `#5FBA` version / `#5FBE` revision / `#7FBA`

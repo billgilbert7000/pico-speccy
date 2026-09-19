@@ -2849,9 +2849,10 @@ bool Ports::gmxPortRead(uint16_t address, uint8_t* out) {
 #if GMX_TRACE
     // The other half of the conversation: the monitor's plane-4/5 loop reads these
     // back, and bit 7 of each read is a BRD bit straight out of the #FE latch —
-    // which a machine reset does NOT clear, so it is exactly the kind of leftover
-    // that can differ between a cold boot and an F11 after a game (the first
-    // #78FD read already came back 0x80 vs 0x00 between the two, hw 2026-08-31).
+    // exactly the kind of leftover that can differ between a cold boot and an F11
+    // after a game (the first #78FD read came back 0x80 vs 0x00 between the two,
+    // hw 2026-08-31). `ESPectrum::reset` zeroes that latch since then, which is
+    // what closed this particular difference; guest RAM it deliberately leaves.
     GMXT("[GMX p7E rd] %02X brd=%02X pc=%04X", *out, port254, Z80::getRegPC());
 #endif
     return true;
