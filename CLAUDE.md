@@ -7199,6 +7199,42 @@ entry" rule buys.
   code that means to. Alt+F2 / Menu+F11 are now an override that lasts until the
   guest's next `#7EFD` write — they already cycle from `multiplicator`, so that came
   for free.
+- **Every clock banner goes through `OSD::notifyClock` / `pollClockNotify`**
+  (OSDMain.cpp) — TS-Conf's `applyZclk`, the GMX `#7EFD` handler AND both Turbo
+  hotkeys. The banner exists because the hotkeys continue from the LIVE clock, so a
+  silent guest change would make them behave inexplicably.
+  **The rule, in one sentence: a value is announced once it has HELD for
+  `CLK_SETTLE_MS` (250 ms) and differs from what the user last saw; a keypress
+  always answers at once.** hw-confirmed 2026-09-20 on TS-Conf with the Wild
+  Commander plugin player that provoked it (owner: "теперь работает").
+  It took FOUR attempts and each failure is worth keeping, because they are four
+  different ways to get this wrong:
+  1. *No debounce.* A guest may MODULATE the clock — a plugin player under Wild
+     Commander switches ZCLK around its sample generation — so there was one banner
+     per change, permanently on screen (hw 2026-09-20).
+  2. *Trailing edge, 700 ms, but the hotkeys still called `notify()` directly.* The
+     window was not the problem: the hotkey toasts never recorded themselves in the
+     "what is on screen now" memory, so after one guest announcement every later
+     change that came back to that value read as a repeat and was swallowed — for
+     ever. Reported as "при автоматическом переключении вообще не показывается".
+     **A shared policy needs a shared memory: every writer must go through it.**
+  3. *Leading edge.* Announcing the FIRST change of a burst announces the
+     modulator's EXCURSION — the banner reported the dip (3.5 MHz) while the value
+     the machine actually runs at (14) was never announced at all, and it appeared
+     at unpredictable moments ("появляется, но я не очень понимаю когда").
+     **When the interesting thing is the state, not the event, debounce the trailing
+     edge — just keep the window short enough to read as instant.**
+  4. *An empty banner.* `clk_say()` cleared `clk_pending` BEFORE passing `text` to
+     `notify()` — and the poll path passes a pointer INTO `clk_pending`, so the
+     announcement got an empty string. Only the automatic path was affected; the
+     hotkeys pass a string literal and looked fine, which is why it read as "after a
+     restart the banner is blank where the CPU text should be". It announces from
+     `clk_shown` (the copy) now. **A function that both stores a string and consumes
+     it must copy before it clears — its argument may alias its own buffer.**
+  The clock itself is applied immediately in every version; only the banner waits.
+  Not covered: a pathological guest that modulates SLOWER than 250 ms would announce
+  each state. Nothing observed does, and the F8 stats box carries the live clock
+  continuously, so the banner is a convenience rather than the only indication.
 - **v5 vs v6 is WHICH SCREEN THE FIRMWARE DRAWS ITSELF ON**, not a hardware
   difference: v5's Shadow monitor, navigator and debugger use the standard ZX screen,
   v6's use the GMX **extended 640x200x16** mode (`gfx_ext`, `#7EFD` bit 3 — the mode

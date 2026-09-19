@@ -2135,7 +2135,10 @@ IRAM_ATTR void ESPectrum::processKeyboard() {
           // TS-Conf: an override until the guest's next SysConfig write (applyZclk).
           Config::turbo = ESPectrum::multUser;
           Config::save();
-          menuToast(mhz[ESPectrum::multUser]);
+          // Through notifyClock, not menuToast: it records what the user was
+          // shown, so the guest's next clock change is not mistaken for a repeat
+          // of this one and swallowed. immediate — a keypress must always answer.
+          OSD::notifyClock(mhz[ESPectrum::multUser], true);
           return;
         }
         if (KeytoESP == fabgl::VK_F12) { // NMI — route through do_OSD with the
@@ -3285,6 +3288,8 @@ void ESPectrum::loop() {
     // Anything that self-disabled during setup() (no video yet) queued a message —
     // show it once, now that the OSD can draw. No-op from the second frame on.
     OSD::flushBootNotices();
+    // A guest-set CPU clock is announced only once it has stopped moving.
+    OSD::pollClockNotify();
 
     // A card turned up under a session that booted without one, and it carries
     // settings this session never loaded. Only a boot can apply them — arch,

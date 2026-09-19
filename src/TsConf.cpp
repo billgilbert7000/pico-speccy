@@ -1643,8 +1643,12 @@ void TsConf::applyZclk(bool fromGuest) {
             Debug::log("TsConf: guest selected 14 MHz — may overrun the frame budget");
         }
         if (fromGuest) {
+            // Announced only once the clock SETTLES (OSD::notifyClock): a plugin
+            // player under Wild Commander modulates ZCLK around its sample
+            // generation, and a banner per change covered the screen for as long
+            // as it played (hw 2026-09-20).
             static const char* const mhz[3] = { " CPU: 3.5 MHz ", " CPU: 7 MHz ", " CPU: 14 MHz " };
-            OSD::notify(mhz[zclk], LEVEL_INFO, 900);
+            OSD::notifyClock(mhz[zclk]);
         }
     }
 }

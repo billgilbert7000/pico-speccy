@@ -2543,7 +2543,7 @@ bool Ports::gmxPortWrite(uint16_t address, uint8_t data) {
         if (want != ESPectrum::multiplicator) {
           ESPectrum::multiplicator = want;
           CPU::updateStatesInFrame();
-          OSD::notify(want ? " CPU: 7 MHz " : " CPU: 3.5 MHz ", LEVEL_INFO, 900);
+          OSD::notifyClock(want ? " CPU: 7 MHz " : " CPU: 3.5 MHz ");
         }
       }
       // D4-6 = ProfROM plane (28F400 A16-18), frozen by fixrom (port #00 D4)

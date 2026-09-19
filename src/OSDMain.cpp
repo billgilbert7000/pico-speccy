@@ -1493,6 +1493,54 @@ void OSD::notify(const string& msg, uint8_t warn_level, uint16_t millis) {
     drawNotify();                 // show it on the frame that asked for it
 }
 
+// ── CPU-clock announcement ───────────────────────────────────────────────────
+// See OSDMain.h. Shared by every source of a clock change so the policy and the
+// "what is on screen now" memory cannot drift apart.
+static char     clk_shown[16]   = "";   // what the user last SAW, from ANY source
+static char     clk_pending[16] = "";   // value waiting to prove it holds ("" = none)
+static uint32_t clk_last_ms     = 0;    // when the clock last moved
+
+// How long a value must HOLD before it is worth a banner. A guest that modulates
+// the clock changes it far faster than this (a plugin player under Wild Commander
+// switches ZCLK around its sample generation, well inside one 20 ms frame), so its
+// excursions never qualify; a deliberate change holds immediately and this is short
+// enough to read as instant.
+static const uint32_t CLK_SETTLE_MS = 250;
+
+static inline uint32_t clk_now_ms() { return (uint32_t)(esp_timer_get_time() / 1000); }
+
+static void clk_say(const char* text) {
+    // `text` may point INTO clk_pending (the poll path passes it straight in), so
+    // copy it to clk_shown FIRST and announce from the copy — clearing the pending
+    // buffer before the notify handed it an empty string, which showed as a blank
+    // banner on every automatic change while the hotkey path (a string literal)
+    // looked fine (hw 2026-09-20).
+    strncpy(clk_shown, text, sizeof(clk_shown) - 1);
+    clk_shown[sizeof(clk_shown) - 1] = '\0';
+    clk_pending[0] = '\0';
+    OSD::notify(clk_shown, LEVEL_INFO, 900);
+}
+
+void OSD::notifyClock(const char* text, bool immediate) {
+    if (!text) return;
+    if (immediate) { clk_say(text); return; }   // a keypress must always answer
+    // Guest write: remember where the clock went and when. Announcing on the
+    // LEADING edge was tried and is wrong — the first change of a burst is the
+    // modulator's excursion, so the banner reported the dip (3.5) and the value
+    // the machine actually runs at (14) was never announced at all.
+    strncpy(clk_pending, text, sizeof(clk_pending) - 1);
+    clk_pending[sizeof(clk_pending) - 1] = '\0';
+    clk_last_ms = clk_now_ms();
+}
+
+void OSD::pollClockNotify() {
+    if (!clk_pending[0]) return;
+    if ((int32_t)(clk_now_ms() - clk_last_ms) < (int32_t)CLK_SETTLE_MS) return;
+    // Held long enough. Silent if it came to rest where the user already sees it.
+    if (strcmp(clk_pending, clk_shown) != 0) clk_say(clk_pending);
+    else clk_pending[0] = '\0';
+}
+
 void OSD::cancelNotify() {
     if (!notify_on) return;
     notify_on = false;
@@ -2170,7 +2218,9 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
             Config::save();
             static const char* const mhz[4] =
                 { " CPU: 3.5 MHz ", " CPU: 7 MHz ", " CPU: 14 MHz ", " CPU: 28 MHz " };
-            notify(mhz[ESPectrum::multUser], LEVEL_INFO, 900);
+            // See the VK_F11 handler in ESPectrum.cpp: routed through
+            // notifyClock so the clock banner's memory stays honest.
+            notifyClock(mhz[ESPectrum::multUser], true);
         } else
         if (hkIdx == Config::HK_DEBUG) {
             osdDebug();

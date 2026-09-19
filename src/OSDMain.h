@@ -127,6 +127,20 @@ public:
     static void cancelNotify();   // drop it now and schedule the border erase
     static bool notifyAvailable();// false when the mode has no usable top border
 
+    // Announce a CPU-clock change. EVERY source goes through this — the guest
+    // (TsConf::applyZclk, the GMX #7EFD handler) and both Turbo hotkeys — so that
+    // the "what is on screen now" memory stays honest; a hotkey toast that did not
+    // record itself made the next guest change look like a repeat and swallowed it.
+    // The first change after a quiet spell is announced AT ONCE. Only a BURST is
+    // deferred: a guest may modulate the clock continuously — a plugin player under
+    // Wild Commander switches ZCLK around its sample generation, one banner per
+    // change, permanently on screen (hw 2026-09-20) — so while changes keep
+    // arriving within CLK_QUIET_MS nothing is said, and the value it finally comes
+    // to rest on is announced once, if it differs from what the user last saw.
+    // `immediate` is for a keypress, which must always answer.
+    static void notifyClock(const char* text, bool immediate = false);
+    static void pollClockNotify();   // per frame, from ESPectrum::loop
+
     // Boot notices: setup() runs long before video is up, so a feature that gives up
     // there (GS::init short on heap, Gigascreen's prev-FB decline) can only queue a
     // line here; the first loop() frame shows them all in one centered box. One-shot:
