@@ -7056,6 +7056,68 @@ entry" rule buys.
   NMI-entered debugger needs — a GMX monitor reads it to learn the paging state it
   interrupted. Not implemented here (there is no magic button in this port).
 
+### GMX v5.44 (Loader V2.00) MEASURED and NOT taken: +82 KB of flash, ~18 KB free (2026-09-19)
+
+The owner supplied `ProfRom_GMX_v5.44.9643_rom.zip` (PLM, Orenburg — the SAME
+build 9643 as the ProfROM v4.44s swapped in the same day; the changelog inside
+is shared and its last entry is `v4.44.9643`). It is a real upgrade and it does
+NOT fit. **Measured, so nobody has to re-derive it:**
+
+| image | pack | delta |
+|---|---|---|
+| shipped `gmx13500.bin` | 18 raw + 8 ovl = **296 565 B** | — |
+| `ProfRomGMX_v5s.rom` (CRC32 6E9FD318, md5 59400e5c043cfe9a08f21324f7443ea6) | 23 raw + 7 ovl = **380 819 B** | **+84 254** |
+| `ProfRomGMX_v5se.rom` (CRC32 F9FB992F) — same, plus the VG93 "emulation" | within a few hundred B of v5s | +84 K |
+
+Free flash at the time (the 2026-09-16 pack_gmx figures, minus the ProfROM
+swap's +606): **~18 KB on ZERO2-PIOUSB, ~39 KB on DVp2.** The linker ASSERT
+refuses it, which is the system working.
+
+- **Nothing cheap recovers 84 KB, and each dead end was measured:** loosening
+  `GMX_OVL_DIFF_MAX` to 4096 (against its own "not worth it on an opcode-fetch
+  path" rule) still lands at 354 321 B = **+57 756**; cross-packing the GMX banks
+  against the ProfROM v4.44s ones saves NOTHING beyond the BASIC banks the
+  Pentagon/Sinclair bases already cover (plane 5 of GMX vs plane 1 of ProfROM
+  differ by ~15.9 KB — same build, different hardware, different program), and it
+  is the cross-romset fold this file refuses anyway; and `__gm_bank_size` can give
+  up at most 32 KB before the stock converted gm.dls (1 668 026 B against the
+  1 703 936 B partition) stops fitting.
+- **The two levers that WOULD work**, both the owner's call and neither taken:
+  drop the standalone `R_SCORP_PROF` romset (frees 230 634 B, net −146 KB — but
+  its whole point is ProfROM on boards with no QSPI PSRAM, which GMX cannot
+  serve), or move the GMX ROM to **SD -> butter PSRAM** (frees all 296 KB; GMX
+  already requires butter PSRAM, and an SD-loaded version existed before and was
+  replaced over the boot ordering — `requestMachine` runs before
+  `Buffer::initPools`).
+- **What the image is, for when it does fit.** `file_id.diz` names the variants:
+  `v4*` plain Scorpion, `v5*` GMX with the STANDARD screen, `v6*` GMX with the
+  EXTENDED screen (not in this zip), suffix `s` = SMUC, `se` = SMUC + the VG93
+  "emulation" (virtual disks through `#3D13` instead of direct FDC programming),
+  `su` = that emulation switchable. **v5s is the match for our shipped `v4s`
+  ProfROM**, and it says it is "based on Dmitry Pyshkin's printed v5.01 with only
+  the Scorpion firmware at #40000-#7FFFF replaced". Its planes: 0 = **GMX Loader
+  V2.00** (2024 LW/PLM, against our V1.30 of 2000), 1 and 2 **byte-identical to
+  gmx13500**, 3 = a new "Reset Rom Loader v2.00s" (our image duplicates plane 2
+  there), 4 = `Scorpion GMX 2048` firmware with Pentagon GMX / ZS 256 / Pentagon
+  ZS 256 modes, 5 = the MOA Shadow monitor **v5.44s, compiled Thu 21 Aug 2025
+  18:10:51** — eight seconds after the ProfROM v4.44s we ship. The zip also
+  carries `RRL_GMXs.trd` + an `RRL/` tree (SHELL.RRL, DEBUGGER.RRL, SNAP.RRL,
+  boot.$C, fatall.$C), i.e. this generation moves much of the shell ONTO DISK.
+- **Emulation risk, checked as far as a disassembly can**: the plane-select
+  descriptors at each plane-0 bank's tail are byte-identical to ours for banks 1-3
+  (`DK_test` -> plane 2, `PentaGON` -> plane 1, `Work Sch` -> plane 4), so the
+  boot-descriptor mechanism decoded below survives. **Bank 0's own descriptor
+  changed from `00 00` to `FF FF`**, i.e. "unset" = default plane 4, where the old
+  loader stayed in itself — that is a boot-path change our model already handles.
+  The loader CODE is entirely different (0x00FE is no longer the entry), so the LZ
+  stages, the magic-shift read and the two-pass reset below would ALL have to be
+  re-derived against V2.00 before trusting it — budget a `GMX_TRACE` round.
+- **Applies to the ProfROM v4.44s we DID ship**: the archive's `!changes.txt`
+  opens with a warning — after the first run, enter Set Up monitor, do
+  **X. Reset CMOS**, eject any disk carrying a configuration sector, then cold
+  restart, or the machine may misbehave. That is the one-off CMOS re-init the
+  swap note above predicts, and the ROM asks for it explicitly.
+
 ### The GMX boot chain, decoded (2026-08-31) — read this before any GMX boot bug
 
 The whole hand-off is understood now; `tools/gmx_unlz.py` unpacks the loader so it
@@ -7324,6 +7386,12 @@ Mount on A:/B:/C:/D: plus tape, and .spg / .sna / Hobeta loading.
   driving the same hardware), so the SMUC and paging emulation has to be
   RE-VALIDATED on hardware rather than assumed. Within one 4.01 family plane 0
   is byte for byte identical and a swap was free; across generations it is not.
+- **Do this FIRST on hardware, the ROM asks for it**: its own `!changes.txt`
+  opens by saying that after the first run you must enter **Set Up monitor ->
+  X. Reset CMOS**, eject any disk that carries a configuration sector, and then
+  cold restart — otherwise the machine may misbehave. So the one-off CMOS
+  re-init below is expected, not a fault, and it is a USER ACTION, not something
+  the firmware does by itself.
 - **Hw check owed, in order**: it boots to the shell at all; the RAM figure on
   the boot screen (256K vs 1024K); `SMUC : ... found` + the IDENTIFY line with a
   disk mounted; `H. HDD boot`; mounting a TR-DOS pseudo-disk on C: and a
