@@ -77,6 +77,32 @@ import zlib
 crc = zlib.crc32(scorp) & 0xffffffff
 check('Scorpion v2.95 CRC32', '%08X' % crc, '0C6C1EF6')
 
+# Scorpion PROF-ROM (romset R_SCORP_PROF), reassembled the way requestMachine binds
+# it: 16 banks from the {data, overlay} table, plane 0 banks 0/1 overlaid on the
+# Pentagon ROM0 / Sinclair 128K ROM1, the other 14 raw. Checked as ONE image with a
+# pinned CRC because the version is identifiable only from plane 1 bank 0 (the
+# monitor banner) — plane 0's own banner says "1992-..." in every release — and
+# because the whole point of the raw/overlay split is that it must reconstruct the
+# dump byte for byte.
+print("Scorpion PROF-ROM v4.44s (plane 0 banks 0/1 overlaid, 14 raw):")
+prof_banks = []
+for i in range(16):
+    tag = 'p%db%d' % (i // 4, i % 4)
+    if i == 0:
+        prof_banks.append(apply_overlay(
+            base_pent, arr('scorpion/scorpion_prof_rom.c',
+                           'gb_overlay_scorpion_prof_p0b0')))
+    elif i == 1:
+        prof_banks.append(apply_overlay(
+            s128_1, arr('scorpion/scorpion_prof_rom.c',
+                        'gb_overlay_scorpion_prof_p0b1')))
+    else:
+        prof_banks.append(arr('scorpion/scorpion_prof_rom.c',
+                              'gb_rom_scorpion_prof_%s' % tag))
+prof = b''.join(prof_banks)
+check('ProfROM v4.44s image', prof, dump('scorpion/src/profrom.bin'))
+check('ProfROM v4.44s CRC32', '%08X' % (zlib.crc32(prof) & 0xffffffff), '9812C53C')
+
 # The ZX-Evo BIOS sets we ship, reassembled from what is actually in flash. Page 0 is
 # the only page with a patch (the Setup footer's exit key); pages 1-3 must be verbatim.
 print("TS-Conf BIOS sets (page 0 patched, pages 1-3 verbatim):")

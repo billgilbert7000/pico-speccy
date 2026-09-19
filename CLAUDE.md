@@ -7266,19 +7266,74 @@ bit 6) through the routine at ROM 0x050B. `[GMX hb]` now carries
 
 ### ProfROM romset (R_SCORP_PROF, 2026-09-04; BOOTS on hw after the read-tap fix below)
 
-**Status: it starts on hardware (2026-09-04, user-confirmed) once the plane tap
-fires on data reads.** Everything past the boot — the shell, TR-DOS out of the
-plane's bank 3, the 1 MB paging under this firmware, snapshots — is untested.
+**Status: 4.01 started on hardware (2026-09-04, user-confirmed) once the plane
+tap fired on data reads. The SHIPPED IMAGE IS v4.44s SINCE 2026-09-19 and has
+NOT been hw-tested at all** — see the swap note below. Everything past the boot
+— the shell, TR-DOS out of the plane's bank 3, the 1 MB paging under this
+firmware, snapshots — was untested even on 4.01.
 
-"ZS-1024 + ProfROM" — Scorpion PROF-ROM **4.01, image 91F513AB** (CRC32
-91F513AB, shipped as `src/roms/scorpion/src/profrom.bin`; verify with
-`python3 -c "import zlib;print('%08X'%zlib.crc32(open('src/roms/scorpion/src/profrom.bin','rb').read()))"`),
-the firmware a real ZS-1024 Turbo+ shipped with (speccy4ever
-files every ProfROM under "Prof ROM & ZX-1024"; ZXMAK2 has no 256K-only ProfROM
-machine either, and MAME's `profscorp` lists this exact CRC as a BIOS option).
+"ZS-1024 + ProfROM" — Scorpion PROF-ROM **v4.44s, image 9812C53C** (CRC32
+9812C53C, md5 1d0cfcf57739e9c265713f8960018be0, shipped as
+`src/roms/scorpion/src/profrom.bin`; `python3 tools/rom_verify.py` checks the
+reassembled image AND pins that CRC).
 It is what makes the SMUC controller below useful — the stock ZS-256 v2.94/2.95
 ROMs contain **zero** SMUC code (scanned for `LD BC,#xxBA/#xxBE`), ProfROM 3.2a
-has partial support, 4.01 and 4.xx.015 full.
+has partial support, 4.01 and later full.
+
+### The 2026-09-19 swap: 4.01 → v4.44s (owner-supplied image, NOT hw-tested)
+
+`ProfRomZS1024_1FFD_v4s.rom` is Andrew MOA's 1993-1997 Shadow Service Monitor as
+maintained by **PLM, Orenburg** — banner ` 2022-2025  v4.44s  modified by PL`,
+`v4.44 build 9643`, compiled Thu 21 Aug 2025 with SjASMPlus, built for ZS-1024
+**#1FFD** paging. It replaces 4.01 (91F513AB) and is a strict upgrade for the
+one reason 4.01 was ever a compromise: it has the **`H. HDD boot`** shell entry
+that only the 4.xx.015 "Test version" used to carry, WITHOUT that build's newer
+SMUC driver (which misbehaved on virtual-disk copies here — see the deferred
+note below, which this swap makes moot). It also adds a third storage device
+beside hd1 master/slave (`sd0, sd card`), FAT32, a Z-Controller row,
+Mount on A:/B:/C:/D: plus tape, and .spg / .sna / Hobeta loading.
+
+- **Cost: +606 B of flash** (230028 → 230634 B for the 256 KB image). The
+  raw/overlay split is unchanged at 14 raw + 2 overlays — only plane 0 banks
+  0/1 (128 and 48 BASIC) are close enough to anything to be overlays, in either
+  image. NB the old `pack_prof` comment claiming plane 3 was "where most of the
+  saving comes from" was wrong for the shipped 4.01 too: the saving is the two
+  BASIC banks, and nothing else.
+- **What it gives up**: 4.01's ROM disk (MagOS 6.x, Real Commander 2.6,
+  TRDNavig, ZXunzip, Cat HDD, the SMUC/NEMO HDD tools, AUMT/UMT) for a
+  different set — Fatall 0.25, Proteus 2.20, TestScorpion, ZX-Word, Test INT,
+  RC v1.96. Judged cheap: those all run from a TRD on the SD card.
+- **No emulation change was needed, and that was CHECKED BY DISASSEMBLY, not by
+  byte pattern** (this window has produced a wrong conclusion twice — see the
+  M1-only bug below): the SMUC driver is still in plane 1 bank 3 with the same
+  #5FBA/#FFBA/#F8BE/#D8BE shape (more 16-bit #D8/#D9 transfers now; the
+  MC146818 code moved to other banks, which does not matter — our decode is by
+  port), and the plane switch is the same mechanism `kProfPlaneMap` models: the
+  data-read trampoline `LD HL,#010C / LD L,(HL) / XOR A / OUT (C),A / JP #0000`
+  at plane 1 bank 0 0x0050 and planes 2/3 bank 0 0x0118 (all three resolve to
+  plane 0 through the table), `JP #010E` at plane 1 bank 3 0x0030, and the
+  identity-slot `JP #0103` re-entries. The three sequences that LOOK like data
+  reads of the window (`3A 05 01` in p1b1, `3A 07 01` in p2b1) disassemble as
+  font / ROM-disk data, not instructions, so nothing new can fire the tap
+  spuriously — which is the failure that took GMX down.
+- **It drives #1FFD itself** (an `LD BC,#1FFD / OUT (C),A` site), where no 4.01
+  build ever did. The romset already sets `g_scorp_1024`, so if this build uses
+  the D6/D7 page bits it should simply report 1 MB where 4.01 reported 256K —
+  the first thing to look at on hardware.
+- **Its plane 0 is not 4.01's** (the service monitor is a different program
+  driving the same hardware), so the SMUC and paging emulation has to be
+  RE-VALIDATED on hardware rather than assumed. Within one 4.01 family plane 0
+  is byte for byte identical and a swap was free; across generations it is not.
+- **Hw check owed, in order**: it boots to the shell at all; the RAM figure on
+  the boot screen (256K vs 1024K); `SMUC : ... found` + the IDENTIFY line with a
+  disk mounted; `H. HDD boot`; mounting a TR-DOS pseudo-disk on C: and a
+  Quick format; the CMOS — expect ONE "checksum error" on first boot while it
+  re-initialises `cmos_Scorp.nvr` (its signature byte was not read out of the
+  image and does not need to be, since CMOS files are per-romset).
+- The CRC in `tools/rom_verify.py` is the guard against the trap the v2.95 swap
+  hit: `scorpion_prof_rom.c` is GENERATED, so a forgotten `rom_pack.py prof`
+  leaves the old firmware in flash while every file looks freshly built. There
+  was no ProfROM check there before this swap; there is now.
 
 - **256 KB = 4 planes x 4 banks into rom[0..15]**, `romInUse = (plane << 2) |
   bank`, exactly the GMX arithmetic (`g_scorp_banked` = GMX or ProfROM is the
@@ -7343,8 +7398,11 @@ has partial support, 4.01 and 4.xx.015 full.
   the plain-Scorpion overlay for the same Sinclair base from the previous romset.
 - Menu: Machine → Scorpion → "ZS-1024 + ProfROM"; the pref radio gained the same
   entry (before the conditional GMX one, so the indices stay build-independent).
-- **4.xx.015 was tried on 2026-09-05 and REVERTED the same day — the shipped
-  image is 4.01 / 91F513AB, and the paragraphs below describing 4.xx.015 as
+- **SUPERSEDED 2026-09-19 by the v4.44s swap above — v4.44s has the `HDD boot`
+  entry this whole argument was about, so the question is closed.** Kept as the
+  record of why 4.xx.015 is not the answer. 4.xx.015 was tried on 2026-09-05 and
+  REVERTED the same day — the image shipped from then until 2026-09-19 was
+  4.01 / 91F513AB, and the paragraphs below describing 4.xx.015 as
   shipped are the record of that attempt, not of the tree** (the version claim
   survived the revert and misled this file until 2026-09-08, when a user's
   `[CMOS] save … sig0E=61` gave it away: 4.xx.015 stamps 0x62 there). Why it went
@@ -7385,7 +7443,10 @@ has partial support, 4.01 and 4.xx.015 full.
   ROM DISK (MagOS, Real Commander, Cat HDD, HDST), and those run just as well
   from a TRD on the SD card.
 
-- **"The RAM test shows 256K" is the FIRMWARE, not our paging** (hw 2026-09-04).
+- **"The RAM test shows 256K" is the FIRMWARE, not our paging** (hw 2026-09-04,
+  on 4.01 — **the v4.44s image shipped since 2026-09-19 DOES write #1FFD itself,
+  so it may well report 1024K; if it does, that is the firmware too, and equally
+  not an emulation change**).
   Diffing all ten 4.01 variants settles it: **plane 0 — the boot, the service
   monitor and every paging routine — is byte-identical across them**, differing
   only in the 23-byte banner string and two patches (the monitor's
@@ -7393,7 +7454,8 @@ has partial support, 4.01 and 4.xx.015 full.
   a `JP Z` made unconditional at 0x3152). The paging code walks 7FFD bits 0-2
   plus 1FFD D4 and nothing else — 16 pages, 256 KB — e.g. the clear loop at
   bank 2 0x0691 (`DEC A / OUT (#7FFD),A / CP #10 / JR NZ`, i.e. #17 down to
-  #10). So NO ProfROM 4.01 build uses the ZS-1024 bits; only two of them
+  #10). So NO ProfROM 4.01 build uses the ZS-1024 bits (v4.44s is a different
+  generation and is not covered by this diff); only two of them
   (A3B10C26 and this one) even carry the "Scorpion ZS 1024 turbo+" name plate,
   and that string is all the difference is. Our D6/D7 model stays right and
   hw-proven — the UMT memory test finds 1 MB on R_SCORP_1024 — guest software
@@ -7443,15 +7505,20 @@ main menu ... magic button monitor` — i.e. it carries its own partition manage
 prepared in-place and no downloaded image is needed. The way in is our
 Machine -> Reset to -> **Service monitor**, which is a bare NMI = that "magic
 button". (The 4.01 image 91F513AB carried `HDST SMUC` / `Cat HDD` /
-`HDD Doc SMUC` in its ROM disk at p1b1@3244; the shipped 4.xx.015 replaces that
-bundle with its own `HDD boot` menu entry and Navigator.)
+`HDD Doc SMUC` in its ROM disk at p1b1@3244; the **shipped v4.44s** replaces that
+bundle with its own `H. HDD boot` menu entry, a partition manager over hd1
+master/slave and `sd0`, and a different ROM disk — Fatall, Proteus,
+TestScorpion, ZX-Word, Test INT, RC v1.96.)
 
 `IDE::SMUC` (scheme 3, Devices → IDE/HDD → SMUC) puts the existing 16-bit ATA
 engine behind the SMUC port map and adds the card's own 2 KB 24LC16 NVRAM. Port
 map verified three ways — UnrealSpeccy 0.37 `Io.cpp`, ZXMAK2 `IdeSmuc.cs`, and a
 disassembly of the real driver (ProfROM 4.01 plane 1 bank 3 = GMX plane 5 bank 3,
 which we already ship) — and the decode was diffed against Unreal's masks over
-**all 65536 addresses, 0 mismatches**.
+**all 65536 addresses, 0 mismatches**. The shipped ProfROM is v4.44s since
+2026-09-19 and its driver is still in plane 1 bank 3 with the same port shape
+(more 16-bit #D8/#D9 transfers); GMX plane 5 is untouched, so the 4.01 driver
+this model was read from is still in the tree either way.
 
 - **Outer decode `A12=A11=A7=A5=A1=1, A0=0`** (low byte #BA/#BE) inside the DOS
   address space; A6 must be 0. `#5FBA` version / `#5FBE` revision / `#7FBA`
@@ -7607,7 +7674,9 @@ which F11 keeps and F12 throws away. Now:
   are gone" had no way to answer whether the card's own chip ever reached the SD
   card).
 - **The two stores hold different things, and NEITHER is written per keypress**
-  (2026-09-08, read out of the shipped 91F513AB driver in plane 1 bank 3):
+  (2026-09-08, read out of the then-shipped 91F513AB driver in plane 1 bank 3;
+  v4.44s ships since 2026-09-19 and was not re-read — expect its own signature
+  and one "CMOS checksum error" on first boot while it re-initialises):
     - **CMOS**: `0x00-0x09` clock, `0x0A`/`0x0B` control, `0x0D` VRT, **`0x0E` =
       signature `0x61`**, **`0x10-0x3E` the config block under checksum**, `0x3F`
       the checksum byte, `0x7F` only as an aliasing probe. Exported entries are
@@ -8441,7 +8510,9 @@ config can no longer be true while Profi runs.
 between them — and the firmwares stamp it incompatibly:
 
 - ProfROM **4.01** (and the driver generation inside GMX) keeps signature
-  **0x61** in cell 0x0E; ProfROM **4.xx.015** keeps **0x62** (verified in the
+  **0x61** in cell 0x0E; ProfROM **4.xx.015** keeps **0x62** (the shipped v4.44s
+  was not read — it does not matter, per-romset files mean it re-initialises
+  `cmos_Scorp.nvr` once and keeps it) (verified in the
   disassembly: 4.01 writes 0x61 at p1b3 0x20B2 and tests `CP #61` at 0x20CC,
   4.xx.015 writes 0x62 at 0x2261 and tests `CP #62` at 0x227E — same routine,
   same 0x10-0x3E checksum with the sum in 0x3F, different version stamp).

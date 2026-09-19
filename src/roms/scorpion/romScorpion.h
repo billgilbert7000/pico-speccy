@@ -29,10 +29,12 @@
 // match). Called from gmxTapUpdate (Ports.cpp) on every GMX romInUse change.
 void gmxRegisterLiveOverlay(uint8_t bank);
 #endif
-// Scorpion PROF-ROM v4.01 (romset R_SCORP_PROF) — 256 KB, 4 planes x 4 banks,
-// stored deduplicated + partly as overlays (~181 KB; tools/rom_pack.py prof).
-// This is the firmware a real ZS-1024 Turbo+ shipped with, and the one that
-// drives the SMUC HDD controller: the driver lives in plane 1 bank 3. Like the
+// Scorpion PROF-ROM v4.44s (romset R_SCORP_PROF) — 256 KB, 4 planes x 4 banks,
+// stored deduplicated + partly as overlays (~225 KB; tools/rom_pack.py prof).
+// The MOA Shadow Service Monitor as maintained by PLM (build 9643, 2025), for a
+// ZS-1024 Turbo+, and the firmware that drives the SMUC HDD controller: the
+// driver lives in plane 1 bank 3 (unchanged from the 4.01 image it replaced,
+// which is why the SMUC model needs no rework). Like the
 // GMX table, the {data, overlay} pairs are bound by Config::requestMachine and
 // the LIVE bank's overlay is re-registered on every romInUse change.
 #if PROFROM_IN_FLASH

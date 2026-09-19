@@ -752,38 +752,60 @@ def pack_tsconf():
     print("[tsconf] %d raw pages = %d B in flash (page 1/2/3 shared with other families)"
           % (len(arrays), total))
 
-# ── ProfROM 4.01 (romset R_SCORP_PROF) ────────────────────────────────────────
-# Garry-era Scorpion PROF-ROM: 256 KB = 4 planes x 4 x 16K, the firmware a real
-# ZS-1024 Turbo+ shipped with (speccy4ever groups it as "Prof ROM & ZX-1024").
-# Image = scorp401_91F513AB.rom, CRC32 91F513AB — ProfROM **4.01**, the stable
-# build (4.xx.015 is labelled "Test version" on its own boot screen and its
-# newer driver hangs/misbehaves on virtual-disk copies here; the 4.01 driver is
-# the SAME generation baked into the GMX plane 5, which works). Trade-off: 4.01
-# has NO `HDD boot` 128-menu entry — that was 4.xx.015's one unique feature.
-# (The 4.xx.015 note kept below for when its driver is worth revisiting.)
+# ── ProfROM (romset R_SCORP_PROF) ─────────────────────────────────
+# Scorpion PROF-ROM: 256 KB = 4 planes x 4 x 16K, the firmware a real ZS-1024
+# Turbo+ shipped with (speccy4ever groups it as "Prof ROM & ZX-1024").
 #
-# 4.xx.015 was the newest non-beta build, the only generation whose boot ROM
-# carries the
-# `HDD boot / Monitor / Navigator / options / Exit !` menu (p0b0 0x237F) in place
-# of the classic `128 / 128 TR-DOS / 128 BASIC / Calculator / 48 BASIC /
-# 48 TR-DOS` that every other Scorpion ROM here shows, byte for byte, from v2.94
-# through all ten 4.01 variants. It also adds second (slave) HDD support and a
-# partition manager that knows NTFS / FAT32 / FAT32(LBA) / EXTENDED alongside
-# SMFS / TR-DOS / MicroDOS / IsDOS.
+# Image = ProfRomZS1024_1FFD_v4s.rom, CRC32 9812C53C — the MOA Shadow Service
+# Monitor **v4.44s build 9643** (compiled 21 Aug 2025), Andrew MOA's 1993-1997
+# monitor as maintained by PLM, Orenburg, built for ZS-1024 #1FFD paging. What
+# it adds over the 4.01 image this replaced (2026-09-19, swap requested by the
+# owner; 4.01 = scorp401_91F513AB.rom, CRC32 91F513AB):
+#   - an **`H. HDD boot`** entry in the shell menu — the ONE thing 4.01 lacked
+#     and that only the 4.xx.015 "Test version" used to have, and that build's
+#     newer SMUC driver misbehaved on virtual-disk copies here;
+#   - SD card as a third storage device beside hd1 master/slave (`sd0, sd card`),
+#     FAT32, a Z-Controller row, and Mount on A:/B:/C:/D: plus tape;
+#   - .spg / .sna / Hobeta loading and RAM-bank save/load from the monitor.
+# Its ROM disk is a different set: Fatall 0.25, Proteus 2.20, TestScorpion,
+# ZX-Word, Test INT, RC v1.96 (4.01 carried MagOS, Real Commander, TRDNavig,
+# ZXunzip, Cat HDD and the SMUC/NEMO HDD tools — those run from a TRD on the SD
+# card just as well, which is why losing them was judged cheap).
 #
-# Its plane 0 is NOT the 4.01 one: the service monitor differs by 15736 of 16384
-# bytes, i.e. it is a different program driving the same hardware — which is why
-# the SMUC/paging emulation has to be re-validated against it rather than assumed
-# (the whole 4.01 family shares plane 0 byte for byte, so any of those was a free
-# swap; this is not).
+# It costs only +606 B of flash over 4.01 and the emulation surface is unchanged.
+# Checked against the image before the swap, by DISASSEMBLY, not by byte pattern:
+#   - the SMUC driver is still in plane 1 bank 3 (same #5FBA/#FFBA/#F8BE/#D8BE
+#     port shape, now with more 16-bit #D8/#D9 transfers, and the MC146818 code
+#     moved out of that bank — irrelevant, our decode is by port);
+#   - the 0x0100-0x010F plane switch is the SAME mechanism `kProfPlaneMap` and
+#     the CPU.cpp tap model: the data-read trampoline `LD HL,#010C / LD L,(HL) /
+#     XOR A / OUT (C),A / JP #0000` at plane 1 bank 0 0x0050 and planes 2/3 bank
+#     0 0x0118 (all three resolve to plane 0 through the table), the cross-plane
+#     `JP #010E` at plane 1 bank 3 0x0030, and the identity-slot `JP #0103`
+#     re-entries. Both hooks are needed, as before — peek8 for the trampolines,
+#     fetchOpcode for the jumps.
+#   - the three byte sequences that look like DATA reads of the window
+#     (`3A 05 01` in p1b1, `3A 07 01` in p2b1) disassemble as font/ROM-disk data,
+#     not instructions, so nothing new can fire the tap spuriously — the failure
+#     that took GMX down. Byte-pattern scans of this window have produced a wrong
+#     conclusion twice; disassemble the site before believing one.
+# Unlike every 4.01 build it also drives #1FFD itself (an `LD BC,#1FFD /
+# OUT (C),A` site), i.e. it can be expected to use the ZS-1024 D6/D7 page bits
+# the romset already models and that no 4.01 build ever touched.
+#
+# Its plane 0 is NOT 4.01's (the service monitor is a different program driving
+# the same hardware), so the SMUC/paging emulation has to be re-validated against
+# it on hardware rather than assumed — within one 4.01 family plane 0 is byte for
+# byte identical and a swap there was free; across generations it is not.
 #
 # Deliberately NOT packed against the GMX banks, even though that would save
-# ~48 KB (11 raw banks -> 8): the GMX raw arrays only exist under GMX_IN_FLASH,
-# so keying ProfROM to them would give the generator two output variants and
-# make one romset's flash layout depend on another's build switch. Bases are the
-# ROMs every build ships (Sinclair 128K halves, TR-DOS 5.05D, the v2.94 raw
-# banks) plus ProfROM's OWN raw banks — banks 12-15 (plane 3) are near-copies of
-# planes 0-2, which is where most of the saving comes from anyway.
+# flash: the GMX raw arrays only exist under GMX_IN_FLASH, so keying ProfROM to
+# them would give the generator two output variants and make one romset's flash
+# layout depend on another's build switch. Bases are the ROMs every build ships
+# (Pentagon ROM0, the Sinclair 128K halves, TR-DOS 5.04T, the v2.95 raw banks)
+# plus ProfROM's OWN raw banks. Only planes 0 banks 0/1 (the 128 and 48 BASIC
+# ROMs) are close enough to anything to become overlays; the other 14 banks are
+# the monitor, the shell and the ROM disk and go in raw.
 #
 # Same {data, overlay} table + dynamic registration as GMX: several banks share
 # a base pointer, so the live bank's overlay is (re)registered on every romInUse
@@ -856,7 +878,7 @@ def pack_prof():
 
     total = sum(len(b) for _, b in raws) + sum(len(b) for _, b, _, _, _ in novls)
     banner = ['// Generated by tools/rom_pack.py (pack_prof) — do not edit by hand.',
-              '// Scorpion PROF-ROM v4.01 (scorp401_91F513AB.rom, CRC32 91F513AB), 4 planes',
+              '// Scorpion PROF-ROM v4.44s (ProfRomZS1024_1FFD_v4s.rom, CRC32 9812C53C), 4 planes',
               '// x 4 x 16K banks, deduplicated and partly expressed as overlays over ROMs',
               '// the firmware already ships — see the pack_prof comment in',
               '// tools/rom_pack.py. %d B in flash instead of 262144.' % total,

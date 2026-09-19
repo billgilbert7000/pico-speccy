@@ -279,7 +279,7 @@ void gmxRegisterLiveOverlay(uint8_t bank) {
 #endif
 
 #if PROFROM_IN_FLASH
-// Same job for the ProfROM 4.01 bank table (16 banks), and here for the same
+// Same job for the ProfROM bank table (16 banks), and here for the same
 // reason: plane 3's banks all overlay plane 3 bank 0, and plane 0's two halves
 // overlay the Sinclair 128K arrays this TU owns. See gmxRegisterLiveOverlay.
 void profRegisterLiveOverlay(uint8_t bank) {
@@ -673,7 +673,7 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
         romSetScorp = romSet;
 #if PROFROM_IN_FLASH
         if (romSet == R_SCORP_PROF) {
-            // ProfROM 4.01: 4 planes x 4 banks into rom[0..15], romInUse =
+            // ProfROM: 4 planes x 4 banks into rom[0..15], romInUse =
             // (plane << 2) | bank, plane switched by the 0x0100-0x010F read tap
             // (Ports::gmxProfRomTap). Overlays are registered dynamically per
             // live bank, exactly like GMX — see profRegisterLiveOverlay.

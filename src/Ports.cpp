@@ -2326,12 +2326,14 @@ static inline void gmxTapUpdate() {
   // ...but it IS the mechanism on the plain ProfROM romset (R_SCORP_PROF), which
   // is the firmware ZXMAK2's gate was written against. Armed exactly like its
   // BusProfRomGate: only while SYSEN (1FFD D1 — the service bank at 0x0000) and
-  // only while ROM is actually visible there. M1 ONLY: ProfROM switches planes
-  // by jumping into the window (plane N bank 0 at 0x0118 does LD HL,#010C /
-  // JP (HL); bank 3 at 0x0030 does JP #010E), and its only DATA reads of the
-  // window are LD HL,(#0101) — address bits 2-3 = 0, i.e. the identity slot of
-  // kProfPlaneMap, so a data-read tap could only ever fire spuriously (which is
-  // exactly what took GMX down, see above).
+  // only while ROM is actually visible there. BOTH hooks fire for this romset
+  // (Z80Ops::peek8 and Z80Ops::fetchOpcode, CPU.cpp): the ordinary plane switch
+  // is the DATA read of the trampoline `LD HL,#010C / LD L,(HL)` that plane N
+  // bank 0 copies into RAM, and the M1 half serves the cross-plane jumps
+  // (plane 1 bank 3 does JP #010E at bank offset 0x0030). Shipping this M1-only
+  // was the 2026-09-04 bug — ProfROM ran its RAM test and then fell back into
+  // plane 0's 128 ROM ("black screen, then 48K"). What must stay off is GMX's
+  // tap (its own monitor sweeps the window while checksumming itself).
   if (g_scorp_prof) {
     g_gmx_tap = (Ports::port1FFD & 0x02) && !MemESP::page0ram && !MemESP::newSRAM;
 #if GMX_TRACE
@@ -2547,7 +2549,7 @@ bool Ports::gmxPortWrite(uint16_t address, uint8_t data) {
 
 // ── SMUC — Scorpion Multi Unit Controller (IDE + 24LC16 NVRAM + RTC + ISA) ────
 // Port map, verified three ways: UnrealSpeccy 0.37 Io.cpp, ZXMAK2 IdeSmuc.cs,
-// and a disassembly of the SMUC driver in ProfROM 4.01 plane 1 bank 3 (which is
+// and a disassembly of the SMUC driver in ProfROM plane 1 bank 3 (which is
 // also GMX plane 5 bank 3 — the same code we already ship).
 //
 //   outer decode  A12=A11=A7=A5=A1=1, A0=0    -> low byte #BA / #BE

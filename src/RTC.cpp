@@ -16,8 +16,10 @@
 // The CMOS is battery-backed state that belongs to ONE machine, and different
 // firmwares stamp it differently: ProfROM 4.01 (and the driver inside GMX) keeps
 // signature 0x61 in cell 0x0E, ProfROM 4.xx.015 keeps 0x62, and Mr Gluk owns
-// 0x11 — which sits inside the 0x10-0x3E range both ProfROM generations
-// checksum. Sharing one file therefore made every machine switch end in "CMOS
+// 0x11 — which sits inside the 0x10-0x3E range every ProfROM generation
+// checksums. (The shipped ProfROM is v4.44s since 2026-09-19; its own stamp was
+// not read out of the image, and it does not need to be — per-romset files mean
+// it re-initialises cmos_Scorp.nvr once on first boot and keeps it.) Sharing one file therefore made every machine switch end in "CMOS
 // checksum error", the switched-to firmware re-initialising what the other had
 // written (hw 2026-09-05; harmless but permanent, since each switch re-breaks
 // it for the other side). A deliberate deviation from hardware — a real owner

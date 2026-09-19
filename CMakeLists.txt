@@ -787,7 +787,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE FLASH_SIZE=${FLASH_SIZE})
 # re-provisions from SD. GMX_IN_FLASH=0 remains an escape hatch (drops the ROM,
 # the menu rows and the partition shrink together).
 target_compile_definitions(${PROJECT_NAME} PRIVATE GMX_IN_FLASH=1)
-# Scorpion PROF-ROM v4.01 (romset "ZS-1024 + ProfROM"): ~181 KB of flash for the
+# Scorpion PROF-ROM v4.44s (romset "ZS-1024 + ProfROM"): ~225 KB of flash for the
 # 256 KB image (tools/rom_pack.py prof). It rides the GM.DLS partition shrink the
 # GMX ROM above already asks for, so PROFROM_IN_FLASH=1 needs no defsym of its
 # own — but it does assume GMX_IN_FLASH=1; turning GMX off while leaving this on
