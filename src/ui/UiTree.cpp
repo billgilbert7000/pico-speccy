@@ -511,7 +511,7 @@ static const Option opt_mach_karabas[] = {
 // from NVS written on a board that HAS the chip (requestMachine + bootNotice).
 // `#if GMX_IN_FLASH` is still the build escape hatch that drops the ROM entirely.
 static const Option* mach_scorpOpts(uint8_t& cnt) {
-    static Option opts[5];
+    static Option opts[6];
     static uint8_t n = 0;
     if (!n) {
         opts[n++] = { TXT_ROM_SCORP,      NM_MACH(A_SCORP, R_SCORP),      TXT_ROM_SCORP_S      };
@@ -519,8 +519,11 @@ static const Option* mach_scorpOpts(uint8_t& cnt) {
 #if GMX_IN_FLASH
         // butter PSRAM is what GMX needs; romsUsable() is whether its ROM is still
         // in flash at all (FlashRoms.h — the GM.DLS bank may have been given it).
-        if (butter_psram_size() && FlashRoms::romsUsable())
+        // Both GMX images gate together: same ROM region, same butter requirement.
+        if (butter_psram_size() && FlashRoms::romsUsable()) {
         opts[n++] = { TXT_ROM_SCORP_GMX,  NM_MACH(A_SCORP, R_SCORP_GMX),  TXT_ROM_SCORP_GMX_S  };
+        opts[n++] = { TXT_ROM_SCORP_GMX6, NM_MACH(A_SCORP, R_SCORP_GMX6),TXT_ROM_SCORP_GMX6_S };
+        }
 #endif
         opts[n++] = { TXT_ROM_SCORP_1024, NM_MACH(A_SCORP, R_SCORP_1024), TXT_ROM_SCORP_1024_S };
 #if PROFROM_IN_FLASH
@@ -1152,7 +1155,7 @@ static const Option opt_pref_pent[] = {
 // is also what lets the GMX entry be dropped at RUNTIME on a butter-less module
 // (see mach_scorpOpts) without moving "Last".
 static const Option* pref_scorpOpts(uint8_t& cnt) {
-    static Option opts[6];
+    static Option opts[7];
     static uint8_t n = 0;
     if (!n) {
         opts[n++] = { TXT_ROM_SCORP,      0, TXT_ROM_SCORP_S      };
@@ -1160,9 +1163,11 @@ static const Option* pref_scorpOpts(uint8_t& cnt) {
         opts[n++] = { TXT_ROM_SCORP_1024, 2, TXT_ROM_SCORP_1024_S };
         opts[n++] = { TXT_ROM_SCORP_PROF, 3, TXT_ROM_SCORP_PROF_S };
 #if GMX_IN_FLASH
-        if (butter_psram_size() && FlashRoms::romsUsable())
+        if (butter_psram_size() && FlashRoms::romsUsable()) {
         opts[n++] = { TXT_ROM_SCORP_GMX,  4, TXT_ROM_SCORP_GMX_S  };
-        opts[n++] = { TXT_ROM_LAST,       5, nullptr };
+        opts[n++] = { TXT_ROM_SCORP_GMX6, 5, TXT_ROM_SCORP_GMX6_S };
+        }
+        opts[n++] = { TXT_ROM_LAST,       6, nullptr };
 #else
         opts[n++] = { TXT_ROM_LAST,       4, nullptr };
 #endif

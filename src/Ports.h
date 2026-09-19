@@ -92,7 +92,7 @@ public:
     // GMX the ProfROM plane — then recoverPage0.
     static void scorpionRomUpdate();
 
-    // ── Scorpion GMX latches (R_SCORP_GMX only; reset clears all) ──────────────
+    // ── Scorpion GMX latches (either GMX romset; reset clears all) ────────────
     // port #00 global config: D5=BLKEXT (GMX ports off), D4=fixrom (block plane
     // writes via #7EFD), D3+D0-2 arm the magic_shift readout + reset.
     static uint8_t gmxPort00;

@@ -186,7 +186,7 @@ void CPU::reset() {
     Z80Ops::isScorpion = (Config::arch == A_SCORP);
     // Even-M1 is a Yellow-PCB-only trait (see CPU.h); Green and GMX dropped it.
     g_scorp_even_m1 = Z80Ops::isScorpion && (Config::romSetScorp == R_SCORP);
-    g_scorp_gmx = Z80Ops::isScorpion && (Config::romSetScorp == R_SCORP_GMX);
+    g_scorp_gmx = Z80Ops::isScorpion && isScorpGmxRomset(Config::romSetScorp);
     g_scorp_prof = Z80Ops::isScorpion && (Config::romSetScorp == R_SCORP_PROF);
     g_scorp_banked = g_scorp_gmx || g_scorp_prof;
     // ProfROM ships on the ZS-1024 Turbo+ (speccy4ever files it under "Prof ROM

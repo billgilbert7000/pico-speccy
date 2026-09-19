@@ -5487,48 +5487,53 @@ are DIFFERENT KINDS OF STATEMENT, which is the part worth keeping:
   TS-Conf ROM overlay (`FlashRoms::extendedLive()`), i.e. the largest a bank can ever
   be on any board. Below it no configuration can hold a stock gm.dls (1668026 B,
   rounded up to a 4 KB multiple = 1632 KB), so it is broken rather than traded.
-- **soft, `GM_BANK_MIN_KB`, default 1632**: the plain region, i.e. exactly the wall the
-  fixed partition used to be. Kept as the default so this change moves no board.
+- **soft, `GM_BANK_MIN_KB`, default 0**: the plain region, i.e. the wall the fixed
+  partition used to be. It shipped at 1632 for one day and came down the same day when
+  the second GMX image landed (owner's call) — see below for what that costs.
 
-**Lowering the soft floor is nearly free and the reason is worth reading before the
-next flash squeeze.** Between the two floors: a no-butter board just trades its
-unreachable ROMs sooner (nothing lost — GMX and TS-Conf are gated off there anyway),
-and a butter board never notices because `Buffer` puts the bank in the arena and the
-flash region goes unused. The one corner that pays is butter present but its arena too
-small for the bank — Murmuzavr at 32 MB reserves all but the 512 KB minimum — and
-there the bank is refused with a log line, not a crash.
+**Lowering the soft floor is nearly free, and this is the reasoning to re-read before
+the next flash squeeze.** Between the two floors: a board with no QSPI PSRAM just
+trades its unreachable ROMs sooner (nothing lost — GMX and TS-Conf are gated off there
+anyway), and a butter board never notices because `Buffer` puts the bank in the arena
+and the flash region goes unused. The one corner that pays is butter present but its
+arena too small for the bank — Murmuzavr at 32 MB reserves all but the 512 KB minimum —
+and there the bank is refused with a log line and an on-screen notice, not a crash.
+**Consequence now visible in the table: the plain region on every 4 MB variant
+(1 613 824 - 1 662 976) is BELOW the stock converted gm.dls (1 668 026), so a no-butter
+4 MB board installing the stock bank now trades the GMX + TS-Conf ROM overlay.** That
+is free on that board and irreversible until a reflash — the standing cost of the
+trade, not a new one.
 
-Measured over all 14 variants (MinSizeRel, 2026-09-20). `free@1632` is what the build
-has before the default floor stops it; `free@min=0` is what the same build has before
-the HARD floor does:
+Measured over all 14 variants (MinSizeRel, 2026-09-20, both GMX images in flash).
+`bank region` is what the build leaves, and with the floor at 0 it is also the whole
+headroom before the soft ASSERT; `free@hard` is what remains before the HARD floor
+stops the build:
 
-| variant | fw size | bank region | free@1632 | ext. window | free@min=0 |
-|---|---|---|---|---|---|
-| m2p2 ILI9341 / ST7789 | 2473820 | 1720320 | 49152 | 2088960 | 417792 |
-| m1p2 ILI9341 / ST7789 | 2477916 | 1716224 | 45056 | 2084864 | 413696 |
-| m2p2 TV-SOFT | 2482012 | 1712128 | 40960 | 2080768 | 409600 |
-| m1p2 TV-SOFT | 2486108 | 1708032 | 36864 | 2076672 | 405504 |
-| DVp2 VGA-HDMI | 2502492 | 1691648 | 20480 | 2060288 | 389120 |
-| m1p2 / m2p2 / PCp2 / z0p2 VGA-HDMI | 2506588 | 1687552 | 16384 | 2056192 | 385024 |
-| **z0p2 VGA-HDMI-PIOUSB** | 2522972 | 1671168 | **0** | 2039808 | 368640 |
-| m1p2w / m2p2w (16 MB) | 2789212 | **13987840** | 12316672 | 14356480 | 12685312 |
+| variant | fw size | bank region | ext. window | free@hard |
+|---|---|---|---|---|
+| m2p2 ILI9341 / ST7789 | 2530340 | 1662976 | 2088960 | 417792 |
+| m1p2 ILI9341 / ST7789 | 2534436 | 1658880 | 2084864 | 413696 |
+| m2p2 TV-SOFT | 2538532 | 1654784 | 2080768 | 409600 |
+| m1p2 TV-SOFT | 2542628 | 1650688 | 2076672 | 405504 |
+| DVp2 VGA-HDMI | 2559012 | 1634304 | 2060288 | 389120 |
+| m1p2 / m2p2 / PCp2 / z0p2 VGA-HDMI | 2563108 | 1630208 | 2056192 | 385024 |
+| z0p2 VGA-HDMI-PIOUSB | 2579492 | 1613824 | 2039808 | 368640 |
+| m1p2w / m2p2w (16 MB) | 2845732 | **13930496** | 14356480 | 12685312 |
 
 Three things that table says:
 
-- **z0p2-PIOUSB sits exactly ON the default floor.** Not a regression from the dynamic
-  region: the firmware grew ~300 B (the refusal guard in `provisionAtBoot`) and crossed
-  a 4 KB page, and `.psramroms : ALIGN(4096)` moves everything after it by a whole page
-  — so a few hundred bytes of code always shows up as 4096 here. **Any further growth
-  on that variant needs `GM_BANK_MIN_KB` lowered** (or `GMX_IN_FLASH=0` /
-  `PROFROM_IN_FLASH=0`), which is the change this rework exists to make cheap.
-- **The 16 MB boards were the clearest win**: the bank went 1671168 → 13987840 B with
-  no board branch at all. The old `__gm_bank_size` constant handed them 1.59 MB and
-  left ~12 MB of flash unreachable by anything.
-- **The extended window barely moved and that is expected**: it is fixed by where
-  `.psramroms` starts, i.e. by the size of the NON-ROM firmware, which this change does
-  not touch. So a floor change buys firmware headroom, NOT bank ceiling — DLSbyXG
-  (2052616 B) still does not fit on z0p2-PIOUSB (2039808) or DVp2 (2060288 fits by
-  7672 B). Growing the CEILING is the ROM-tier idea, a separate job.
+- **The `ext. window` column is IDENTICAL to the one measured before the second GMX
+  image was added** (2 088 960 / … / 2 039 808 / 14 356 480, byte for byte). That is
+  the whole argument for why a second 512 KB ROM was affordable: `.psramroms` grows
+  UPWARD from `__psramrom_start`, which is fixed by the non-ROM firmware, so ROMs added
+  to it cost the board that trades them exactly nothing. Only the plain region moved
+  (e.g. z0p2-PIOUSB 1 671 168 → 1 613 824).
+- **The 16 MB boards were the clearest win of the dynamic region**: the bank went
+  1 671 168 → 13 930 496 B with no board branch at all. The old `__gm_bank_size`
+  constant handed them 1.59 MB and left ~12 MB of flash unreachable by anything.
+- **`free@hard` is the real firmware headroom** — 360-420 KB on 4 MB boards, where the
+  fixed partition left 4-12 KB. The wall that remains is the hard floor, and past it
+  the levers are `GMX_IN_FLASH=0` / `PROFROM_IN_FLASH=0`.
 
 **A bank that cannot be placed is now announced** (`MidiSynth::provisionAtBoot`):
 `" GM.DLS bank not installed: N KB, M KB available "` as a bootNotice plus a log line
@@ -7164,6 +7169,61 @@ values are indices into `kPrefScorp`, which is why dropping the entry does not
 move "Last" — that is what the "1024 and ProfROM sit BEFORE the conditional GMX
 entry" rule buys.
 
+- **TWO romsets over two images** (2026-09-20, **hw-confirmed the same day for the
+  v5s+v5se pair — owner's verdict "работает"**; the second image was then swapped to
+  v6s at the owner's request and THAT pair is NOT hw-tested): `R_SCORP_GMX`
+  "ZS-256 Turbo+ & GMX" = `ProfRomGMX_v5s.rom` (v5.44.9643), `R_SCORP_GMX6`
+  "ZS-256 Turbo+ & GMX v6" = `ProfRomGMX_v6s.rom` (v6.44.9643, CRC32 FCA97CD6).
+  `isScorpGmxRomset()` (ArchRom.h) is the "is the GMX firmware live" test and EVERY
+  gate uses it — `g_scorp_gmx` in CPU::reset, the butter/traded fallbacks and the
+  128-page boundary in requestMachine, `wantedPages()`, the boot check in
+  ESPectrum::setup, resolveConstraints, Snapshot. Only requestMachine and
+  `gmxLiveBankTable()` care WHICH. Both entries gate together in the menus (same ROM
+  region, same butter requirement) and sit LAST in `kPrefScorp`, so the
+  preferred-romset indices stay build- and runtime-independent.
+- **v5 vs v6 is WHICH SCREEN THE FIRMWARE DRAWS ITSELF ON**, not a hardware
+  difference: v5's Shadow monitor, navigator and debugger use the standard ZX screen,
+  v6's use the GMX **extended 640x200x16** mode (`gfx_ext`, `#7EFD` bit 3 — the mode
+  this emulator already renders through the DS80 pair-slot machinery). Evidence, from
+  the archive's own `!changes.txt`: every v6-tagged entry is a navigator/debugger
+  feature, and `GMXv6: в отладчике в команде SCReen добавились еще два возможных
+  параметра #39(57)/#3A(58) установка расширенных графических экранов`. v5 merely
+  PRESERVES the mode (`монитор определяет и восстанавливает при выходе режим
+  расширенного экрана`). ROM disk 120 KB against v5's 130 (`file_id.diz`).
+  **SETTLED, do not re-open: our 57/59 is right and is GMX's own.** That changelog
+  line names `#39(57)/#3A(58)` as the debugger's SCReen PARAMETERS, and it briefly
+  looked like a contradiction. MAME's `scorpiongmx_state::spectrum_update_screen`
+  (sinclair/scorpion.cpp), which this renderer was ported from, is unambiguous:
+  `screen_location = ram + ((BIT(m_port_7ffd_data, 3) ? 0x3b : 0x39) << 14)` and
+  `attr = *(scr + (0x40 << 14))` — bitmap page 0x39/0x3B = 57/59, attributes +64
+  pages = 121/123, exactly what `Video.cpp` does. It is also NOT inherited from
+  Profi, which the +2 spacing might suggest: Profi DS80 renders its bitmap from
+  `ram[4]`/`ram[6]` and its colour from pages **56/58** (four sites, `videoLatch ?
+  58 : 56`). Two different machines, two different page pairs.
+  **v6 is the heaviest user of the 640x200 path in the tree**: no guest drives it as
+  continuously as a firmware that draws its whole UI there.
+- **Cost: v6s adds 212 992 B, v5se would have added 56 498** (that pair shipped for
+  part of 2026-09-20 and is recorded here because the packing lesson survives the
+  swap). 19 of v6s's 32 banks are byte-identical to v5s's — planes 0-3 whole, plus
+  p4b0/b1/b3 — and bind the SAME arrays; the 13 that differ are ~15 KB apart each,
+  i.e. genuinely different code, so all 13 go RAW and no overlay threshold would
+  help. `pack_gmx` packs both images in ONE pass over a SHARED `bases` list (v5s
+  first, its raws become bases) — that is the whole mechanism, and it is what made
+  v5se cost 56 KB when 11 of its 14 differing banks fell under `GMX_OVL_DIFF_MAX`.
+  Two rules that came out of it: **a base must be a RAW bank** (v5s's p4b1 and p4b3
+  are themselves overlays, so a twin cannot chain onto them and must take the
+  EXTERNAL base instead), and **the base choice stays by DIFF COUNT, not blob size**
+  — choosing the smallest blob per bank greedily turns raws into overlays and breaks
+  the dedup chain later banks depend on (measured on v5s: 337573 B against 335678).
+- **Adding a GMX image is FREE on the board that matters, and the reason is the
+  direction `.psramroms` grows.** That section starts at `__psramrom_start`, fixed by
+  the size of the NON-ROM firmware, and grows UPWARD — so the EXTENDED window a board
+  with no QSPI PSRAM trades for (`FlashRoms::extendedLive()`) is **unchanged**:
+  2 052 096 B on DVp2 before v5se, after v5se, and after the v6s swap, measured all
+  three times. Only the plain region shrinks (1 691 648 → 1 634 304 → 1 478 656), and
+  that one is used solely by a board WITH butter PSRAM — which puts the bank in the
+  arena and never touches flash. What the first addition did cost is the soft floor:
+  `GM_BANK_MIN_KB` 1632 → 0 (owner's call, 2026-09-20).
 - **ROM is EMBEDDED in flash, deduplicated + overlaid** (`#if GMX_IN_FLASH`,
   all boards). **The image is ProfROM GMX v5.44.9643 since 2026-09-19, and the
   owner's verdict that day was "работает"** — not itemised beyond that, so read
@@ -7183,14 +7243,21 @@ entry" rule buys.
   (`/RRL/BOOT.$C`, `FASTBOOT.INI`, `SHELL.RRL`), 4 BASIC/TR-DOS + Analyser,
   5 "MOA Shadow Service Monitor 2022-2025 v5.44s modified by PL", 6-7 the
   ~130 KB ROM disk.
-- **The archive ships a second image, `ProfRomGMX_v5se.rom`, and we deliberately
-  do NOT take it**: "e" = ВГ93 emulation over the HDD pseudo-disks, which is for
-  a machine WITHOUT a working FDC — with it, direct WD1793 programming against
-  real disks stops working and `#3D13` access is "substantially slowed" (the
-  archive's `file_id.diz`). We emulate a full WD1793 with TRD/SCL/FDI images, so
-  the plain `v5s` is the right build. The two differ only in planes 4-7 and cost
-  the same flash (380849 vs 380807 B unpacked), so swapping is one `.bin` + the
-  CRC in `pack_gmx`.
+- **The `se` images (`ProfRomGMX_v5se.rom` / `v6se`) are NOT shipped**, and the
+  reasoning that first rejected them was wrong twice over, so it is worth stating
+  once: `file_id.diz`'s warning that direct WD1793 programming stops working and
+  `#3D13` is "substantially slowed" sits in the paragraph for the **Nemo** builds
+  (`v4nu`) and opens with "в отличии от Smuc" — it describes that flavour, not the
+  SMUC one we use. What "эмуляция ВГ93" actually is: the firmware standing in for the
+  КР1818ВГ93 (the WD1793 clone) so that software which programs the chip DIRECTLY —
+  loaders, copiers, protections, everything that bypasses the TR-DOS `#3D13` API —
+  can be served from HDD pseudo-disks. Measurable in the images: the TR-DOS bank
+  p4b3 carries 69 direct `IN`/`OUT` on `#1F/#3F/#5F/#7F/#FF` in v5s and 36 in v5se.
+  It aims at a machine WITHOUT a working FDC, and this emulator has a full WD1793
+  with real TRD/SCL/FDI images — which is the honest reason to leave it out, not the
+  misread sentence. v5se did ship for part of 2026-09-20 (hw-confirmed) before the
+  owner swapped the slot to v6s. Upstream also has `su` builds (SWITCHABLE emulation,
+  ROM disk 69 KB against 130) — the better option if that behaviour is ever wanted.
 - **Flash: 335678 B, and it cost the GM.DLS partition another 32 KB.** The new
   image barely deduplicates — **30 of its 32 banks are unique** and the pairwise
   diffs between them are 15-16 KB, against v5.00's near-empty plane 3 and

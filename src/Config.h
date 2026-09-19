@@ -185,7 +185,7 @@ public:
 #if GMX_IN_FLASH
         // GMX requires live QSPI (butter) PSRAM — without it requestMachine falls
         // the pick back to Yellow, so the strip must not grow either.
-        if (a == A_SCORP && (rs == R_NONE ? romSetScorp : rs) == R_SCORP_GMX &&
+        if (a == A_SCORP && isScorpGmxRomset(rs == R_NONE ? romSetScorp : rs) &&
             n < 128 && butter_psram_size() > 0)
             n = 128;
 #endif

@@ -110,11 +110,8 @@ check('ProfROM v4.44s CRC32', '%08X' % (zlib.crc32(prof) & 0xffffffff), '9812C53
 # live bank's overlay on every romInUse change), which is exactly what a per-bank check
 # against the dump cannot be trusted to catch on its own — so the whole 512 KB image is
 # compared, with a pinned CRC for the image identity.
-print("Scorpion GMX ProfROM v5.44 (32 banks from the generated table):")
+print("Scorpion GMX ProfROM v5.44 / v6.44 (32 banks each, from the generated tables):")
 gmx_tbl = open(os.path.join(R, 'scorpion', 'scorpion_gmx_banks.h'), encoding='latin-1').read()
-rows = re.findall(r'\{\s*(\w+)\s*,\s*(\w+)\s*\}\s*,\s*//\s*plane', gmx_tbl)
-if len(rows) != 32:
-    fails.append('GMX table rows'); print("  FAIL GMX table: %d rows, want 32" % len(rows))
 gmx_syms = {'gb_rom_0_pentagon_128k': base_pent,
             'gb_rom_1_sinclair_128k': s128_1,
             'gb_rom_4_trdos_504t':    base_trdos}
@@ -122,13 +119,27 @@ def gmx_sym(sym):
     if sym not in gmx_syms:
         gmx_syms[sym] = arr('scorpion/scorpion_gmx_rom.c', sym)
     return gmx_syms[sym]
-gmx_banks = []
-for dsym, osym in rows:
-    data = gmx_sym(dsym)
-    gmx_banks.append(data if osym == 'nullptr' else apply_overlay(data, gmx_sym(osym)))
-gmx = b''.join(gmx_banks)
-check('GMX v5.44 image', gmx, dump('scorpion/src/profrom_gmx_v5s.bin'))
-check('GMX v5.44 CRC32', '%08X' % (zlib.crc32(gmx) & 0xffffffff), '6E9FD318')
+# Each table must be sliced by NAME, not by order: the two share most of their arrays
+# and 19 of v6s's rows are v5s's rows verbatim, so reading "the first 32 rows" would
+# silently verify v5s twice.
+for tsym, src, want_crc, label in (
+        ('gb_rom_scorpion_gmx_banks',   'profrom_gmx_v5s.bin', '6E9FD318', 'v5s'),
+        ('gb_rom_scorpion_gmx_6_banks', 'profrom_gmx_v6s.bin', 'FCA97CD6', 'v6s')):
+    body = gmx_tbl.split('%s[32] = {' % tsym, 1)
+    if len(body) != 2:
+        fails.append('GMX table %s' % label); print("  FAIL GMX %s: table not found" % label); continue
+    rows = re.findall(r'\{\s*(\w+)\s*,\s*(\w+)\s*\}\s*,\s*//\s*plane',
+                      body[1].split('};', 1)[0])
+    if len(rows) != 32:
+        fails.append('GMX table rows %s' % label)
+        print("  FAIL GMX %s table: %d rows, want 32" % (label, len(rows))); continue
+    banks = []
+    for dsym, osym in rows:
+        data = gmx_sym(dsym)
+        banks.append(data if osym == 'nullptr' else apply_overlay(data, gmx_sym(osym)))
+    gmx = b''.join(banks)
+    check('GMX %s image' % label, gmx, dump('scorpion/src/' + src))
+    check('GMX %s CRC32' % label, '%08X' % (zlib.crc32(gmx) & 0xffffffff), want_crc)
 
 # The ZX-Evo BIOS sets we ship, reassembled from what is actually in flash. Page 0 is
 # the only page with a patch (the Setup footer's exit key); pages 1-3 must be verbatim.

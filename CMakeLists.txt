@@ -790,14 +790,17 @@ message(STATUS "Code overlays: .tsovl ${TSOVL_WIN_SIZE_EFFECTIVE} B, .dmaovl ${D
 
 # The GM.DLS bank is everything above the firmware, to the top of flash — a dynamic
 # region since 2026-09-20, not a fixed partition (rp2350-memmap.ld has the full
-# reasoning). This is the floor the build refuses to fall below: 1632 KB = the stock
-# converted gm.dls (1668026 B) rounded up to a 4 KB multiple, i.e. exactly what the
-# old fixed partition guaranteed. It is a POLICY number — on a board with no QSPI
-# PSRAM the bank can trade the GMX + TS-Conf ROM overlay for ~2.0 MB instead, and on a
-# board WITH it the bank lives in the butter arena and never touches flash — so
-# lowering it hands flash to the firmware and costs the flash bank only on a butter
-# board whose arena is already full. Read the __gm_bank_min comment before doing that.
-set(GM_BANK_MIN_KB 1632 CACHE STRING "Minimum GM.DLS bank region, KB (rp2350-memmap.ld __gm_bank_min)")
+# reasoning). This is the floor the build refuses to fall below, and it is DELIBERATELY
+# 0: the guarantee that matters is the HARD floor in the linker script (the extended
+# window >= 1632 KB = a stock gm.dls), and this soft one only describes the region a
+# board gets WITHOUT trading the ROM overlay. Both boards it could speak for ignore it —
+# with no QSPI PSRAM the bank trades the GMX + TS-Conf ROMs for ~2.0 MB (they are
+# unreachable there anyway), and with QSPI PSRAM the bank lives in the butter arena and
+# never touches flash. It was 1632 for one day (2026-09-20) and came down when the
+# second GMX image landed; the one corner it protected — butter present but its arena
+# too small, i.e. Murmuzavr at 32 MB — now degrades to a logged, on-screen "bank not
+# installed" instead of a build failure. Raise it to 1632 to get the old wall back.
+set(GM_BANK_MIN_KB 0 CACHE STRING "Minimum GM.DLS bank region, KB (rp2350-memmap.ld __gm_bank_min)")
 message(STATUS "GM.DLS bank region: >= ${GM_BANK_MIN_KB} KB (dynamic: firmware end .. top of flash)")
 
 configure_file("${CMAKE_SOURCE_DIR}/rp2350-memmap.ld" "${CMAKE_BINARY_DIR}/rp2350-memmap.ld" @ONLY)
@@ -811,14 +814,16 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE FLASH_SIZE=${FLASH_SIZE})
 # plugged-in Pico 2 MODULE, not of the carrier board (a Murmulator 1 takes a module
 # with PSRAM on XIP CS1 = GPIO19 just fine), so the gate is the RUNTIME butter
 # probe: without a chip the GMX pick falls back to Yellow PCB
-# (Config::requestMachine + resolveConstraints). Its ~328 KB come straight out of
-# what is left for the GM.DLS bank, which is now everything above the firmware
-# (rp2350-memmap.ld): on 4 MB that leaves the bank ~1.60-1.61 MB against the
-# GM_BANK_MIN_KB floor of 1632 KB, i.e. the same few KB of slack the old fixed
-# partition had, but the wall is one number instead of a partition base. A bank
-# already programmed at a different base fails the header check and re-provisions
-# from SD. GMX_IN_FLASH=0 remains an escape hatch (drops the ROM and the menu rows;
-# the bank region grows by itself).
+# (Config::requestMachine + resolveConstraints). TWO images ship as two romsets
+# (v5.44 and v6.44, the latter drawing its own tools in the extended 640x200 screen)
+# for ~549 KB total — the second adds 212 992 B, with 19 of its 32 banks shared with
+# the first because pack_gmx packs both over one base list. They come
+# straight out of what is left for the GM.DLS bank, which is now everything above the
+# firmware (rp2350-memmap.ld): on 4 MB that leaves the bank ~1.60-1.63 MB, and the
+# EXTENDED window a no-QSPI-PSRAM board can trade for is untouched by them (the ROM
+# section grows upward, not downward). A bank already programmed at a different base
+# fails the header check and re-provisions from SD. GMX_IN_FLASH=0 remains an escape
+# hatch (drops both ROMs and the menu rows; the bank region grows by itself).
 target_compile_definitions(${PROJECT_NAME} PRIVATE GMX_IN_FLASH=1)
 # Scorpion PROF-ROM v4.44s (romset "ZS-1024 + ProfROM"): ~225 KB of flash for the
 # 256 KB image (tools/rom_pack.py prof). Like every other ROM it comes out of the

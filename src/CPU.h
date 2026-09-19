@@ -96,7 +96,7 @@ visit https://zxespectrum.speccy.org/contacto
 // A plain global tested once per opcode fetch (the g_ngs_zxdma pattern) — set in
 // CPU::reset only, so it can never be stale mid-frame.
 extern bool g_scorp_even_m1;
-// Scorpion GMX romset live (R_SCORP_GMX) — set in CPU::reset, gates the GMX port
+// A GMX romset live (isScorpGmxRomset) — set in CPU::reset, gates the GMX port
 // family, the 2 MB page composition and the ProfROM plane arithmetic.
 extern bool g_scorp_gmx;
 // See CPU.cpp: a Timex machine decodes #FF on the low byte alone.

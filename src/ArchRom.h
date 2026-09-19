@@ -59,6 +59,7 @@
     X(R_SCORP,          "Scorp",            "ZS-256 Turbo (Yellow)")      \
     X(R_SCORP_GR,       "ScorpGr",          "ZS-256 Turbo+ (Green)")      \
     X(R_SCORP_GMX,      "ScorpGMX",         "ZS-256 Turbo+ & GMX")        \
+    X(R_SCORP_GMX6,     "ScorpGMX6",        "ZS-256 Turbo+ & GMX v6")     \
     X(R_SCORP_1024,     "Scorp1024",        "ZS-1024 Turbo+")             \
     X(R_SCORP_PROF,     "ScorpProf",        "ZS-1024 + ProfROM")          \
     X(R_ALF1,           "ALF1",             "ALF cartridge")      \
@@ -171,6 +172,17 @@ inline bool isTc2068Romset(RomsetIdx r) { return r == R_TC2068; }
 // "Is the SCLD the machine's own ULA?" — both Timex romsets force Config::timex_video
 // on and the SAA1099 off, and both take the SCLD #FF register unconditionally.
 inline bool isTimexRomset(RomsetIdx r) { return r == R_TC2048 || r == R_TC2068; }
+
+// The two GMX firmware images are one romset family over the same machine: same
+// TMgmx loader, same paging, same hardware. They differ in which screen the FIRMWARE
+// draws its own tools on — v5's Shadow monitor/navigator/debugger use the standard ZX
+// screen, v6's use the GMX extended 640x200x16 mode — so 19 of their 32 banks are
+// byte-identical and share arrays in flash. Anything that asks "is the GMX firmware
+// live?" must accept both; only Config::requestMachine and gmxLiveBankTable() care
+// WHICH. NB v6 leans on the 640x200 pair-slot path far harder than any guest does.
+inline bool isScorpGmxRomset(RomsetIdx r) {
+    return r == R_SCORP_GMX || r == R_SCORP_GMX6;
+}
 
 inline bool isPlus3Romset(RomsetIdx r) {
     return r == R_P3 || r == R_P3E || r == R_P3DIV;

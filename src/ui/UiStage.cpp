@@ -272,7 +272,8 @@ static const RomsetIdx kPrefPent[] = { R_PENT, R_128K_CS, R_LAST };
 // 1024 and ProfROM sit BEFORE the conditional GMX entry so opt_pref_scorp's
 // indices (UiTree.cpp) are identical on both build variants.
 #if GMX_IN_FLASH
-static const RomsetIdx kPrefScorp[] = { R_SCORP, R_SCORP_GR, R_SCORP_1024, R_SCORP_PROF, R_SCORP_GMX, R_LAST };
+static const RomsetIdx kPrefScorp[] = { R_SCORP, R_SCORP_GR, R_SCORP_1024, R_SCORP_PROF,
+                                        R_SCORP_GMX, R_SCORP_GMX6, R_LAST };
 #else
 static const RomsetIdx kPrefScorp[] = { R_SCORP, R_SCORP_GR, R_SCORP_1024, R_SCORP_PROF, R_LAST };
 #endif
@@ -1184,7 +1185,11 @@ static void resolveConstraints(CommitReport& rep) {
         // a chip, requestMachine would silently fall the pick back to Yellow (its
         // bootNotice only shows at boot, not mid-session); retarget the staged pick
         // here so the menu reports what will actually happen.
-        if (staged(SET_MACHINE) == NM_MACH(A_SCORP, R_SCORP_GMX) && butter_psram_size() == 0)
+        // Both GMX images, same rule (isScorpGmxRomset — the staged value carries the
+        // romset in its low byte).
+        if (((staged(SET_MACHINE) >> 8) & 0xFF) == A_SCORP &&
+            isScorpGmxRomset((RomsetIdx)(staged(SET_MACHINE) & 0xFF)) &&
+            butter_psram_size() == 0)
             changed |= force(SET_MACHINE, NM_MACH(A_SCORP, R_SCORP),
                              rep, "GMX needs QSPI PSRAM - using Yellow PCB");
 
@@ -1192,7 +1197,8 @@ static void resolveConstraints(CommitReport& rep) {
         // GM.DLS bank (FlashRoms.h). requestMachine() retargets them too, but only its
         // bootNotice would say so; this is what makes the menu answer mid-session.
         if (!FlashRoms::romsUsable()) {
-            if (staged(SET_MACHINE) == NM_MACH(A_SCORP, R_SCORP_GMX))
+            if (((staged(SET_MACHINE) >> 8) & 0xFF) == A_SCORP &&
+                isScorpGmxRomset((RomsetIdx)(staged(SET_MACHINE) & 0xFF)))
                 changed |= force(SET_MACHINE, NM_MACH(A_SCORP, R_SCORP),
                                  rep, "GMX ROM traded for the GM.DLS bank");
             if (((staged(SET_MACHINE) >> 8) & 0xFF) == A_TSCONF)

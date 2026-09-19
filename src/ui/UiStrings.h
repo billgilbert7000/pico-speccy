@@ -285,6 +285,10 @@
 #define TXT_ROM_SCORP_GR_S   "ZS-256T+"
 #define TXT_ROM_SCORP_GMX    "ZS-256 Turbo+ & GMX"
 #define TXT_ROM_SCORP_GMX_S  "GMX"
+// The v6 image: the same firmware whose OWN monitor/navigator/debugger are drawn in
+// the GMX extended 640x200x16 screen instead of the standard ZX one.
+#define TXT_ROM_SCORP_GMX6   "ZS-256 Turbo+ & GMX v6"
+#define TXT_ROM_SCORP_GMX6_S "GMX v6"
 #define TXT_ROM_SCORP_1024   "ZS-1024 Turbo+"
 #define TXT_ROM_SCORP_1024_S "ZS-1024T+"
 #define TXT_ROM_SCORP_PROF   "ZS-1024 + ProfROM"

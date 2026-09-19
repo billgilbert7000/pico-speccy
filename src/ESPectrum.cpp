@@ -959,7 +959,7 @@ void ESPectrum::setup() {
   // both need the full 128-page strip regardless of the Murmuzavr pick. GMX
   // requires live QSPI (butter) PSRAM (requestMachine falls the pick back to
   // Yellow otherwise), so don't grow the strip without it.
-  if (Config::arch == A_SCORP && Config::romSetScorp == R_SCORP_GMX && MEM_PG_CNT < 128 &&
+  if (Config::arch == A_SCORP && isScorpGmxRomset(Config::romSetScorp) && MEM_PG_CNT < 128 &&
       butter_psram_size() > 0)
     MEM_PG_CNT = 128;
 #endif

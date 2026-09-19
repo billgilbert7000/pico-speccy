@@ -272,8 +272,19 @@ extern std::string g_snapshot_loading_path;  // Snapshot.cpp — snapshot mid-lo
 // 16 KB copy each — 32 KB wasted, and worse, gmxTapUpdate would then register
 // addresses that never match the ones rom[] was bound to in this TU, so the
 // overlays would silently never apply.
+
+// WHICH of the two GMX images is bound (v5.44 or v6.44 — they differ in which screen
+// the firmware draws its own tools on). They share 19 of 32 banks outright, and a v5s
+// RAW bank may be the BASE of the other image's overlay, so one base pointer can carry
+// a different overlay per romset — which is exactly why the registration is
+// per-live-bank and not static. Only one image is ever bound at a time.
+const scorpion_gmx_bank_t* gmxLiveBankTable() {
+    return Config::romSetScorp == R_SCORP_GMX6 ? gb_rom_scorpion_gmx_6_banks
+                                                : gb_rom_scorpion_gmx_banks;
+}
+
 void gmxRegisterLiveOverlay(uint8_t bank) {
-    const scorpion_gmx_bank_t& bk = gb_rom_scorpion_gmx_banks[bank & 31];
+    const scorpion_gmx_bank_t& bk = gmxLiveBankTable()[bank & 31];
     MemESP::registerOverlay(bk.data, bk.overlay);
 }
 #endif
@@ -302,7 +313,7 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
             OSD::bootNotice("TS-Conf ROM traded for the GM.DLS bank - using Pentagon");
             Debug::log("[FlashRoms] TS-Conf unavailable (overlay traded) - Pentagon");
             newArch = A_PENT; newRomSet = R_NONE;
-        } else if (newArch == A_SCORP && newRomSet == R_SCORP_GMX) {
+        } else if (newArch == A_SCORP && isScorpGmxRomset(newRomSet)) {
             newRomSet = R_SCORP;
         }
     }
@@ -340,7 +351,7 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
     // generic wantedPages() boundary below reboots on any strip change.
     // (butter-less modules skip the reboot: the GMX pick falls back to Yellow
     // PCB below anyway, so a power cycle would be wasted.)
-    if (newArch == A_SCORP && newRomSet == R_SCORP_GMX && MEM_PG_CNT < 128 &&
+    if (newArch == A_SCORP && isScorpGmxRomset(newRomSet) && MEM_PG_CNT < 128 &&
         butter_psram_size() > 0) {
         arch = newArch;
         romSet = newRomSet;
@@ -636,7 +647,7 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
         // the unconditional tail below) is unused on Scorpion.
         // R_SCORP (Yellow PCB) and R_SCORP_GR (Green PCB) share this binding — the
         // romsets differ only in frame timing (CPU::updateStatesInFrame + audio).
-        // R_SCORP_GMX instead maps the flash-embedded GMX boot ROM (stored
+        // The GMX romsets instead map a flash-embedded GMX boot ROM (stored
         // deduplicated + overlaid, scorpion_gmx_banks.h): 8 ProfROM planes x 4
         // banks into rom[0..31], romInUse = (plane << 2) | slot (Ports::gmx*).
         // The ROM is in flash on EVERY board (GMX_IN_FLASH — the escape hatch
@@ -648,14 +659,14 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
         // resolveConstraints, where the note is actually visible).
         romSet = (newRomSet == R_NONE) ? R_SCORP : newRomSet;
 #if GMX_IN_FLASH
-        if (romSet == R_SCORP_GMX && butter_psram_size() == 0) {
+        if (isScorpGmxRomset(romSet) && butter_psram_size() == 0) {
             OSD::bootNotice("GMX needs QSPI PSRAM - using Yellow PCB");
             Debug::log("[GMX] butter PSRAM off/absent - falling back to Yellow");
             romSet = R_SCORP;
         }
         // ...and the same pick with the ROM traded away (FlashRoms.h). Distinct
         // message: nothing is wrong with the board, the bytes were spent.
-        if (romSet == R_SCORP_GMX && !FlashRoms::romsUsable()) {
+        if (isScorpGmxRomset(romSet) && !FlashRoms::romsUsable()) {
             OSD::bootNotice("GMX ROM traded for the GM.DLS bank - using Yellow PCB");
             Debug::log("[FlashRoms] GMX unavailable (overlay traded) - Yellow");
             romSet = R_SCORP;
@@ -663,7 +674,7 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
 #else
         // This build carries no GMX ROM (e.g. an NVS card written by another
         // board's firmware picked it) — quiet fallback.
-        if (romSet == R_SCORP_GMX) romSet = R_SCORP;
+        if (isScorpGmxRomset(romSet)) romSet = R_SCORP;
 #endif
 #if !PROFROM_IN_FLASH
         // This build carries no ProfROM image — quiet fallback to the plain
@@ -688,7 +699,7 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
         } else
 #endif
 #if GMX_IN_FLASH
-        if (romSet == R_SCORP_GMX) {
+        if (isScorpGmxRomset(romSet)) {
             // Deduplicated bank table (rom_pack.py pack_gmx): .data is either a raw
             // GMX bank or a base ROM already in flash; a non-NULL .overlay supplies
             // the differing bytes on the fly (RomOverlay.h). NOT registered here:
@@ -696,8 +707,9 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
             // re-registers the live bank's overlay on every romInUse change. The
             // post-bind reset lands on plane 0 bank 0 (raw), so nothing is missed
             // before the first page switch.
+            const scorpion_gmx_bank_t* tbl = gmxLiveBankTable();
             for (int i = 0; i < 32; ++i)
-                MemESP::rom[i].assign_rom(gb_rom_scorpion_gmx_banks[i].data);
+                MemESP::rom[i].assign_rom(tbl[i].data);
         } else
 #endif
         {
@@ -778,7 +790,7 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
     // the 5.05D base would evict the GMX plane-1 TR-DOS overlay keyed to the same
     // pointer. Scorpion never uses the shared rom[4] anyway (TR-DOS is the machine's
     // own bank 3).
-    if (!(arch == A_SCORP && (romSetScorp == R_SCORP_GMX || romSetScorp == R_SCORP_PROF))) {
+    if (!(arch == A_SCORP && (isScorpGmxRomset(romSetScorp) || romSetScorp == R_SCORP_PROF))) {
         const uint8_t* base = gb_rom_4_trdos_504t;
         const uint8_t* ov = gb_overlay_trdos_505d;   // the base is 5.04T now
         switch (Config::trdosBios) {

@@ -535,8 +535,31 @@ def pack_plus3div():
 
 GMX_BANKS        = 32
 GMX_BANK_SZ      = 16384
-GMX_SRC          = 'profrom_gmx_v5s.bin'
-GMX_CRC32        = 0x6E9FD318   # ProfRomGMX_v5s.rom, ProfRom_GMX_v5.44.9643
+# TWO images of the same firmware family, packed in ONE pass so the second can share
+# and overlay the first's banks.
+#   v5s  ProfRom GMX v5.44.9643 — the Shadow monitor, navigator and debugger drawn on
+#        the STANDARD ZX screen. The default pick.
+#   v6s  ProfRom GMX v6.44.9643 — the same tools drawn on the GMX EXTENDED screen
+#        (640x200x16, the gfx_ext mode this firmware emulates). Upstream's own
+#        naming; `!changes.txt` shows the v6 line as the one whose navigator and
+#        debugger gained the wide-screen features, and its debugger's SCReen command
+#        takes the extended pages #39/#3A as parameters. ROM disk 120 KB against
+#        v5's 130 (file_id.diz) — the wider UI costs ~10 KB of the image.
+# 19 of v6s's 32 banks are byte-identical to v5s's (planes 0-3 whole, plus p4b0/b1/b3)
+# and bind the SAME arrays; the 13 that differ are ~15 KB apart each, i.e. genuinely
+# different code, so they go RAW — 212992 B, and no overlay threshold would help.
+# The archive also carries `se` variants of both (SMUC + "эмуляция" ВГ93 over the HDD
+# pseudo-disks) and upstream has `su` (switchable); none is shipped. NB file_id.diz's
+# warning that direct WD1793 programming stops working and #3D13 is "substantially
+# slowed" sits in the paragraph for the NEMO builds (v4nu) and opens with "в отличии
+# от Smuc" — it describes that flavour, not the SMUC one.
+# infix '' keeps every v5s symbol name exactly as it was.
+GMX_IMAGES = [
+    ('profrom_gmx_v5s.bin', 0x6E9FD318, '',
+     'ProfRomGMX_v5s.rom — v5.44s Shadow monitor on the STANDARD ZX screen'),
+    ('profrom_gmx_v6s.bin', 0xFCA97CD6, '_6',
+     'ProfRomGMX_v6s.rom — v6.44s Shadow monitor on the EXTENDED 640x200 screen'),
+]
 GMX_OVL_DIFF_MAX = 8192   # 1024 until 2026-09-19, when the ROM moved to ProfROM
                           # GMX v5.44: that image is far less redundant (30 of 32
                           # banks unique, planes 5-7 all different) and at the old
@@ -555,14 +578,6 @@ GMX_OVL_DIFF_MAX = 8192   # 1024 until 2026-09-19, when the ROM moved to ProfROM
 def pack_gmx():
     out_dir = os.path.join('src', 'roms', 'scorpion')
     src_dir = os.path.join(out_dir, 'src')
-    gmx = open(os.path.join(src_dir, GMX_SRC), 'rb').read()
-    if len(gmx) != GMX_BANKS * GMX_BANK_SZ:
-        raise SystemExit("%s: expected 512 KB, got %d" % (GMX_SRC, len(gmx)))
-    crc = zlib.crc32(gmx) & 0xFFFFFFFF
-    if crc != GMX_CRC32:
-        raise SystemExit("%s: CRC32 %08X, expected %08X — wrong image?"
-                         % (GMX_SRC, crc, GMX_CRC32))
-    banks = [gmx[i*GMX_BANK_SZ:(i+1)*GMX_BANK_SZ] for i in range(GMX_BANKS)]
 
     # Bases follow FAMILIES: rom[0] of the 128K family is the PENTAGON ROM0 since
     # 2026-09-09 (TS-Conf needs it as a base), so a GMX bank equal to it binds the
@@ -579,7 +594,10 @@ def pack_gmx():
     # rule pack_prof uses): plane 7's near-empty stub banks differ from each other
     # by ~100 bytes, which is 48 KB of flash if they are not folded. A base is only
     # ever a RAW bank — MemESP's overlay registry is keyed by base pointer and does
-    # NOT chain, so an overlay may never sit on top of another overlay.
+    # NOT chain, so an overlay may never sit on top of another overlay. The list is
+    # shared across BOTH images, which is the whole trick: the second image's
+    # differing banks may overlay the first's raws, and the banks it shares outright
+    # (19 of 32 for v6s) never even reach this loop.
     bases = [
         ('gb_rom_0_pentagon_128k', pent,
          ('gb_overlay_pentagon_sinclair_128k_0', sinc_blob, apply_overlay(pent, sinc_blob))),
@@ -587,65 +605,86 @@ def pack_gmx():
         ('gb_rom_4_trdos_504t',    t504t,  None),
     ]
 
-    descs  = [None] * GMX_BANKS   # (data_sym, ovl_sym, data_bytes, ovl_blob)
-    first  = {}          # bank content -> first bank index
-    raws   = []          # (sym, bytes)
+    raws   = []          # (sym, bytes)          — emitted in order, shared by both images
     novls  = []          # (sym, blob, base_sym, nruns, ndiff)
+    first  = {}          # bank content -> (image index, bank index) that first carried it
+    images = []          # per image: (name, infix, note, banks, descs)
 
-    for i, bk in enumerate(banks):
-        if bk in first:
-            descs[i] = descs[first[bk]]
-            continue
-        first[bk] = i
-        tag = 'p%db%d' % (i // 4, i % 4)
-        # exact match of a base itself -> bind it with no overlay (0 new bytes)
-        hit = None
-        for sym, bb, ex in bases:
-            if bk == bb:
-                hit = (sym, None, bb, None); break
-        # exact match of an already-shipped base+overlay pair -> reuse, zero new bytes
-        if not hit:
+    for img_i, (fname, want_crc, infix, note) in enumerate(GMX_IMAGES):
+        blobimg = open(os.path.join(src_dir, fname), 'rb').read()
+        if len(blobimg) != GMX_BANKS * GMX_BANK_SZ:
+            raise SystemExit("%s: expected 512 KB, got %d" % (fname, len(blobimg)))
+        crc = zlib.crc32(blobimg) & 0xFFFFFFFF
+        if crc != want_crc:
+            raise SystemExit("%s: CRC32 %08X, expected %08X — wrong image?"
+                             % (fname, crc, want_crc))
+        banks = [blobimg[i*GMX_BANK_SZ:(i+1)*GMX_BANK_SZ] for i in range(GMX_BANKS)]
+        descs = [None] * GMX_BANKS   # (data_sym, ovl_sym, data_bytes, ovl_blob)
+
+        for i, bk in enumerate(banks):
+            # Identical content anywhere in EITHER image -> bind the same pair.
+            if bk in first:
+                pi, pb = first[bk]
+                descs[i] = images[pi][4][pb] if pi != img_i else descs[pb]
+                continue
+            first[bk] = (img_i, i)
+            tag = 'p%db%d' % (i // 4, i % 4)
+            # exact match of a base itself -> bind it with no overlay (0 new bytes)
+            hit = None
             for sym, bb, ex in bases:
-                if ex and bk == ex[2]:
-                    hit = (sym, ex[0], bb, ex[1]); break
-        if hit:
-            descs[i] = hit
-            continue
-        # smallest positional diff over the bases (base sharing is fine — the
-        # firmware re-registers the live bank's overlay on every page switch)
-        best = None
-        for sym, bb, ex in bases:
-            d = sum(1 for a, b in zip(bk, bb) if a != b)
-            if best is None or d < best[1]:
-                best = (sym, d, bb)
-        if best and best[1] <= GMX_OVL_DIFF_MAX:
-            sym, d, bb = best
-            blob, nruns, ndiff = make_overlay(bb, bk)
-            osym = 'gb_overlay_scorpion_gmx_%s' % tag
-            descs[i] = (sym, osym, bb, blob)
-            novls.append((osym, blob, sym, nruns, ndiff))
-        else:
-            rsym = 'gb_rom_scorpion_gmx_%s' % tag
-            descs[i] = (rsym, None, bk, None)
-            raws.append((rsym, bk))
-            bases.append((rsym, bk, None))   # later banks may overlay this one
+                if bk == bb:
+                    hit = (sym, None, bb, None); break
+            # exact match of an already-shipped base+overlay pair -> reuse, zero new bytes
+            if not hit:
+                for sym, bb, ex in bases:
+                    if ex and bk == ex[2]:
+                        hit = (sym, ex[0], bb, ex[1]); break
+            if hit:
+                descs[i] = hit
+                continue
+            # smallest positional diff over the bases (base sharing is fine — the
+            # firmware re-registers the live bank's overlay on every page switch).
+            # Selecting by diff COUNT rather than by blob size is deliberate: picking
+            # the smallest blob per bank greedily turns raws into overlays and breaks
+            # the self-dedup chain that later banks depend on (measured 2026-09-20 on
+            # v5s: 337573 B against 335678).
+            best = None
+            for sym, bb, ex in bases:
+                d = sum(1 for x, y in zip(bk, bb) if x != y)
+                if best is None or d < best[1]:
+                    best = (sym, d, bb)
+            if best and best[1] <= GMX_OVL_DIFF_MAX:
+                sym, d, bb = best
+                blob, nruns, ndiff = make_overlay(bb, bk)
+                osym = 'gb_overlay_scorpion_gmx%s_%s' % (infix, tag)
+                descs[i] = (sym, osym, bb, blob)
+                novls.append((osym, blob, sym, nruns, ndiff))
+            else:
+                rsym = 'gb_rom_scorpion_gmx%s_%s' % (infix, tag)
+                descs[i] = (rsym, None, bk, None)
+                raws.append((rsym, bk))
+                bases.append((rsym, bk, None))   # later banks may overlay this one
 
-    # hard verification: the table must reproduce the image byte for byte
-    for i in range(GMX_BANKS):
-        _, _, data, blob = descs[i]
-        got = apply_overlay(data, blob) if blob else data
-        if got != banks[i]:
-            raise SystemExit("gmx bank %d reconstruction mismatch" % i)
+        # hard verification: the table must reproduce THIS image byte for byte
+        for i in range(GMX_BANKS):
+            _, _, data, blob = descs[i]
+            got = apply_overlay(data, blob) if blob else data
+            if got != banks[i]:
+                raise SystemExit("gmx %s bank %d reconstruction mismatch" % (fname, i))
+        images.append((fname, infix, note, banks, descs))
 
     total = sum(len(b) for _, b in raws) + sum(len(b) for _, b, _, _, _ in novls)
     banner = ['// Generated by tools/rom_pack.py (pack_gmx) — do not edit by hand.',
-              '// Scorpion GMX boot ROM: ProfRom_GMX v5.44.9643, image ProfRomGMX_v5s.rom',
-              '// (CRC32 6E9FD318) — TMgmx(r) Loader V2.00 over a patched GMX 5.01, with',
-              '// ProfROM 5.44s in planes 4-7 (SMUC, no VG93 emulation). 8 planes x 4 x 16K',
-              '// banks, deduplicated and partly expressed as overlays over ROMs the',
-              '// firmware already ships — see the pack_gmx comment in tools/rom_pack.py.',
-              '// %d B in flash instead of 524288.' % total,
-              '// Regenerate: python3 tools/rom_pack.py gmx']
+              '// Scorpion GMX boot ROM: ProfRom_GMX v5.44.9643 — TMgmx(r) Loader V2.00 over',
+              '// a patched GMX 5.01, with ProfROM 5.44s in planes 4-7. TWO images, packed',
+              '// together so the second overlays the first (18 of its 32 banks are',
+              '// byte-identical and bind the same arrays):']
+    banner += ['//   %s' % note for _, _, note, _, _ in images]
+    banner += ['// 8 planes x 4 x 16K banks, deduplicated and partly expressed as overlays',
+               '// over ROMs the firmware already ships — see the pack_gmx comment in',
+               '// tools/rom_pack.py.',
+               '// %d B in flash instead of %d.' % (total, len(images) * GMX_BANKS * GMX_BANK_SZ),
+               '// Regenerate: python3 tools/rom_pack.py gmx']
     c = banner + ['#include <stdint.h>',
                   '#if GMX_IN_FLASH',
                   '']
@@ -656,7 +695,7 @@ def pack_gmx():
     c.append('#endif // GMX_IN_FLASH')
     open(os.path.join(out_dir, 'scorpion_gmx_rom.c'), 'w').write("\n".join(c) + "\n")
 
-    # The binding table lives in a C++ header (included via romScorpion.h AFTER the
+    # The binding tables live in a C++ header (included via romScorpion.h AFTER the
     # bases are declared in roms.h) rather than in the .c above: the Sinclair 128K
     # halves are header-defined C++ `const` arrays with internal linkage, so a C
     # translation unit cannot reference them.
@@ -673,27 +712,31 @@ def pack_gmx():
           '// rom[plane*4+slot] binds .data (Config::requestMachine); the overlay of the',
           '// bank live at 0x0000 is (re)registered on every romInUse change by',
           '// gmxTapUpdate (Ports.cpp) — several banks share a base pointer, so a static',
-          '// registration cannot express this. Duplicate banks share a pointer.',
-          'static const scorpion_gmx_bank_t gb_rom_scorpion_gmx_banks[%d] = {' % GMX_BANKS]
-    for i in range(GMX_BANKS):
-        dsym, osym, _, _ = descs[i]
-        h.append('    { %s, %s },   // plane %d bank %d%s'
-                 % (dsym, osym if osym else 'nullptr', i // 4, i % 4,
-                    '  = bank %d' % first[banks[i]] if first[banks[i]] != i else ''))
-    h.append('};')
+          '// registration cannot express this. Duplicate banks share a pointer, ACROSS',
+          '// the two images as well as within one.']
+    for fname, infix, note, banks, descs in images:
+        h += ['', '// %s' % note,
+              'static const scorpion_gmx_bank_t gb_rom_scorpion_gmx%s_banks[%d] = {' % (infix, GMX_BANKS)]
+        for i in range(GMX_BANKS):
+            dsym, osym, _, _ = descs[i]
+            h.append('    { %s, %s },   // plane %d bank %d'
+                     % (dsym, osym if osym else 'nullptr', i // 4, i % 4))
+        h.append('};')
     open(os.path.join(out_dir, 'scorpion_gmx_banks.h'), 'w').write("\n".join(h) + "\n")
 
-    print("[gmx] 32 banks -> %d raw + %d new overlays + %d reused = %d B in flash (saves %.1f KB)"
-          % (len(raws), len(novls),
-             sum(1 for d in descs if d[1] and not d[1].startswith('gb_overlay_scorpion_gmx')),
-             total, (GMX_BANKS * GMX_BANK_SZ - total) / 1024))
+    print("[gmx] %d images x 32 banks -> %d raw + %d overlays = %d B in flash (saves %.1f KB)"
+          % (len(images), len(raws), len(novls), total,
+             (len(images) * GMX_BANKS * GMX_BANK_SZ - total) / 1024))
     rawsyms = set(sym for sym, _ in raws)
-    for i in range(GMX_BANKS):
-        dsym, osym, _, blob = descs[i]
-        note = 'dup of bank %d' % first[banks[i]] if first[banks[i]] != i else \
-               ('%s + %s (%d B)' % (dsym, osym, len(blob) if blob else 0) if osym else
-                ('raw' if dsym in rawsyms else '%s (0 B, base as-is)' % dsym))
-        print("    p%db%d: %s" % (i // 4, i % 4, note))
+    ovlsyms = set(sym for sym, _, _, _, _ in novls)
+    for fname, infix, note, banks, descs in images:
+        own = 0
+        for i in range(GMX_BANKS):
+            dsym, osym, _, blob = descs[i]
+            new = (dsym in rawsyms and dsym.endswith('gmx%s_p%db%d' % (infix, i // 4, i % 4))) or \
+                  (osym in ovlsyms and osym.endswith('gmx%s_p%db%d' % (infix, i // 4, i % 4)))
+            if new: own += GMX_BANK_SZ if osym is None else len(blob)
+        print("    %-24s %6d B of new arrays" % (fname, own))
 
 # ── TS-Conf TS-BIOS (arch A_TSCONF) ───────────────────────────────────────────
 # The four BIOS images in tslabs/zx-evo pentevo/rom/bin are ONE 64 KB set built by
