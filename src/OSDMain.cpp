@@ -50,6 +50,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "ESPectrum.h"
 #include "messages.h"
 #include "Config.h"
+#include "ZxEvoAvr.h"
 #include "Debug.h"
 #include "Snapshot.h"
 #include "MemESP.h"
@@ -2117,9 +2118,11 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
             return;
         }
         if (Z80Ops::isTsconf) {
-            Config::tsconf_ps2_keys = !Config::tsconf_ps2_keys;
-            Config::save();
-            notify(Config::tsconf_ps2_keys ? " PS/2 keys ON " : " PS/2 keys OFF ", LEVEL_INFO, 900);
+            // Not persisted: the automatic verdict is the resting state and this
+            // only overrides it for the session (and a machine reset drops it).
+            const bool on = ZxEvoAvr::toggleKeysToGuest();
+            notify(on ? " PS/2 keys: guest (manual) " : " PS/2 keys: menu (manual) ", LEVEL_INFO, 900);
+            Debug::log("[PS2] keys -> %s (manual override)", on ? "guest" : "menu");
             return;
         }
     }
@@ -6078,8 +6081,11 @@ static void buildEmulatorInfoText() {
             " Frameskip      : %d us\n", Config::throtling * 1000);
     if (Z80Ops::isProfi && Config::profi_ext_keys)
         pos += infoAppend(buf, pos, bufsz, " XT keyboard    : On\n");
-    if (Z80Ops::isTsconf && Config::tsconf_ps2_keys)
-        pos += infoAppend(buf, pos, bufsz, " PS/2 keys      : On\n");
+    if (Z80Ops::isTsconf)
+        pos += infoAppend(buf, pos, bufsz, " PS/2 keys      : %s\n",
+                          ZxEvoAvr::keysToGuest()
+                              ? (ZxEvoAvr::guestPollsKeys() ? "guest (polling)" : "guest (manual)")
+                              : (ZxEvoAvr::guestPollsKeys() ? "menu (manual)"   : "menu"));
     if (Config::byte_cobmect_mode)
         pos += infoAppend(buf, pos, bufsz, " COBMECT mode   : On\n");
     if (MEM_PG_CNT != 64)   // Murmuzavr SD-swap: 64 pages = no swap
@@ -8051,8 +8057,11 @@ const char* hotkeysText() {
         // Where plain PrtScr is the extra-keys toggle, BMP capture moves to
         // Alt+PrtScr. That toggle is the ONLY way to reach either setting — they
         // have no menu row — which makes these lines their documentation.
+        // On TS-Conf the keyboard normally changes hands BY ITSELF (the guest
+        // reading the PS/2 scancode log), so there the toggle is an override,
+        // and saying so is the difference between a setting and a surprise.
         pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " %-20s %s\n",
-                        profi ? "XT keyboard" : "PS/2 keys", "Alt+~ or PrtScr");
+                        profi ? "XT keyboard" : "PS/2 keys (auto)", "Alt+~ or PrtScr");
         pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " %-20s %s\n",
                         "BMP capture", "Alt+PrtScr");
     } else {

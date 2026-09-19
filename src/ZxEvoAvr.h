@@ -39,4 +39,18 @@ namespace ZxEvoAvr {
     // set-2 make/break sequences into the log. No-ops off TS-Conf.
     void    hidKey(uint8_t hid, bool down);
     void    hidModifiers(uint8_t now, uint8_t prev);
+
+    // ── "the guest owns the keyboard" ────────────────────────────────────────
+    // There is exactly ONE way to read raw scancodes on a ZX-Evo: select window
+    // type 2 (EXT_PS2KEYBOARDS_LOG) and read it. So a guest that does is telling
+    // us, in hardware terms, that F1-F10 and the nav keys are ITS keys — which is
+    // precisely the set our hotkey layer would otherwise eat (Wild Commander's
+    // panel, avrconf). Programs that do NOT want them never touch the log:
+    // TS-BIOS Setup reads keys through KBD_POLL on #FE, and so do TR-DOS and
+    // games. Reg D/E (the modifier status bytes) deliberately do NOT count — a
+    // program may read Shift state without wanting the function keys.
+    bool    guestPollsKeys();        // the log was read within the idle window
+    bool    keysToGuest();           // guestPollsKeys(), unless overridden below
+    bool    toggleKeysToGuest();     // manual override FOR THE SESSION; returns the new state
+    void    clearKeysOverride();     // a machine reset starts a new program
 }

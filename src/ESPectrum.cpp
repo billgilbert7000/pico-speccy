@@ -45,6 +45,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "Subsystem.h"
 #include "CPU.h"
 #include "Config.h"
+#include "ZxEvoAvr.h"
 #include "ESPectrum.h"
 #include "FileUtils.h"
 #include "UsbMsc.h"
@@ -1613,6 +1614,10 @@ void ESPectrum::reset(uint8_t romInUse) {
   // deferred EndFrame path never sees the off edge (see VIDEO::gmxForceOff).
   VIDEO::gmxForceOff();
   VIDEO::tsVideoForceOff();   // TS-Conf TEXT/16c: same rule (TsConf::reset clears VConfig below)
+  // ...and the PS/2-keys override with it: a reset starts a new program, so the
+  // keyboard goes back to the automatic verdict (and that is one more way out
+  // for a user who forced the keys to the guest and wants the menu back).
+  ZxEvoAvr::clearKeysOverride();
   VIDEO::timexHiresForceOff();// Timex hi-res 512x192: ditto (VIDEO::Reset zeroes timex_mode)
   // Timex TC2068 SCLD: HSR = 0 and DEC bit 7 = 0, i.e. the whole 64 KB is HOME
   // again. A plugged-in DOCK cartridge deliberately SURVIVES a machine reset —
@@ -2206,7 +2211,7 @@ IRAM_ATTR void ESPectrum::processKeyboard() {
         // footer names and F12 reboots the RP2350, which is what F12 does on a
         // real ZX-Evo too (the AVR's hardware reset).
         const bool extKeysOn = (Z80Ops::isProfi && Config::profi_ext_keys)
-            || (Z80Ops::isTsconf && Config::tsconf_ps2_keys
+            || (ZxEvoAvr::keysToGuest()
                 && KeytoESP != fabgl::VK_F11 && KeytoESP != fabgl::VK_F12);
         bool passToZ80 = extKeysOn
             && KeytoESP != fabgl::VK_PAUSE
@@ -3416,6 +3421,18 @@ void ESPectrum::loop() {
 
     netBackgroundTick();      // radio poll + the boot join/SNTP FSM (also pumped
                               // from the OSD idle loops — see nm::uiIdle)
+
+    // TS-Conf: F1-F10 silently ceasing to open the menu is exactly the kind of
+    // thing a user cannot be asked to guess, so say it once per transition.
+    if (Z80Ops::isTsconf) {
+        static bool s_keys_prev = false;
+        const bool  keys_now = ZxEvoAvr::keysToGuest();
+        if (keys_now != s_keys_prev) {
+            s_keys_prev = keys_now;
+            OSD::notify(keys_now ? " PS/2 keys: guest " : " PS/2 keys: menu ", LEVEL_INFO, 900);
+            Debug::log("[PS2] keys -> %s", keys_now ? "guest (reading the scancode log)" : "menu");
+        }
+    }
 
     // Storage watch: a card inserted into a machine that booted without one (or
     // a stick re-plugged), and a card pulled out from under a running session.

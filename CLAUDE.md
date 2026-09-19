@@ -3717,7 +3717,7 @@ worth ~2 ms/frame if placed deliberately. It also explains the unresolved "TS
 scratch block — TRIED AND REVERTED, FPS dropped, cause NOT established" entry
 above: that change moved exactly those buffers.
 
-### The ZX-Evo AVR behind the Gluk ports — PS/2 scancode log (2026-09-07, NOT hw-tested)
+### The ZX-Evo AVR behind the Gluk ports — PS/2 scancode log (2026-09-07; the log hw-confirmed 2026-09-19 via Wild Commander)
 
 `avrconf.spg` (the ZX-Evo AVR configuration utility) started and no key did
 anything. Dump: main loop `EI / HALT / CALL 3644`, and the key routine (0x3362)
@@ -3773,7 +3773,7 @@ menu still land in the log (as they would on a real Evo). avrconf's own "Save
 and Soft Reset" needs nothing from us — after CFGIF command 0xF7 it resets
 itself via MemConfig=4 / SysConfig=0 / RST 0. Cost ~1.3 KB flash, ~100 B RAM.
 
-### "PS/2 keys": the log already had F1-F10, the HOTKEY LAYER was eating them (2026-09-19, NOT hw-tested)
+### "PS/2 keys": the log already had F1-F10, the HOTKEY LAYER was eating them (hw-confirmed 2026-09-19)
 
 Wild Commander drives its panel with F1-F10, which are ours — F5 is the file
 browser, F8 the stats box, and so on. The Profi shape (`Config::profi_ext_keys`,
@@ -3785,23 +3785,61 @@ along. Profi has to INJECT its keys into `Ports::extPort`; TS-Conf has nothing t
 inject, and swallowing the keypress in `ESPectrum::processKeyboard` was the whole
 of the bug.
 
-- **`Config::tsconf_ps2_keys`** (NVS `tsconf_ps2_keys`, default off) therefore
-  gates exactly one thing: the `passToZ80` test in ESPectrum.cpp. Toggle is the
-  Profi one — plain **PrtScr** or **Alt+~** — with `" PS/2 keys ON/OFF "` in the
-  top border, and BMP capture moves to Alt+PrtScr on TS-Conf the same way it does
-  on Profi (`xtToggle` in `readKbd`). There is deliberately no menu row: the Help
-  page line IS its documentation, as on Profi.
 - **The name is the mechanism, not a mode.** There is no "XT keyboard" on a
   ZX-Evo — the keyboard belongs to the AVR, and the extra keys reach a guest only
   through the **PS/2 scancode log** (Gluk `#F0` type 2, `EXT_PS2KEYBOARDS_LOG`),
-  which is always running. So the setting says "PS/2 keys", i.e. whether they get
-  past US, not whether the hardware produces them.
-- **F11 and F12 stay ours** even with the mode on: F11 is the machine reset the
-  patched TS-BIOS Setup footer names, and F12 reboots the RP2350 — which is what
-  F12 does on a real ZX-Evo too (the AVR's own hardware reset). Pause still
-  pauses; the escape hatch out of the mode is the toggle itself, which is why
-  PrtScr/`~` are excluded from `passToZ80`.
+  which is always running. So "PS/2 keys" is about whether they get past US, not
+  whether the hardware produces them.
+- **F11 and F12 stay ours** even with the keys handed over: F11 is the machine
+  reset the patched TS-BIOS Setup footer names, and F12 reboots the RP2350 —
+  which is what F12 does on a real ZX-Evo too (the AVR's own hardware reset).
+  Pause still pauses; PrtScr / `~` are excluded from `passToZ80` because they are
+  the override, i.e. the way back.
 - Covered by the same gate, because WC needs them too: Ins/Del/Home/End/PgUp/PgDn.
+
+### ...and the guest SAYS when it wants them — the log has to be SELECTED (hw-confirmed 2026-09-19)
+
+It shipped for a day as `Config::tsconf_ps2_keys`, a persisted manual switch.
+That flag is **deleted**: there is a hardware-grounded signal, because reading raw
+scancodes on a ZX-Evo has exactly one path — write type **2**
+(`EXT_PS2KEYBOARDS_LOG`) into the `#F0` extension window, then read it. A guest
+that does is telling us in the machine's own terms that F1-F10 are ITS keys.
+
+- **`ZxEvoAvr::keysToGuest()`** = `guestPollsKeys()` (the log was read, or cleared
+  via reg C `GLUK_C_CLEAR_LOG`, within `kKeysIdleMs` = 2 s) unless `s_keys_ovr`
+  overrides it. `ESPectrum::processKeyboard` tests that instead of a Config flag;
+  everything else about the gate is unchanged.
+- **The discriminator is real, not a heuristic**: the programs that want the
+  F-keys are exactly the ones that read the log (WC's panel, `avrconf.spg`), and
+  the ones that do not never touch it — TS-BIOS Setup reads keys through
+  `KBD_POLL` on `#FE`, and so do TR-DOS and games.
+- **Reg D/E (the modifier-status bytes) deliberately do NOT count.** A program may
+  want Shift state without wanting the function keys, and TS-BIOS might read them
+  at boot; keying on the LOG alone is the tightest signal available.
+- **The manual override is SESSION-only** (PrtScr / Alt+~, as on Profi): it flips
+  to the opposite of the live verdict and is dropped by `ESPectrum::reset`, since
+  a reset starts a new program. That is what keeps "a program is holding my
+  F-keys" recoverable — and why nothing about it is persisted.
+- **A transition is announced** (`" PS/2 keys: guest "` / `" menu "`, one toast
+  per change from `ESPectrum::loop`, plus a `[PS2]` log line): F5 silently ceasing
+  to open the browser is not something a user can be asked to guess. Hardware Info
+  says `guest (polling)` / `guest (manual)` / `menu (manual)` / `menu`.
+- **There is no equivalent on Profi, and that is structural** — its extended keys
+  ride **bit 5 of the ordinary `#FE` matrix rows** (Ports.cpp), with no separate
+  port and no select step, and every program on earth reads `#FE`. Telling "reads
+  the keyboard" from "wants the XT keys" would mean watching which bits the guest
+  masks in the NEXT instruction, i.e. opcode sniffing, which this project does not
+  do. Profi's toggle stays manual and persisted.
+- **Hw 2026-09-19, owner: "работает"** — Wild Commander's F1-F10 reach the guest
+  and the menu does not open under them. The verdict is not itemised, so read it
+  as that one path: the arming signal fires on a real program, and the gate lets
+  the keys through. **Still owed**, in order of risk: F5/F8 coming BACK ~2 s after
+  WC exits (the idle window is what makes the mode temporary — if it ever sticks,
+  `kKeysIdleMs` and `notePoll`'s two call sites are where to look); TS-BIOS Setup
+  and TR-DOS never arming it (`menu` in Hardware Info while they run — the
+  discriminator's other half, and the one that would show as "my F-keys are gone
+  in TR-DOS"); the manual override both ways and its drop at F11; and Alt+PrtScr
+  still capturing a BMP.
 
 ### ...and `applyPalette()` was shredding the pair tables under it (2026-09-19)
 
@@ -3911,11 +3949,6 @@ boot. Both test the live flag now; `drawStats` and `uiPausedBadge` always did.
   it only makes the "re-install after applyPalette" call sites mean what their
   comments say, and it is what turned the toast bug from one silent install into
   19 loud ones in the log.
-- **Hw check owed**: WC's F1-F10 panel keys with the mode ON and the OSD staying
-  shut; the toggle and its toast; Alt+PrtScr still capturing a BMP; F11/F12 still
-  resetting; and `PS/2 keys : On` in Hardware Info. Also worth one look: the mode
-  OFF must behave exactly as before on every other machine (the toggle block lost
-  its `arch == A_PROFI` guard and now falls through for them).
 
 ## Gigascreen is suspended by the MODE, not forbidden by the machine (2026-09-09; standard-mode half hw-confirmed 2026-09-10)
 

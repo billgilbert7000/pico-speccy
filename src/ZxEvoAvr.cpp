@@ -7,6 +7,7 @@
 #include "ZxEvoAvr.h"
 
 #include <string.h>
+#include "pico/time.h"
 #include "Z80_JLS/z80.h"
 #include "FileUtils.h"
 #include "Buffer.h"
@@ -69,6 +70,17 @@ const uint8_t kHidToSet2[0x70] = {
 //  0x65 APPLICATION = E0 2F, the Evo's "menu" status key.)
 // HID modifiers 0xE0..0xE7: LCtrl LShift LAlt LGui RCtrl RShift RAlt RGui
 const uint8_t kModToSet2[8] = { 0x14, 0x12, 0x11, 0x9F, 0x94, 0x59, 0x91, 0xA7 };
+
+// Last time the guest read the scancode log (or cleared it), and the manual
+// override that beats the automatic verdict for the rest of the session. The
+// window is generous on purpose: a program that polls per frame keeps it armed
+// with a wide margin, and over-holding costs only that F-keys stay with a guest
+// that has stopped asking for them — which a reset clears anyway.
+const uint32_t kKeysIdleMs = 2000;
+uint32_t s_kbd_poll_ms  = 0;
+int8_t   s_keys_ovr     = -1;       // -1 = automatic, 0 = forced to the menu, 1 = forced to the guest
+
+inline void notePoll() { s_kbd_poll_ms = to_ms_since_boot(get_absolute_time()); }
 
 uint8_t s_ext_type = EXT_BASECONF_VERSION;
 uint8_t s_regc     = 0;             // AVR-side reg C bits: CAPS LED (b1), EEPROM mode (b7)
@@ -183,6 +195,24 @@ void cfgifWrite(uint8_t i, uint8_t v) {
 
 } // namespace
 
+bool ZxEvoAvr::guestPollsKeys() {
+    if (!s_kbd_poll_ms) return false;
+    return (to_ms_since_boot(get_absolute_time()) - s_kbd_poll_ms) < kKeysIdleMs;
+}
+
+bool ZxEvoAvr::keysToGuest() {
+    if (!Z80Ops::isTsconf) return false;
+    return s_keys_ovr >= 0 ? (s_keys_ovr != 0) : guestPollsKeys();
+}
+
+bool ZxEvoAvr::toggleKeysToGuest() {
+    const bool now = keysToGuest();
+    s_keys_ovr = now ? 0 : 1;
+    return !now;
+}
+
+void ZxEvoAvr::clearKeysOverride() { s_keys_ovr = -1; }
+
 void ZxEvoAvr::reset() {
     s_ext_type = EXT_BASECONF_VERSION;
     s_regc = 0;
@@ -201,7 +231,7 @@ uint8_t ZxEvoAvr::readExt(uint8_t idx, uint8_t regA) {
     switch (s_ext_type) {
         case EXT_BASECONF_VERSION:   return kBaseVer[i];
         case EXT_BOOTLOADER_VERSION: return kBootVer[i];
-        case EXT_PS2KEYBOARDS_LOG:   return logPop();
+        case EXT_PS2KEYBOARDS_LOG:   notePoll(); return logPop();
         case EXT_RDCFG:              return i == 0 ? MODE_VGA : 0xFF;
         case EXT_CFGIF:              return cfgifRead(i);
         case EXT_SPIFL:              return 0xFF;    // SPI flash interface: not modelled
@@ -227,7 +257,7 @@ void ZxEvoAvr::writeExt(uint8_t idx, uint8_t v, uint8_t regA) {
 }
 
 void ZxEvoAvr::writeRegC(uint8_t v) {
-    if (v & GLUK_C_CLEAR_LOG) logReset();
+    if (v & GLUK_C_CLEAR_LOG) { logReset(); notePoll(); }   // only a log user clears the log
     if ((v ^ s_regc) & GLUK_C_CAPS_LED) s_regc ^= GLUK_C_CAPS_LED;   // LED itself not modelled
     if ((v ^ s_regc) & GLUK_C_EEPROM)   s_regc ^= GLUK_C_EEPROM;
 }

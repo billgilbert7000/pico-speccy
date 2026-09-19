@@ -82,7 +82,6 @@ bool     Config::flashload = true;
 bool     Config::tape_player = false; // Tape player mode
 volatile bool Config::real_player = false;
 bool     Config::profi_ext_keys = false; // Profi extended keyboard mode
-bool     Config::tsconf_ps2_keys = false; // TS-Conf: PS/2 keys to guest, not to the OSD
 bool     Config::tape_timing_rg = false; // Rodolfo Guerra ROMs tape timings
 bool     Config::tape_autostart = true;  // auto-play tape on load + re-mount remembered tape after reset/boot
 bool     Config::rightSpace = true;
@@ -1275,7 +1274,6 @@ void Config::load() {
         recountBP();
         nvs_get_b("tape_player", tape_player, sts);
         nvs_get_b("profi_ext_keys", profi_ext_keys, sts);
-        nvs_get_b("tsconf_ps2_keys", tsconf_ps2_keys, sts);
         bool b; nvs_get_b("real_player", b, sts);
 #if LOAD_WAV_PIO
         if (real_player && !b) {
@@ -1719,7 +1717,6 @@ void Config::save(const char* path, const char* profileName) {
     nvs_set_u8(buf,"gm_pspd",  gm_pspd);
     nvs_set_str(buf,"tape_player", tape_player ? "true" : "false");
     nvs_set_str(buf,"profi_ext_keys", profi_ext_keys ? "true" : "false");
-    nvs_set_str(buf,"tsconf_ps2_keys", tsconf_ps2_keys ? "true" : "false");
     nvs_set_str(buf,"real_player", real_player ? "true" : "false");
     nvs_set_str(buf,"rightSpace", rightSpace ? "true" : "false");
     nvs_set_str(buf,"wasd", wasd ? "true" : "false");
