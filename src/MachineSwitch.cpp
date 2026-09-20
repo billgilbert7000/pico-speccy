@@ -352,6 +352,16 @@ bool commit(ArchIdx arch, RomsetIdx romset) {
             OSD::esp_hard_reset();
             return true;
         }
+        // A menu machine switch is a NEW MACHINE, so give it the RAM a power-on
+        // would: the reset below is the reset BUTTON, which deliberately keeps
+        // guest RAM (real hardware does), and that is wrong here. A firmware that
+        // keeps state in RAM across resets then reads the PREVIOUS machine's —
+        // the GMX/ProfROM Shadow monitor keeps its settings in page #78 and its
+        // thunks at 0xE3xx, and v5 and v6 put their variables at different
+        // addresses, so a live v5<->v6 switch started wrong while F12 was always
+        // fine (F12 reboots, and setup() fills RAM). Before requestMachine so the
+        // ROM binding and the machine start see the same clean state.
+        ESPectrum::powerOnRamFill();
         Config::requestMachine(arch, romset);
     }
 

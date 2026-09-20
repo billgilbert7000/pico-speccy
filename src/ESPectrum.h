@@ -96,6 +96,9 @@ class ESPectrum
 public:
 
     static void setup();
+    // The DRAM power-on pattern over every RAM page — cold setup and a menu
+    // machine switch (MachineSwitch::commit). See the definition.
+    static void powerOnRamFill();
     static void loop();
     static void reset();
     static void reset(uint8_t romInUse);

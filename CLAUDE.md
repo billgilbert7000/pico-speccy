@@ -7249,6 +7249,28 @@ entry" rule buys.
   Not covered: a pathological guest that modulates SLOWER than 250 ms would announce
   each state. Nothing observed does, and the F8 stats box carries the live clock
   continuously, so the banner is a convenience rather than the only indication.
+- **A menu machine switch now fills guest RAM with the power-on pattern**
+  (`ESPectrum::powerOnRamFill()`, called from `MachineSwitch::commit` before
+  `requestMachine`). Found by the live v5 <-> v6 switch, which started the new
+  firmware wrong while F12 was always fine (hw 2026-09-20, owner: "какая-то часть
+  памяти остается и старт происходит неверно").
+  **The reason is a real distinction the code had collapsed: `ESPectrum::reset()` is
+  the reset BUTTON, which deliberately keeps guest RAM because hardware does — but a
+  machine switch is a POWER CYCLE, and F12 worked only because `setup()` refills RAM.**
+  It bites whenever a firmware keeps state in guest RAM across resets, and the
+  GMX/ProfROM Shadow monitor does exactly that: its settings live in page **#78**
+  (`GMX: настройки монитора перенесены в страницу #78`, the archive's own changelog)
+  and its cross-bank thunks at 0xE3xx-0xE5xx. v5 and v6 put their variables at
+  DIFFERENT addresses in that page — v5 at E11D/E11F/DFE9, v6 at E074/E076/DF0F — so
+  v6 read v5's initialised page and found garbage: the key ring pointers came back as
+  **0x0015**, outside their own buffer at E38F..E398, which is why the first v6 dump
+  showed a dead keyboard and the post-F12 dump showed E392. That 0x0015 was the real
+  signature all along; it was flagged as a lead at the time and could not be proved
+  from one capture, because a dump taken with no key held cannot distinguish a broken
+  key path from an idle one.
+  Scoped to `MachineSwitch::commit` on purpose: `Config::requestMachine` is also the
+  snapshot/.spg load path, and those write the RAM they want AFTER it. The GMX port
+  latches were never the problem — `ESPectrum::reset` has always cleared all of them.
 - **v5 vs v6 is WHICH SCREEN THE FIRMWARE DRAWS ITSELF ON**, not a hardware
   difference: v5's Shadow monitor, navigator and debugger use the standard ZX screen,
   v6's use the GMX **extended 640x200x16** mode (`gfx_ext`, `#7EFD` bit 3 — the mode

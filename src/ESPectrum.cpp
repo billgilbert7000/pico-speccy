@@ -712,6 +712,33 @@ static void powerOnDramFill(uint8_t *p, uint32_t page) {
   }
 }
 
+// Put every POINTER-backed ZX RAM page into the state a power-on leaves. Called at
+// cold setup and by MachineSwitch::commit — a MENU MACHINE SWITCH is a new machine,
+// not the reset button, and the two are not the same thing to a firmware that keeps
+// state in guest RAM across resets. The GMX/ProfROM Shadow monitor does exactly that
+// (its settings page #78 and its RAM thunks), and v5 and v6 lay their variables out
+// at DIFFERENT addresses, so a live v5<->v6 switch left v6 reading v5's initialised
+// page: the key ring pointers came back as 0x0015, outside their own buffer, and the
+// boot went wrong in ways that only F12 cleared (hw 2026-09-20 — F12 works precisely
+// because setup() runs this). Flash-backed pointers are skipped; the pattern is
+// deterministic per page, which is what halt2int's floating-bus verdict needs.
+void ESPectrum::powerOnRamFill() {
+  const bool dramPattern = !isKarabasRomset(Config::romSet);
+  size_t n = 0;
+  for (size_t i = 0; i < MEM_PG_CNT; ++i) {
+    if (MemESP::ram[i].memType() == mem_type_t::POINTER) {
+      uint8_t *p = MemESP::ram[i].direct();
+      if (!p || p < (uint8_t *)0x11000000) continue;
+      if (dramPattern) powerOnDramFill(p, i);
+      else             memset(p, 0, MEM_PG_SZ);
+      n++;
+    }
+  }
+  Debug::log("ZX RAM: %u pages %s, freeHeap=%u", (unsigned)n,
+             dramPattern ? "set to DRAM power-on pattern" : "cleared (Karabas own boot screen)",
+             getFreeHeap());
+}
+
 void ESPectrum::setup() {
   //=======================================================================================
   // INIT FILESYSTEM
@@ -1074,18 +1101,7 @@ void ESPectrum::setup() {
   // ...except on Karabas-Pro, whose ROMain draws its OWN boot screen instead of
   // clearing to BASIC: the wake-up checkerboard survives underneath it as visible
   // junk, so those romsets get the plain zero fill (equally deterministic).
-  const bool dramPattern = !isKarabasRomset(Config::romSet);
-  for (size_t i = 0; i < MEM_PG_CNT; ++i) {
-    if (MemESP::ram[i].memType() == mem_type_t::POINTER) {
-      uint8_t *p = MemESP::ram[i].direct();
-      if (!p || p < (uint8_t *)0x11000000) continue;
-      if (dramPattern) powerOnDramFill(p, i);
-      else             memset(p, 0, MEM_PG_SZ);
-    }
-  }
-  Debug::log("setup: ZX RAM pages %s, freeHeap=%u",
-             dramPattern ? "set to DRAM power-on pattern" : "cleared (Karabas own boot screen)",
-             getFreeHeap());
+  ESPectrum::powerOnRamFill();
   // Load romset
   Debug::log("setup: requestMachine begin, freeHeap=%u", getFreeHeap());
   Debug::log2SD("setup: requestMachine begin arch=%s romSet=%s freeHeap=%u",
