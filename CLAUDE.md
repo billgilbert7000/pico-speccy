@@ -9532,7 +9532,7 @@ damage offset** (Black Raven: ±10 in 2-byte compare units = ±20 bytes).
   must be 12..249 and within ±10 of the table value. The crack NOP'd those three
   branches.
 
-## Tape wear — "the recorder is chewing the tape" (2026-09-20, NOT hw-tested)
+## Tape wear — "the recorder is chewing the tape" (2026-09-20; hw-confirmed, after three rounds)
 
 `Config::tape_wear` (Storage > Tape > Tape wear: Off / Light / Medium / Heavy)
 plays a stretched, creased, oxide-shedding cassette. Asked for as a nostalgia
@@ -9551,33 +9551,118 @@ user remembers, and two of them are the only ones that can actually break a load
   test expects ~44 of 50 injected lurches to break a block, not 50.
 - **drop** — a crease or a bald patch lifts the tape off the head: the ear bit
   FREEZES, so there is no edge at all. Either LD-EDGE times out or the merged
-  pulses walk the bit stream out of step. Always fatal to the block.
+  pulses walk the bit stream out of step. Always fatal to the DATA — but NOT to a
+  pilot tone, see the ROM note below.
 
 - **The model is `src/TapeWear.h` and depends on nothing from the firmware** —
   that is the only reason `tools/tapewear_test.cpp` can drive it on a host
   (`g++ -O2 -Wall -Wextra -Isrc -o /tmp/tapewear_test tools/tapewear_test.cpp`).
-  **Re-run it after ANY change there.** It carries a synthetic 48K LD-BYTES
-  decoder, so it checks the thing that was actually asked for: Off loads a 6912
-  byte block byte for byte, Heavy essentially never does, Light usually loads a
-  small one, and the wow alone never corrupts a byte. Every assertion was checked
-  to FAIL under a hand-applied mutation — see the two that the FIRST suite could
-  not catch, below.
+  **Re-run it after ANY change there.** It is not a threshold approximation any
+  more: it carries the REAL 48K LD-BYTES — LD-EDGE's 59 T sampling loop and its B
+  counters, LD-LEADER's 256 pilot cycles, LD-SYNC, LD-8-BITS' `CP 0xCB` — driven by
+  a mirror of `Tape::Read`'s own phase machine, and it checks the whole ladder
+  (header / 200 B loader / 1.5 KB / 6912 B screen / 35 KB game per level — the
+  measured figures are in TapeWear.h's own comment). Every
+  assertion was checked to FAIL under a hand-applied mutation, the level intervals
+  included. ~10 s to run (most of it the 200-sample game-rate measurements).
+- **`tapeNext` IS BOTH THE REQUEST AND THE STORE, and wearing our own output
+  compounded — the defect that made the whole feature dead on arrival** (hw
+  2026-09-20, owner: "at Light it still cannot lock on, the signal is too
+  distorted"). The tape machine writes `tapeNext` only when the pulse LENGTH
+  changes: `TAPE_PHASE_SYNC` writes it once and then repeats it for up to 8063
+  pilot pulses, `TAPE_PHASE_PURETONE` likewise, and `TAPE_PHASE_DRB` never writes
+  it at all. The hook wrote the WORN value back into it, so each pilot pulse was
+  multiplied by (1 + wow/256) AGAIN — a geometric random walk with no bound.
+  Measured: a 2168 T pilot reaches **25 T at LIGHT** (87x out) and 21000 T on other
+  seeds, so LD-LEADER can never lock on and nothing loads at any level. The fix is
+  `tapewear::State::pulseFedback()`, which undoes the feedback (`if (next ==
+  delivered) next = nominal`) and wears the nominal instead; the glue calls THAT,
+  never `pulse()`. **It belongs in the model, not in the glue** — that is what lets
+  the host test drive it, and the test asserts both halves: the fed-back pilot must
+  stay inside the wow band, and raw `pulse()` fed its own output must still run
+  away (an assertion that the harness has teeth).
+- **hw 2026-09-20, owner: "now it works, it turned out really great"** — that is the
+  build with BOTH fixes of this section in (the auto-run split and the pilot-tone
+  runaway). It is not itemised beyond that, so read it as the thing the two fixes
+  were for: a launch starts loading by itself and the signal is now something a ROM
+  can lock on to. The LEVEL rates below were measured on the host model only, and
+  the clean-stretch mixture landed after that verdict and was confirmed separately
+  (below).
+- **The general shape, and it is the one to carry away: the old suite could not
+  fail on this because it re-supplied a fresh nominal length on every call** —
+  which is true only of the DATA phases. A harness that drives a component
+  differently from its real caller measures a component nobody ships. Drive it the
+  way the caller drives it.
+- **A LD-EDGE timeout in the LEADER or the SYNC is NOT fatal, and getting that
+  wrong made every level look far worse than the real machine** (it read as "Medium
+  cannot even load a 19-byte header"). `JR NC,LD-BREAK` lands on LD-BREAK's
+  `RET NZ`, and LD-EDGE's timeout exit (`INC B / RET Z`) leaves **Z set** — so
+  there is no return: control falls into LD-START and the whole pilot search begins
+  again. A header pilot is 5 s of tape and locking on needs 512 clean edges
+  (~0.3 s), so the ROM rides out several dropouts there. Only LD-8-BITS answers a
+  timeout with `RET NC`. **So the fault rate is effectively per second of DATA**,
+  and that is what the level table is tuned against.
+- **`evtMin` is a GUARANTEED clean run after every Play** (the schedule is re-armed
+  there), so it must stay a small fraction of the span — the first cut had
+  evtMin == evtSpan, which makes any block shorter than evtMin immune and any
+  longer one certain: a cliff, not a worn tape. It is evtMin = 0.2 x mean,
+  evtSpan = 1.6 x mean now, and the countdown is **int64** because a side of tape
+  is minutes and 400 s does not fit 32 bits with room to spare.
 - **ONE hook, at the bottom of `Tape::Read`'s do-loop** (`tapeNext =
-  wearPulse(tapeNext)`), which is what makes every format that plays through that
-  state machine — TAP, TZX including GDB and CSW, PZX — worn by construction. The
-  perturbed length feeds the loop's own `while (tapeCurrent >= tapeNext)`, so the
+  wearPulse(tapeNext)` -> `State::pulseFedback`), which is what makes every format
+  that plays through that state machine — TAP, TZX including GDB and CSW, PZX —
+  worn by construction. The perturbed length feeds the loop's own `while (tapeCurrent >= tapeNext)`, so the
   time base stays consistent. WAV/MP3 return before the loop and get dropouts only
   (`wearAudio`, driven by elapsed T-states): a wow on a recorded waveform would
   mean resampling it, and those files are recordings of a real tape anyway.
-- **Fast load must be IGNORED while this is on** (`fastLoadOn()`, Tape.cpp), and
-  that is the whole feature, not a detail: the ROM trap fills the block straight
-  out of the file without ever generating a pulse, so a worn tape with fast load
+- **The in-ROM TRAP must be suppressed while this is on** (`fastLoadOn()`,
+  Tape.cpp), and that is the whole feature, not a detail: the trap fills the block
+  straight out of the file without ever generating a pulse, so a worn tape with it
   is a worn tape that always loads perfectly. Five sites — `flashloadAvailable()`,
   the Cerikopik and JJ turbo candidates, the turbo auto-start branch, and the two
-  ROM traps in Z80_JLS.cpp (0x56b/0x56d/0x57d and Byte's 0x557). The menu greys
-  the "Fast tape load" row (`p_noTapeWear`) rather than silently disagreeing with
-  the user. Consequence, and it is the authentic one: a browser launch then takes
-  the flashload-off path — mount, press Play, and the user types `LOAD ""`.
+  ROM traps in Z80_JLS.cpp (0x56b/0x56d/0x57d and Byte's 0x557).
+- **...but the AUTO-RUN must SURVIVE it, and conflating the two shipped a feature
+  that could not load anything at all** (hw 2026-09-20, owner: "with any Tape wear
+  but Off loading never even starts"). `autoRunAvailable()` was `return
+  flashloadAvailable();`, so wear took the loader snapshot down with the trap: a
+  launch mounted the tape, pressed Play and left the machine at the BASIC prompt
+  while the tape spooled past the header. **The snapshot is not a fast load — it is
+  the `LOAD ""`**, and its own registers say so: `load48` resumes at PC=0x0038 with
+  `HL=0x053F` (the return address LD-BYTES pushes at 0x055E) and `IX=0x5CE2 /
+  DE=0x0011 / A'=0x00`, i.e. an interrupt taken INSIDE LD-BYTES receiving the
+  17-byte header. On RET it runs the `CP A` at 0x056A and arrives at 0x056B, which
+  is both where the trap fires and where the real pilot-tone search begins — so
+  with the trap gone it just reads the tape, which is exactly what a worn tape
+  needs. The two gates are now separate (`tapeFastMachineOk()` holds the machine
+  test they share) and the decision table is: fast load ON + wear off = instant, as
+  before; ON + wear on = auto-run, then real-time worn loading; OFF = no auto-run,
+  type `LOAD ""` yourself, either way.
+- **Consequently the "Fast tape load" row is NOT greyed while wear is on** (the
+  first cut greyed it, `p_noTapeWear`, now deleted). Half of what it does still
+  applies — it decides whether `LOAD ""` is typed for the user — and greying a row
+  that still governs that hides the one thing it is doing. The general shape:
+  **before disabling a setting because a feature "ignores" it, check whether the
+  setting does one thing or two.**
+- **A level that can never load a game is a dead end, not a worn tape** (owner,
+  2026-09-20: "add a chance of a successful game load — Medium 40%, Heavy 10%").
+  The arithmetic makes that a MODEL question rather than a tuning one: one fault
+  kills a load, so with a single interval distribution "a 205 s game loads 10% of
+  the time" forces a mean of ~125 s — a level whose screens would then load 92% of
+  the time, i.e. not heavy at all. Real wear is not spread evenly either: a cassette
+  has BAD PATCHES AND CLEAN STRETCHES, and whether a load survives is mostly whether
+  it started inside one. So `Level::cleanPct` draws that percentage of intervals
+  from a 400-1200 s clean stretch (`CLEAN_MIN_T`) instead of the damaged-patch
+  distribution — 0 / 40 / 10 for Light / Medium / Heavy. A damaged pass still tears
+  every few seconds at Heavy and still sounds chewed; a clean pass gets through.
+  Consequence worth knowing: anything LONGER than a clean stretch is impossible and
+  anything big collapses onto cleanPct (Heavy's screen and game are both ~10%), so
+  the "gets partway and dies" character lives in the damaged passes, not across the
+  block sizes.
+  **hw 2026-09-20, owner: "works"** — read it as the feature working end to end at
+  all three levels with the mixture in. It does NOT establish the 40% / 10% figures
+  themselves: those need tens of attempts to measure, so they still rest on the host
+  ROM model. If a user ever reports a level that feels wrong, `cleanPct` is the one
+  number to move, and tools/tapewear_test.cpp measures the effect in ~10 s.
 - **Nothing is damaged where nothing is recorded**: a fault may only START in a
   signal-bearing phase. Not tidiness — an inter-block PAUSE is one "pulse" of
   3500000 T, and letting the schedule count it would spend the whole fault budget
@@ -9601,13 +9686,13 @@ user remembers, and two of them are the only ones that can actually break a load
   every dropout silently became a no-op, and the per-kind assertion failed for a
   reason that had nothing to do with the model.
 - `-DTAPE_WEAR_TRACE=ON` logs each fault (kind, length in us, block, phase).
-- **Hw check owed**, in order: the audible warble on a real speaker (Light, any
-  TAP — this is the half the user asked for and no test can judge it); Heavy
-  ending in `R Tape loading error`; Light loading a small block most of the time;
-  that the Fast tape load row really greys and the tape really plays (i.e. the
-  five fastLoadOn sites all took); a TZX turbo loader (the Cerikopik/JJ paths now
-  auto-start the tape instead of flash-loading); and a WAV/MP3 tape, where only
-  the dropouts exist.
+- **What the three hardware verdicts do NOT cover, and is still owed**: the audible
+  warble on a real speaker at Light (the half the user asked for, and no test can
+  judge it); the measured 40% / 10% game rates (tens of attempts each); a TZX turbo
+  loader, where the Cerikopik/JJ paths now auto-start the tape instead of
+  flash-loading; a launch with **Fast tape load OFF**, which must still land at BASIC
+  as it always did; and a WAV/MP3 tape, where only the dropouts exist and the wow
+  does not.
 
 ## Snapshots: one level, one slot list, and the file loader that had gone missing (owner: "работает", 2026-09-11)
 

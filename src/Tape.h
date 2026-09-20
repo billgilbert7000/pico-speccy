@@ -212,13 +212,15 @@ public:
     // (Z80_JLS.cpp decodeOpcodebf): the guest enters its own LD-BYTES and the block
     // is filled from the file — the tape does NOT have to be playing. Covers the
     // TC2068, whose LD-BYTES is the Sinclair routine relocated into the EX-ROM.
-    // False only where no such routine exists to trap (ALF, ZX81+, custom ROMs).
+    // False where no such routine exists to trap (ALF, ZX81+, custom ROMs) AND
+    // while tape wear is on, which needs every block to arrive as real pulses.
     static bool flashloadAvailable();
-    // ...and can the flashload AUTO-RUN be used? That is a second, stronger thing:
-    // it restores a hardcoded 48K/128K snapshot (FileZ80::loader48/loader128) whose
-    // PC points into the SINCLAIR ROM, so it needs a ROM derived from that one. The
-    // TC2068's is a different program, so it loads fast but the user has to type
-    // LOAD "" — exactly as on the real machine.
+    // ...and can the AUTO-RUN be used? A SEPARATE mechanism, not a stronger one: it
+    // restores a hardcoded snapshot (FileZ80::loader48/loader128/loaderTc2068) that
+    // resumes inside the ROM's own LD-BYTES, i.e. it types LOAD "" for the user and
+    // nothing more. It needs a ROM those snapshots were captured on, but it does NOT
+    // need the trap — so it SURVIVES tape wear, and must: without it a launch mounts
+    // the tape, presses Play and leaves the machine at the BASIC prompt.
     static bool autoRunAvailable();
     static void LoadRemembered(); // re-mount Config::tape_file after F11/boot; auto-plays if tape_autostart
     static void Eject();          // take the tape out: close, drop the listing, forget Config::tape_file

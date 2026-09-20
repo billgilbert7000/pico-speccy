@@ -188,9 +188,12 @@ static void wearReset() {
 
 static uint32_t wearPulse(uint32_t next) {
     const uint8_t was = wear.evtKind;
-    if (!wear.sync(Config::tape_wear)) return next;
+    wear.sync(Config::tape_wear);
     bool freeze = false;
-    const uint32_t out = wear.pulse(next, wearSignalPhase(), freeze);
+    // pulseFedback, NOT pulse: Tape::Read stores our result back into the very
+    // `tapeNext` it passes in, and a pilot tone reuses it for thousands of pulses.
+    // See the comment on it — wearing our own output again is an exponential runaway.
+    const uint32_t out = wear.pulseFedback(next, wearSignalPhase(), freeze);
 #if TAPE_WEAR_TRACE
     if (wear.evtKind && !was)
         Debug::log("[WEAR] %s %u us  blk=%d phase=%d",
@@ -340,18 +343,30 @@ void StopRealPlayer(void) {
 #endif
 }
 
-// Load tape file (.wav, .tap, .tzx)
-bool Tape::flashloadAvailable() {
-    return fastLoadOn() && Config::arch != A_ALF &&
+// Every machine whose ROM the in-ROM trap and the loader snapshots were made for.
+// Shared by the two gates below, which differ only in what tape wear does to them.
+static inline bool tapeFastMachineOk() {
+    return Config::arch != A_ALF &&
            Config::romSet != R_ZX81P && Config::romSet != R_48K_CS &&
            Config::romSet != R_128K_CS;
 }
 
+// Load tape file (.wav, .tap, .tzx)
+bool Tape::flashloadAvailable() {
+    return fastLoadOn() && tapeFastMachineOk();
+}
+
 bool Tape::autoRunAvailable() {
-    // Every machine whose ROM one of the loader snapshots can resume on. The TC2068
-    // has its own (FileZ80::loaderTc2068, captured from real hardware) — the 48K one
-    // cannot be used there, see loaders.h.
-    return flashloadAvailable();
+    // Tape wear ignores the in-ROM TRAP but must NOT disable the AUTO-RUN, and the
+    // loader snapshot itself says why: it resumes at 0x0038 with HL=0x053F (the
+    // return address LD-BYTES pushes at 0x055E), IX/DE/A' set up for the 17-byte
+    // header — an interrupt taken INSIDE LD-BYTES, i.e. "LOAD \"\" has been typed and
+    // the ROM is waiting for the tape". On RET it executes the CP A at 0x056A and
+    // arrives at 0x056B, which is where the trap fires AND where the real pilot-tone
+    // search begins. With the trap suppressed it simply reads the tape, which is
+    // exactly what a worn tape needs. Gating this on wear left the machine at the
+    // BASIC prompt with the tape spooling past the header: "loading never starts".
+    return Config::flashload && tapeFastMachineOk();
 }
 
 void Tape::LoadTape(const string& mFile_) {
