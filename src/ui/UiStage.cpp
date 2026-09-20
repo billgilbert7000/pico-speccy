@@ -256,7 +256,7 @@ static const RomsetIdx kPref48[]   = {
     // any stored romset that is not in the table, and "Last used" is the only sane
     // fallback. Everything before it may be reordered freely — Config stores the
     // RomsetIdx, not the index; only opt_pref48[] in UiTree.cpp has to stay aligned.
-    R_TC2048, R_TC2068, R_48K_CS, R_LAST };
+    R_TC2048, R_TC2068, R_48K_DG89, R_48K_CS, R_LAST };
 static const RomsetIdx kPref128[]  = {
     R_128K,
 #if !NO_SPAIN_ROM_128k

@@ -425,6 +425,16 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
             MemESP::registerOverlay(gb_rom_0_sinclair_48k,
                 Config::byte_cobmect_mode ? gb_overlay_48k_byte_sovmest : gb_overlay_48k_byte);
             break;
+        case R_48K_DG89:
+            // Didaktik Gama 89 — the Sinclair 48K ROM with a Czech character set and
+            // a Centronics printer driver in its 0xFF-filled tail (rom_pack.py 48k,
+            // 1692 B of overlay). The machine itself is an ordinary 48K, so nothing
+            // else in this branch changes; the in-ROM tape trap and the LOAD ""
+            // snapshot both still apply, their addresses (0x0038, 0x053F, 0x056B)
+            // being among the bytes this ROM does NOT touch.
+            MemESP::rom[0].assign_rom(gb_rom_0_sinclair_48k);
+            MemESP::registerOverlay(gb_rom_0_sinclair_48k, gb_overlay_48k_dgama89);
+            break;
         case R_TC2048:
             // Timex TC2048 — the Sinclair 48K ROM plus seven bytes (rom_pack.py 48k):
             // the boot path is redirected through OUT (#FF),A so the SCLD mode

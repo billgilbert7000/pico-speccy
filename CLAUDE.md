@@ -4329,9 +4329,9 @@ hi-res snapshot (`%110` in byte 36) coming back in hi-res — no such file to ha
 
 ### Timex TC2048 — a whole machine for 37 bytes (2026-09-11, boots; ROM path not separately confirmed)
 
-`R_TC2048` ("TC2048") is a **ROMSET of the 48K arch**, listed in Machine → ZX
-Spectrum 48K just before Custom (and in Options → Preferred rom, index-aligned
-with `kPref48[]` in UiStage.cpp). That is the whole machine, because MAME
+`R_TC2048` ("TC2048") is a **ROMSET of the 48K arch**, listed under its own
+Machine → Timex row since the 2026-09-11 family rework (and in Options →
+Preferred rom, index-aligned with `kPref48[]` in UiStage.cpp). That is the whole machine, because MAME
 `sinclair/timex.cpp` is unambiguous about how little a TC2048 is:
 
 - `tc2048_io` decodes exactly **`#FE` (ULA) and `#FF` (SCLD)** — no `#F4`, no AY,
@@ -4697,6 +4697,75 @@ worse than loading it and saying so, which is what the "TS2068 snapshot: running
 #FF — both restored, DEC first because its bit 7 decides what the HSR window shows.
 Real material: `debug/Timex/GVD42048.z80` (mch 14) and `GVD4NTSC.z80` (mch 128) are
 the same program flagged for the two machines.
+
+## Didaktik Gama 89 — a whole machine for 1692 bytes (hw-confirmed 2026-09-20)
+
+`R_48K_DG89` ("48Kdg89", UI "48K (Gama 89)") is a **ROMSET of the 48K arch** with its
+own **Machine → Didaktik** row — the Timex shape exactly, and for the same reason: a
+different manufacturer's machine reads as a machine, not as a ZX romset. The image is
+`ProfRom`-free and simple: `src/roms/48k/src/dgama89.bin`, 16384 B, md5
+`28287c397defff765b39bd0660da6d01`, CRC32 `45C29401`, banner `1989 DIDAKTIK SKALICA`
+at 0x153E where Sinclair's says `1982 Sinclair Research Ltd`.
+
+- **It is the Sinclair 48K ROM, measurably**: 924 differing bytes, of which **only 125
+  sit below 0x3800**. The rest is the Czech character set (517 B from 0x3D00) and ~282 B
+  of NEW code written into the ROM's 0xFF-filled tail at 0x386E / 0x3926 / 0x3959 /
+  0x397E, reached by the handful of redirected calls that make up those 125 bytes. So
+  it packs as an overlay over `gb_rom_0_sinclair_48k` — **1692 B** (126 runs + the
+  12-byte header) against 16384 raw, one line in `FAMILIES['48k']['variants']`.
+  Measured alternatives, for the record: over `tc2048.bin` 1700 B and over
+  `byte_sovmest.bin` 1731 B — both ruled out anyway, since **a base must be a RAW
+  bank** (MemESP's overlay registry does not chain); over any 128K half, 2655 B.
+- **The new code is a Centronics printer driver**, which is the one guest-visible
+  deviation worth knowing: busy-poll `IN A,(#5F) / BIT 3,A`, data `OUT (#1F),A`, line
+  counter at 0x5C80 and an inversion flag at 0x5C81 bit 7, with CAPS SHIFT + Q polled
+  as BREAK in the wait loop. We emulate neither port as a printer. It does not hang —
+  the loop waits for bit 3 to be SET and an unattached read answers with the floating
+  bus / 0xFF — so LPRINT and LLIST simply go nowhere. NB `OUT (#1F)` is a WRITE, so it
+  does not collide with Kempston (a read of #1F with A5 clear); the status port #5F has
+  A5 set and is not Kempston either.
+- **Nothing else keys on the romset.** The machine is a 48K: same ULA, same 69888 T
+  frame, same ports, so `requestMachine`'s A_48K branch binds base + overlay and that
+  is the whole of it. `isDidaktikRomset()` (ArchRom.h) exists unused on purpose —
+  the Gama's own hardware (its 80 KB of RAM, the Didaktik 40/80 disk interface, the
+  printer ports above) is what a later round would key on, and a literal spread over
+  five files is how the +3e's IDE scheme went wrong.
+- **Fast tape load and the `LOAD ""` auto-run both work, and that is checked rather
+  than assumed**: the trap PCs (0x056B/0x056D/0x057D) and every register address the
+  loader snapshot resumes on (0x0038, 0x053F, 0x055E, 0x056A) are among the bytes this
+  ROM does NOT touch, so `tapeFastMachineOk()` needs no exclusion.
+- **Flash: 1692 B of array plus ~150 B of romset plumbing** (the strings in
+  `NM_ROMSET_TABLE` and `UiStrings.h`, one `Option` row in `opt_mach_didaktik`, one in
+  `opt_pref48`, one `RomsetIdx` in `kPref48`, one `case` in requestMachine). In the
+  LINKED image that shows up quantised to the 4 KB `ALIGN` in front of `.psramroms`:
+  DVp2 went 2502492 → 2506588, i.e. **+4096 for the page**, but that page also carries
+  the TR-DOS 6.11e overlay (3001 B) committed in parallel the same evening — the two
+  together are ~4.9 KB and crossed one boundary, so neither may be billed the whole
+  page on its own. **Read a fw-size delta as a page count, never as a feature's cost**;
+  the array sizes are the cost. Where it bites: z0p2-PIOUSB had 3142 B of plain bank
+  region above a stock gm.dls, so one such page puts a board with no QSPI PSRAM onto
+  the traded window when it installs the stock bank — the documented, automatic trade,
+  not a failure (see the dynamic-bank section).
+- **`rom_verify.py` now covers the whole 48K family** (Spanish, BYTE + its two DD66
+  states, TC2048, Gama 89) and pins the Gama's CRC32. That family had no verification
+  at all until now, which is the same gap that let the Scorpion monitor go stale when
+  its image was swapped. The shipped overlay was also reconstructed out of the LINKED
+  DVp2 firmware (`gb_rom_0_sinclair_48k` + `gb_overlay_48k_dgama89`, resolved through
+  `nm`) and came back byte-identical to the dump — the binding level, which
+  rom_verify cannot see.
+- **Hw 2026-09-20, owner: "работает"** — not itemised, so read it as the one thing a
+  bare verdict can mean here: Machine → Didaktik comes up and runs, i.e. the romset
+  binds, the 1692-byte overlay resolves at `rom[0]` and the machine boots its own
+  BASIC. That also settles the only thing about this ROM that could have been
+  emulator-side — a wrong overlay would not boot at all.
+  **Still owed, in order of what a user would notice**: the Czech character set (the
+  accented glyphs at 0x3D00+ where a Spectrum has its graphics blocks — the largest
+  single part of the diff and entirely cosmetic, so a boot does not exercise it); a
+  .tap with Fast load ON (the in-ROM trap at 0x056B, which this ROM leaves untouched)
+  and with it OFF; Options → Preferred rom offering it and a cold boot honouring it;
+  and LPRINT / LLIST doing nothing rather than hanging (the Centronics driver's busy
+  poll on an unattached `#5F`).
+
 
 ## Z80 DMA attribute multicolour (MB-02+/DATA-GEAR): NaPICu (2026-09-14; owner on `DVp2-napicu-dma2`: "работает" — letters and title both clean)
 
@@ -5524,9 +5593,12 @@ is 0 and not 1632.
 
 Measured over all 14 variants (MinSizeRel, 2026-09-20, after the GMX v6 image was
 removed again — these are the same figures the tree had before it landed, the commits
-in between having fitted inside the 4 KB alignment slack). `bank region` is what the
-build leaves, and with the floor at 0 it is also the whole headroom before the soft
-ASSERT; `free@hard` is what remains before the HARD floor stops the build:
+in between having fitted inside the 4 KB alignment slack). **They predate the TR-DOS
+6.11e overlay and the Didaktik Gama 89 ROM added later the same day, which together
+cost ONE 4 KB page**: DVp2 measured 2506588 / bank 1687552 with both in, and the other
+variants were not re-measured. `bank region` is what the build leaves, and with the
+floor at 0 it is also the whole headroom before the soft ASSERT; `free@hard` is what
+remains before the HARD floor stops the build:
 
 | variant | fw size | bank region | ext. window | free@hard |
 |---|---|---|---|---|

@@ -54,6 +54,24 @@ check('Sinclair 128K rom0',
                                    'gb_overlay_pentagon_sinclair_128k_0')),
       dump('pentagon/src/sinclair_128k_0.bin'))
 
+# The 48K family: every variant is a run-list patch over the Sinclair base, and each
+# one IS a machine in the Machine menu (Spanish, BYTE and its two DD66 states, TC2048,
+# Didaktik Gama 89). They were unverified here until 2026-09-20 — the same gap that
+# let the Scorpion monitor go stale — and the check is one loop, so there is no reason
+# for it to be a gap.
+print("48K family overlays (over the Sinclair 48K base):")
+for name, ov, ref in (
+        ('48K Spanish',      'gb_overlay_48k_es',           '48k/src/es.bin'),
+        ('BYTE',             'gb_overlay_48k_byte',         '48k/src/byte.bin'),
+        ('BYTE test',        'gb_overlay_48k_byte_test',    '48k/src/byte_test.bin'),
+        ('BYTE compat',      'gb_overlay_48k_byte_sovmest', '48k/src/byte_sovmest.bin'),
+        ('TC2048',           'gb_overlay_48k_tc2048',       '48k/src/tc2048.bin'),
+        ('Didaktik Gama 89', 'gb_overlay_48k_dgama89',      '48k/src/dgama89.bin')):
+    check(name, apply_overlay(s48, arr('48k/48k_overlays.c', ov)), dump(ref))
+check('Didaktik Gama 89 CRC32',
+      '%08X' % (__import__('zlib').crc32(dump('48k/src/dgama89.bin')) & 0xffffffff),
+      '45C29401')
+
 # The Scorpion ZS-256 service ROM, reassembled the way requestMachine binds it: banks
 # 0/1 are overlays over the stock Sinclair 128K ROM0, banks 2/3 raw. Worth checking as
 # a WHOLE image rather than per bank — the four are one firmware and the version is

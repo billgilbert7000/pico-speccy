@@ -232,6 +232,14 @@ FAMILIES = {
             # i.e. the boot writes A to the SCLD mode register and falls through to
             # the original routine. 37 B of overlay for a whole machine.
             {'key': 'tc2048',       'name': 'TC2048',      'sym': 'gb_rom_0_tc2048'},
+            # Didaktik Gama 89 (Czechoslovak clone, "1989 DIDAKTIK SKALICA" at 0x153E,
+            # md5 28287c397defff765b39bd0660da6d01): the Sinclair 48K ROM with only
+            # 125 differing bytes below 0x3800 — the rest is the Czech character set
+            # (517 B from 0x3D00) and ~282 B of NEW code written into the ROM's
+            # 0xFF-filled tail at 0x386E/0x3926/0x3959/0x397E, which is its Centronics
+            # printer driver (busy poll IN A,(#5F) BIT 3, data OUT (#1F),A, line
+            # counter at 0x5C80/0x5C81). 1692 B of overlay for a whole machine.
+            {'key': 'dgama89',      'name': 'Didaktik Gama 89', 'sym': 'gb_rom_0_dgama89'},
         ],
     },
     # 128K: only the SECOND ROM half (rom[1], the 48K BASIC core) is overlaid — it is

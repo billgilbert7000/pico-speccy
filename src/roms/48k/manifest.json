@@ -43,6 +43,14 @@
       "len": 37,
       "runs": 3,
       "diff_bytes": 7
+    },
+    {
+      "name": "Didaktik Gama 89",
+      "sym": "gb_rom_0_dgama89",
+      "overlay_sym": "gb_overlay_48k_dgama89",
+      "len": 1692,
+      "runs": 126,
+      "diff_bytes": 924
     }
   ]
 }

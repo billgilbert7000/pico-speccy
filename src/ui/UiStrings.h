@@ -265,6 +265,11 @@
 #define TXT_ROM_BYTE_GLUK_S "128K+Gluk"  // left-column short form (Option::slabel)
 #define TXT_ROM_TC2048      "TC2048"
 #define TXT_ROM_TC2068      "TC2068"
+// Didaktik Gama 89 — its own Machine row for the same reason Timex has one: a
+// different manufacturer's machine, not a ZX romset (ArchRom.h isDidaktikRomset).
+#define TXT_MACH_DIDAKTIK    "Didaktik"
+#define TXT_ROM_DG89         "48K (Gama 89)"
+#define TXT_ROM_DG89_S       "Gama 89"
 #define TXT_ROM_CUSTOM      "Custom"
 // Two DIFFERENT flash images (Devices > Replace ROM slots "48K" and "128K"),
 // so they cannot share one row. Pentagon reuses the 128K image and keeps the

@@ -459,6 +459,13 @@ static const Option opt_mach_timex[] = {
     { TXT_ROM_TC2048,     NM_MACH(A_48K, R_TC2048) },
     { TXT_ROM_TC2068,     NM_MACH(A_48K, R_TC2068) },
 };
+// Didaktik Gama 89, the Czechoslovak clone — its own row for the same reason, and one
+// entry in it because one ROM is what we have. The machine IS a 48K (same ULA, same
+// timing, same ports); the 1692 B of overlay hold a Czech character set and a
+// Centronics driver in the ROM's 0xFF tail. See ArchRom.h isDidaktikRomset.
+static const Option opt_mach_didaktik[] = {
+    { TXT_ROM_DG89,       NM_MACH(A_48K, R_48K_DG89), TXT_ROM_DG89_S },
+};
 // Pentagon is built at runtime, not static: 512K/1024K need extended-RAM backing
 // and that gate used to live on their rows. Rebuilt on every call (NOT cached like
 // mach_scorpOpts) because p_extRam() includes FileUtils::fsMount — a card inserted
@@ -613,6 +620,7 @@ static const Node kMachine[] = {
     NM_RADIO  (TXT_MACH_SPECTRUM, SET_MACHINE, opt_mach_spectrum, nullptr),
     NM_RADIO  (TXT_MACH_TIMEX,    SET_MACHINE, opt_mach_timex,    nullptr),
     NM_SUB    (NM_IND TXT_MACH_TIMEX_CART, kTimexCart, p_tc2068Active),
+    NM_RADIO  (TXT_MACH_DIDAKTIK, SET_MACHINE, opt_mach_didaktik, nullptr),
     NM_RADIO_D(TXT_MACH_PENTAGON, SET_MACHINE, mach_pentOpts,     nullptr),
     // Machine-dependent options sit right under their machine, indented so the
     // grouping reads at a glance (they also only show while that machine is
@@ -1120,13 +1128,15 @@ static const Option opt_pref48[] = {
     { TXT_ROM_48K_ES,  1 },
     { TXT_ROM_TC2048,  2 },
     { TXT_ROM_TC2068,  3 },
-    { TXT_ROM_CUSTOM,  4 },
-    { TXT_ROM_LAST,    5 },
+    { TXT_ROM_DG89,    4, TXT_ROM_DG89_S },
+    { TXT_ROM_CUSTOM,  5 },
+    { TXT_ROM_LAST,    6 },
 #else
     { TXT_ROM_TC2048,  1 },
     { TXT_ROM_TC2068,  2 },
-    { TXT_ROM_CUSTOM,  3 },
-    { TXT_ROM_LAST,    4 },
+    { TXT_ROM_DG89,    3, TXT_ROM_DG89_S },
+    { TXT_ROM_CUSTOM,  4 },
+    { TXT_ROM_LAST,    5 },
 #endif
 };
 // Values are indices into UiStage's kPref128, so a conditional row shifts every row

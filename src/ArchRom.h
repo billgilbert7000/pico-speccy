@@ -41,6 +41,7 @@
     X(R_48K_BY,         "48Kby",            "Byte 48K")           \
     X(R_TC2048,         "TC2048",           "TC2048")             \
     X(R_TC2068,         "TC2068",           "TC2068")             \
+    X(R_48K_DG89,       "48Kdg89",          "48K (Gama 89)")      \
     X(R_128K,           "128K",             "128K")               \
     X(R_128K_ES,        "128Kes",           "128K Spanish")       \
     X(R_PLUS2,          "+2",               "+2")                 \
@@ -171,6 +172,14 @@ inline bool isTc2068Romset(RomsetIdx r) { return r == R_TC2068; }
 // "Is the SCLD the machine's own ULA?" — both Timex romsets force Config::timex_video
 // on and the SAA1099 off, and both take the SCLD #FF register unconditionally.
 inline bool isTimexRomset(RomsetIdx r) { return r == R_TC2048 || r == R_TC2068; }
+
+// Didaktik Gama 89 (Czechoslovak clone): a 48K machine whose ROM is the Sinclair one
+// with a Czech character set and a Centronics driver written into its 0xFF tail — so
+// it is a ROMSET of A_48K and nothing here keys on it yet. It has a predicate all the
+// same, because "is this the Didaktik" is the question any future difference (its
+// printer ports #1F/#5F, or the Gama's 80 KB of RAM) would have to ask, and a literal
+// spread over five files is how the +3e's IDE scheme went wrong.
+inline bool isDidaktikRomset(RomsetIdx r) { return r == R_48K_DG89; }
 
 // "Is the GMX firmware live?" — one romset today (ProfRom GMX v5.44), but the question
 // is asked from a dozen places (CPU::reset's g_scorp_gmx, the butter/traded fallbacks
