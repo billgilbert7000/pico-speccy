@@ -511,7 +511,7 @@ static const Option opt_mach_karabas[] = {
 // from NVS written on a board that HAS the chip (requestMachine + bootNotice).
 // `#if GMX_IN_FLASH` is still the build escape hatch that drops the ROM entirely.
 static const Option* mach_scorpOpts(uint8_t& cnt) {
-    static Option opts[6];
+    static Option opts[5];
     static uint8_t n = 0;
     if (!n) {
         opts[n++] = { TXT_ROM_SCORP,      NM_MACH(A_SCORP, R_SCORP),      TXT_ROM_SCORP_S      };
@@ -519,11 +519,8 @@ static const Option* mach_scorpOpts(uint8_t& cnt) {
 #if GMX_IN_FLASH
         // butter PSRAM is what GMX needs; romsUsable() is whether its ROM is still
         // in flash at all (FlashRoms.h — the GM.DLS bank may have been given it).
-        // Both GMX images gate together: same ROM region, same butter requirement.
-        if (butter_psram_size() && FlashRoms::romsUsable()) {
-        opts[n++] = { TXT_ROM_SCORP_GMX,  NM_MACH(A_SCORP, R_SCORP_GMX),  TXT_ROM_SCORP_GMX_S  };
-        opts[n++] = { TXT_ROM_SCORP_GMX6, NM_MACH(A_SCORP, R_SCORP_GMX6),TXT_ROM_SCORP_GMX6_S };
-        }
+        if (butter_psram_size() && FlashRoms::romsUsable())
+            opts[n++] = { TXT_ROM_SCORP_GMX, NM_MACH(A_SCORP, R_SCORP_GMX), TXT_ROM_SCORP_GMX_S };
 #endif
         opts[n++] = { TXT_ROM_SCORP_1024, NM_MACH(A_SCORP, R_SCORP_1024), TXT_ROM_SCORP_1024_S };
 #if PROFROM_IN_FLASH
@@ -726,6 +723,13 @@ static const Option opt_tape_wear[] = {
     { "Medium", 2 },
     { "Heavy",  3 },
 };
+// Fast load never generates a pulse, so a worn tape would always load perfectly:
+// resolveConstraints turns it off for as long as wear is on, and the row goes grey
+// rather than offering an edit that would be taken back at the next keypress. What
+// it ALSO governs — whether LOAD "" is typed for the user when a tape is launched —
+// stays on there by itself (Tape::autoRunAvailable).
+static bool p_noTapeWear() { return Stage::get(SET_TAPE_WEAR) == 0; }
+
 static const Node kTape[] = {
     NM_ACTION(TXT_TAPE_SELECT,    act_tapeSelect,   p_hasSD),
     NM_ACTION(TXT_TAPE_PLAYSTOP,  act_tapePlayStop, nullptr),
@@ -735,7 +739,7 @@ static const Node kTape[] = {
     NM_BOOL_EN(TXT_TAPE_REALIN " (GP" _PIN_XSTR(LOAD_WAV_PIO) ")",
                                   SET_TAPE_REALIN,  nullptr, p_wavPinFree),
 #endif
-    NM_BOOL  (TXT_TAPE_FASTLOAD,  SET_FLASHLOAD,    nullptr),
+    NM_BOOL_EN(TXT_TAPE_FASTLOAD, SET_FLASHLOAD,    nullptr, p_noTapeWear),
     NM_BOOL  (TXT_TAPE_RG,        SET_TAPE_RG,      nullptr),
     NM_BOOL  (TXT_TAPE_AUTOSTART, SET_TAPE_ASTART,  nullptr),
     NM_RADIO (TXT_TAPE_WEAR,      SET_TAPE_WEAR,    opt_tape_wear, nullptr),
@@ -1164,7 +1168,7 @@ static const Option opt_pref_pent[] = {
 // is also what lets the GMX entry be dropped at RUNTIME on a butter-less module
 // (see mach_scorpOpts) without moving "Last".
 static const Option* pref_scorpOpts(uint8_t& cnt) {
-    static Option opts[7];
+    static Option opts[6];
     static uint8_t n = 0;
     if (!n) {
         opts[n++] = { TXT_ROM_SCORP,      0, TXT_ROM_SCORP_S      };
@@ -1172,11 +1176,9 @@ static const Option* pref_scorpOpts(uint8_t& cnt) {
         opts[n++] = { TXT_ROM_SCORP_1024, 2, TXT_ROM_SCORP_1024_S };
         opts[n++] = { TXT_ROM_SCORP_PROF, 3, TXT_ROM_SCORP_PROF_S };
 #if GMX_IN_FLASH
-        if (butter_psram_size() && FlashRoms::romsUsable()) {
-        opts[n++] = { TXT_ROM_SCORP_GMX,  4, TXT_ROM_SCORP_GMX_S  };
-        opts[n++] = { TXT_ROM_SCORP_GMX6, 5, TXT_ROM_SCORP_GMX6_S };
-        }
-        opts[n++] = { TXT_ROM_LAST,       6, nullptr };
+        if (butter_psram_size() && FlashRoms::romsUsable())
+            opts[n++] = { TXT_ROM_SCORP_GMX, 4, TXT_ROM_SCORP_GMX_S };
+        opts[n++] = { TXT_ROM_LAST,       5, nullptr };
 #else
         opts[n++] = { TXT_ROM_LAST,       4, nullptr };
 #endif

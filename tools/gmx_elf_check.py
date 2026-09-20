@@ -8,9 +8,10 @@ This does: it takes the 32 {data, overlay} rows of EACH image's table out of
 scorpion_gmx_banks.h, resolves every symbol against the firmware's own bytes, applies
 the overlays and compares the 512 KB with src/roms/scorpion/src/<image>.bin.
 
-Both images are checked. They share most of their arrays — 19 of v6s's 32 rows are
-v5s's rows verbatim, and a v5s RAW bank may be the BASE of the other image's overlay —
-so a binding mistake here shows up as one image being right and the other wrong.
+Every image in GMX_IMAGES is checked (one is shipped today). A second image of this
+family would share most of its arrays and could take a RAW bank of the first as the
+BASE of one of its overlays, so a binding mistake would show up as one image being
+right and the other wrong.
 
     python3 tools/gmx_elf_check.py build-ZERO2-PIOUSB/bin/MinSizeRel/z0p2-*.elf
 
@@ -68,7 +69,7 @@ def main():
     rc = 0
     for fname, _crc, infix, _note in GMX_IMAGES:
         tsym = 'gb_rom_scorpion_gmx%s_banks' % infix
-        # Slice by NAME: reading "the first 32 rows" would verify v5s twice.
+        # Slice by NAME: with several images, "the first 32 rows" would verify one twice.
         part = tbl.split('%s[32] = {' % tsym, 1)
         if len(part) != 2:
             raise SystemExit("scorpion_gmx_banks.h: no table %s" % tsym)

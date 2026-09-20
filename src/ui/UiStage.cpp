@@ -274,7 +274,7 @@ static const RomsetIdx kPrefPent[] = { R_PENT, R_128K_CS, R_LAST };
 // indices (UiTree.cpp) are identical on both build variants.
 #if GMX_IN_FLASH
 static const RomsetIdx kPrefScorp[] = { R_SCORP, R_SCORP_GR, R_SCORP_1024, R_SCORP_PROF,
-                                        R_SCORP_GMX, R_SCORP_GMX6, R_LAST };
+                                        R_SCORP_GMX, R_LAST };
 #else
 static const RomsetIdx kPrefScorp[] = { R_SCORP, R_SCORP_GR, R_SCORP_1024, R_SCORP_PROF, R_LAST };
 #endif
@@ -1180,14 +1180,27 @@ static void resolveConstraints(CommitReport& rep) {
         if (staged(SET_MEM_PG_CNT) > 64 && !stagedIsPentagon())
             changed |= force(SET_MEM_PG_CNT, 64, rep, "Murmuzavr mode off: Pentagon only");
 
+        // Fast load and tape wear cannot both be true: the in-ROM trap fills a block
+        // straight out of the file without ever generating a pulse, so a worn tape
+        // with it on would load perfectly every time. Tape.cpp has always ignored
+        // flashload while wear is on (fastLoadOn()); this is what stops the row from
+        // sitting there saying Yes while the machine does the opposite, and it is a
+        // CONSTRAINT, not an edge — it holds for as long as wear is on, which is why
+        // the row is also greyed then (p_noTapeWear, UiTree.cpp): a row that would
+        // snap back must not be editable. The AUTO-RUN survives this — it is a
+        // separate mechanism that only types LOAD "" and needs no trap, see
+        // Tape::autoRunAvailable().
+        if (staged(SET_TAPE_WEAR) != 0 && staged(SET_FLASHLOAD))
+            changed |= force(SET_FLASHLOAD, 0, rep, "Fast load off: the tape is worn");
+
         // Scorpion GMX pages its 2 MB strip and the 640x200 attribute pages out of
         // butter (QSPI) PSRAM — a property of the plugged-in Pico module, so only
         // the runtime probe can tell (the ROM is in flash on every board). Without
         // a chip, requestMachine would silently fall the pick back to Yellow (its
         // bootNotice only shows at boot, not mid-session); retarget the staged pick
         // here so the menu reports what will actually happen.
-        // Both GMX images, same rule (isScorpGmxRomset — the staged value carries the
-        // romset in its low byte).
+        // isScorpGmxRomset, not a literal — the staged value carries the romset in
+        // its low byte, and a second GMX image would be a romset beside this one.
         if (((staged(SET_MACHINE) >> 8) & 0xFF) == A_SCORP &&
             isScorpGmxRomset((RomsetIdx)(staged(SET_MACHINE) & 0xFF)) &&
             butter_psram_size() == 0)

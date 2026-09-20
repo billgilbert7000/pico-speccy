@@ -5489,7 +5489,8 @@ are DIFFERENT KINDS OF STATEMENT, which is the part worth keeping:
   rounded up to a 4 KB multiple = 1632 KB), so it is broken rather than traded.
 - **soft, `GM_BANK_MIN_KB`, default 0**: the plain region, i.e. the wall the fixed
   partition used to be. It shipped at 1632 for one day and came down the same day when
-  the second GMX image landed (owner's call) — see below for what that costs.
+  the second GMX image landed (owner's call); that image is gone again, and the floor
+  stays at 0 because the reasoning below never depended on it.
 
 **Lowering the soft floor is nearly free, and this is the reasoning to re-read before
 the next flash squeeze.** Between the two floors: a board with no QSPI PSRAM just
@@ -5498,38 +5499,41 @@ anyway), and a butter board never notices because `Buffer` puts the bank in the 
 and the flash region goes unused. The one corner that pays is butter present but its
 arena too small for the bank — Murmuzavr at 32 MB reserves all but the 512 KB minimum —
 and there the bank is refused with a log line and an on-screen notice, not a crash.
-**Consequence now visible in the table: the plain region on every 4 MB variant
-(1 613 824 - 1 662 976) is BELOW the stock converted gm.dls (1 668 026), so a no-butter
-4 MB board installing the stock bank now trades the GMX + TS-Conf ROM overlay.** That
-is free on that board and irreversible until a reflash — the standing cost of the
-trade, not a new one.
+**Where the table stands today: every 4 MB variant keeps a stock converted gm.dls
+(1 668 026 B) in the PLAIN region, but z0p2-PIOUSB does it by 3142 B** — so the first
+~3 KB of firmware growth on that variant silently moves a no-butter board onto the
+traded window instead. That is free there and irreversible until a reflash, i.e. the
+standing cost of the trade rather than a failure, which is exactly why the soft floor
+is 0 and not 1632.
 
-Measured over all 14 variants (MinSizeRel, 2026-09-20, both GMX images in flash).
-`bank region` is what the build leaves, and with the floor at 0 it is also the whole
-headroom before the soft ASSERT; `free@hard` is what remains before the HARD floor
-stops the build:
+Measured over all 14 variants (MinSizeRel, 2026-09-20, after the GMX v6 image was
+removed again — these are the same figures the tree had before it landed, the commits
+in between having fitted inside the 4 KB alignment slack). `bank region` is what the
+build leaves, and with the floor at 0 it is also the whole headroom before the soft
+ASSERT; `free@hard` is what remains before the HARD floor stops the build:
 
 | variant | fw size | bank region | ext. window | free@hard |
 |---|---|---|---|---|
-| m2p2 ILI9341 / ST7789 | 2530340 | 1662976 | 2088960 | 417792 |
-| m1p2 ILI9341 / ST7789 | 2534436 | 1658880 | 2084864 | 413696 |
-| m2p2 TV-SOFT | 2538532 | 1654784 | 2080768 | 409600 |
-| m1p2 TV-SOFT | 2542628 | 1650688 | 2076672 | 405504 |
-| DVp2 VGA-HDMI | 2559012 | 1634304 | 2060288 | 389120 |
-| m1p2 / m2p2 / PCp2 / z0p2 VGA-HDMI | 2563108 | 1630208 | 2056192 | 385024 |
-| z0p2 VGA-HDMI-PIOUSB | 2579492 | 1613824 | 2039808 | 368640 |
-| m1p2w / m2p2w (16 MB) | 2845732 | **13930496** | 14356480 | 12685312 |
+| m2p2 ILI9341 / ST7789 | 2473820 | 1720320 | 2088960 | 417792 |
+| m1p2 ILI9341 / ST7789 | 2477916 | 1716224 | 2084864 | 413696 |
+| m2p2 TV-SOFT | 2482012 | 1712128 | 2080768 | 409600 |
+| m1p2 TV-SOFT | 2486108 | 1708032 | 2076672 | 405504 |
+| DVp2 VGA-HDMI | 2502492 | 1691648 | 2060288 | 389120 |
+| m1p2 / m2p2 / PCp2 / z0p2 VGA-HDMI | 2506588 | 1687552 | 2056192 | 385024 |
+| z0p2 VGA-HDMI-PIOUSB | 2522972 | **1671168** | 2039808 | 368640 |
+| m1p2w / m2p2w (16 MB) | 2789212 | **13987840** | 14356480 | 12685312 |
 
 Three things that table says:
 
-- **The `ext. window` column is IDENTICAL to the one measured before the second GMX
-  image was added** (2 088 960 / … / 2 039 808 / 14 356 480, byte for byte). That is
-  the whole argument for why a second 512 KB ROM was affordable: `.psramroms` grows
-  UPWARD from `__psramrom_start`, which is fixed by the non-ROM firmware, so ROMs added
-  to it cost the board that trades them exactly nothing. Only the plain region moved
-  (e.g. z0p2-PIOUSB 1 671 168 → 1 613 824).
+- **The `ext. window` column did not move when the second GMX image was added, and did
+  not move back when it was removed** (2 088 960 / … / 2 039 808 / 14 356 480 through
+  all three states, byte for byte). `.psramroms` grows UPWARD from `__psramrom_start`,
+  which is fixed by the size of the NON-ROM firmware, so a ROM added to it costs the
+  board that trades them exactly nothing; only the plain region moves (z0p2-PIOUSB
+  1 671 168 → 1 613 824 with v6s → 1 671 168 again). **A ROM is cheap where a KB of
+  CODE is not** — that is the one sentence to carry into the next such decision.
 - **The 16 MB boards were the clearest win of the dynamic region**: the bank went
-  1 671 168 → 13 930 496 B with no board branch at all. The old `__gm_bank_size`
+  1 671 168 → 13 987 840 B with no board branch at all. The old `__gm_bank_size`
   constant handed them 1.59 MB and left ~12 MB of flash unreachable by anything.
 - **`free@hard` is the real firmware headroom** — 360-420 KB on 4 MB boards, where the
   fixed partition left 4-12 KB. The wall that remains is the hard floor, and past it
@@ -7183,25 +7187,26 @@ values are indices into `kPrefScorp`, which is why dropping the entry does not
 move "Last" — that is what the "1024 and ProfROM sit BEFORE the conditional GMX
 entry" rule buys.
 
-- **TWO romsets over two images** (2026-09-20, **hw-confirmed the same day for the
-  v5s+v5se pair; the second image was then swapped to v6s at the owner's request and
-  **v6s is hw-confirmed too, 2026-09-20: its 640x200 Shadow monitor renders in full
-  and the keyboard works** — a Ctrl+Alt+D screenshot of the Main menu with the cursor
-  on "V. Computer speed" is what that verdict rests on, so the navigator, the disk
-  utilities and anything that leaves the monitor are NOT covered): `R_SCORP_GMX`
-  "ZS-256 Turbo+ & GMX" = `ProfRomGMX_v5s.rom` (v5.44.9643), `R_SCORP_GMX6`
-  "ZS-256 Turbo+ & GMX v6" = `ProfRomGMX_v6s.rom` (v6.44.9643, CRC32 FCA97CD6).
-  `isScorpGmxRomset()` (ArchRom.h) is the "is the GMX firmware live" test and EVERY
-  gate uses it — `g_scorp_gmx` in CPU::reset, the butter/traded fallbacks and the
-  128-page boundary in requestMachine, `wantedPages()`, the boot check in
-  ESPectrum::setup, resolveConstraints, Snapshot. Only requestMachine and
-  `gmxLiveBankTable()` care WHICH. Both entries gate together in the menus (same ROM
-  region, same butter requirement) and sit LAST in `kPrefScorp`, so the
-  preferred-romset indices stay build- and runtime-independent.
+- **ONE romset over one image**: `R_SCORP_GMX` "ZS-256 Turbo+ & GMX" =
+  `ProfRomGMX_v5s.rom` (v5.44.9643). `isScorpGmxRomset()` (ArchRom.h) is the "is the
+  GMX firmware live" test and EVERY gate uses it — `g_scorp_gmx` in CPU::reset, the
+  butter/traded fallbacks and the 128-page boundary in requestMachine,
+  `wantedPages()`, the boot check in ESPectrum::setup, resolveConstraints, Snapshot.
+  Only requestMachine and `gmxLiveBankTable()` care WHICH image, which is what keeps
+  a second one a romset beside this and nothing else.
+  **`R_SCORP_GMX6` (`ProfRomGMX_v6s.rom`, v6.44.9643, CRC32 FCA97CD6) shipped beside
+  it for a day and was REMOVED on the owner's call the same day (2026-09-20)** — it
+  was hw-confirmed while it lasted (its 640x200 Shadow monitor renders in full and the
+  keyboard works, from a Ctrl+Alt+D screenshot of the Main menu; the navigator and the
+  disk utilities were never covered), and it cost 212 992 B of flash. It is the
+  reference case for what a second image of this family costs and how it packs — see
+  the bullets below, which are kept for that reason. Two findings from the same day
+  came out of running it and are INDEPENDENT of it: the `#7EFD` D7 turbo write and the
+  power-on RAM fill on a machine switch, both in their own bullets.
 - **`#7EFD` D7 (turbo) is AUTHORITATIVE since 2026-09-20, not gated on the user's
   Alt+F2 pick** — the same call TS-Conf's ZCLK made on 2026-09-06, and it was found
   the same way: the Shadow monitor's `S. Set Up -> V. Computer speed` read **Fast**
-  while the machine stayed at 3.5 MHz (hw, v6s). It is the machine's own speed
+  while the machine stayed at 3.5 MHz (hw, on the v6 image that shipped that day). It is the machine's own speed
   register — the monitor writes it, and its plane switcher re-asserts it on EVERY far
   call (the RAM thunk at `E4B0` does `OR 0xC0`, so D7 is set on every `RST 30`), so
   the firmware really does run fast. Worse, the read-back reports the LATCH (turbo in
@@ -7251,8 +7256,9 @@ entry" rule buys.
   continuously, so the banner is a convenience rather than the only indication.
 - **A menu machine switch now fills guest RAM with the power-on pattern**
   (`ESPectrum::powerOnRamFill()`, called from `MachineSwitch::commit` before
-  `requestMachine`). Found by the live v5 <-> v6 switch, which started the new
-  firmware wrong while F12 was always fine (hw 2026-09-20, owner: "какая-то часть
+  `requestMachine`). Found by the live v5 <-> v6 switch (v6 is no longer shipped —
+  see the romset bullet above), which started the new firmware wrong while F12 was
+  always fine (hw 2026-09-20, owner: "какая-то часть
   памяти остается и старт происходит неверно").
   **The reason is a real distinction the code had collapsed: `ESPectrum::reset()` is
   the reset BUTTON, which deliberately keeps guest RAM because hardware does — but a
@@ -7272,14 +7278,15 @@ entry" rule buys.
   snapshot/.spg load path, and those write the RAM they want AFTER it. The GMX port
   latches were never the problem — `ESPectrum::reset` has always cleared all of them.
 - **v5 vs v6 is WHICH SCREEN THE FIRMWARE DRAWS ITSELF ON**, not a hardware
-  difference: v5's Shadow monitor, navigator and debugger use the standard ZX screen,
-  v6's use the GMX **extended 640x200x16** mode (`gfx_ext`, `#7EFD` bit 3 — the mode
-  this emulator already renders through the DS80 pair-slot machinery). Evidence, from
-  the archive's own `!changes.txt`: every v6-tagged entry is a navigator/debugger
-  feature, and `GMXv6: в отладчике в команде SCReen добавились еще два возможных
-  параметра #39(57)/#3A(58) установка расширенных графических экранов`. v5 merely
-  PRESERVES the mode (`монитор определяет и восстанавливает при выходе режим
-  расширенного экрана`). ROM disk 120 KB against v5's 130 (`file_id.diz`).
+  difference — worth knowing because it is what the upstream version numbers mean:
+  v5's Shadow monitor, navigator and debugger use the standard ZX screen, v6's use the
+  GMX **extended 640x200x16** mode (`gfx_ext`, `#7EFD` bit 3 — the mode this emulator
+  already renders through the DS80 pair-slot machinery). Evidence, from the archive's
+  own `!changes.txt`: every v6-tagged entry is a navigator/debugger feature, and
+  `GMXv6: в отладчике в команде SCReen добавились еще два возможных параметра
+  #39(57)/#3A(58) установка расширенных графических экранов`. v5 merely PRESERVES the
+  mode (`монитор определяет и восстанавливает при выходе режим расширенного экрана`).
+  ROM disk 120 KB against v5's 130 (`file_id.diz`).
   **SETTLED, do not re-open: our 57/59 is right and is GMX's own.** That changelog
   line names `#39(57)/#3A(58)` as the debugger's SCReen PARAMETERS, and it briefly
   looked like a contradiction. MAME's `scorpiongmx_state::spectrum_update_screen`
@@ -7290,30 +7297,34 @@ entry" rule buys.
   Profi, which the +2 spacing might suggest: Profi DS80 renders its bitmap from
   `ram[4]`/`ram[6]` and its colour from pages **56/58** (four sites, `videoLatch ?
   58 : 56`). Two different machines, two different page pairs.
-  **v6 is the heaviest user of the 640x200 path in the tree**: no guest drives it as
-  continuously as a firmware that draws its whole UI there.
-- **Cost: v6s adds 212 992 B, v5se would have added 56 498** (that pair shipped for
-  part of 2026-09-20 and is recorded here because the packing lesson survives the
-  swap). 19 of v6s's 32 banks are byte-identical to v5s's — planes 0-3 whole, plus
-  p4b0/b1/b3 — and bind the SAME arrays; the 13 that differ are ~15 KB apart each,
-  i.e. genuinely different code, so all 13 go RAW and no overlay threshold would
-  help. `pack_gmx` packs both images in ONE pass over a SHARED `bases` list (v5s
-  first, its raws become bases) — that is the whole mechanism, and it is what made
-  v5se cost 56 KB when 11 of its 14 differing banks fell under `GMX_OVL_DIFF_MAX`.
-  Two rules that came out of it: **a base must be a RAW bank** (v5s's p4b1 and p4b3
-  are themselves overlays, so a twin cannot chain onto them and must take the
-  EXTERNAL base instead), and **the base choice stays by DIFF COUNT, not blob size**
-  — choosing the smallest blob per bank greedily turns raws into overlays and breaks
+  **v6 was the heaviest exerciser of the 640x200 path this tree has ever had** — no
+  guest drives it as continuously as a firmware that draws its whole UI there — so if
+  that path ever needs stress-testing again, that image is the way to do it.
+- **What a SECOND image of this family costs, measured** (both were shipped for part
+  of 2026-09-20 and neither is now; the packing lesson is the reason this is kept):
+  **v6s added 212 992 B, v5se 56 498**. `pack_gmx` packs every entry of `GMX_IMAGES`
+  in ONE pass over a SHARED `bases` list (v5s first, its raws become bases) — that is
+  the whole mechanism, and it is the difference between those two numbers: 19 of
+  v6s's 32 banks are byte-identical to v5s's (planes 0-3 whole, plus p4b0/b1/b3) and
+  bind the SAME arrays, but the 13 that differ are ~15 KB apart each, i.e. genuinely
+  different code, so all 13 go RAW and no overlay threshold would help; v5se's 14
+  differing banks were close enough that 11 of them fell under `GMX_OVL_DIFF_MAX`.
+  Two rules came out of it: **a base must be a RAW bank** (v5s's p4b1 and p4b3 are
+  themselves overlays, so a twin cannot chain onto them and must take the EXTERNAL
+  base instead), and **the base choice stays by DIFF COUNT, not blob size** —
+  choosing the smallest blob per bank greedily turns raws into overlays and breaks
   the dedup chain later banks depend on (measured on v5s: 337573 B against 335678).
 - **Adding a GMX image is FREE on the board that matters, and the reason is the
   direction `.psramroms` grows.** That section starts at `__psramrom_start`, fixed by
   the size of the NON-ROM firmware, and grows UPWARD — so the EXTENDED window a board
   with no QSPI PSRAM trades for (`FlashRoms::extendedLive()`) is **unchanged**:
   2 052 096 B on DVp2 before v5se, after v5se, and after the v6s swap, measured all
-  three times. Only the plain region shrinks (1 691 648 → 1 634 304 → 1 478 656), and
-  that one is used solely by a board WITH butter PSRAM — which puts the bank in the
-  arena and never touches flash. What the first addition did cost is the soft floor:
-  `GM_BANK_MIN_KB` 1632 → 0 (owner's call, 2026-09-20).
+  three times. Only the plain region moved (1 691 648 → 1 634 304 with v5se → 1 478 656
+  with v6s → 1 691 648 again once v6s was removed), and that one is used solely by a
+  board WITH butter PSRAM — which puts the bank in the arena and never touches flash.
+  What the additions did cost is the soft floor: `GM_BANK_MIN_KB` 1632 → 0 (owner's
+  call, 2026-09-20), left at 0 after the removal because the reasoning for it never
+  depended on the second image (see the dynamic-bank section).
 - **ROM is EMBEDDED in flash, deduplicated + overlaid** (`#if GMX_IN_FLASH`,
   all boards). **The image is ProfROM GMX v5.44.9643 since 2026-09-19, and the
   owner's verdict that day was "работает"** — not itemised beyond that, so read
@@ -7346,8 +7357,9 @@ entry" rule buys.
   It aims at a machine WITHOUT a working FDC, and this emulator has a full WD1793
   with real TRD/SCL/FDI images — which is the honest reason to leave it out, not the
   misread sentence. v5se did ship for part of 2026-09-20 (hw-confirmed) before the
-  owner swapped the slot to v6s. Upstream also has `su` builds (SWITCHABLE emulation,
-  ROM disk 69 KB against 130) — the better option if that behaviour is ever wanted.
+  slot was swapped to v6s and then dropped. Upstream also has `su` builds (SWITCHABLE
+  emulation, ROM disk 69 KB against 130) — the better option if that behaviour is
+  ever wanted.
 - **Flash: 335678 B, and it cost the GM.DLS partition another 32 KB.** The new
   image barely deduplicates — **30 of its 32 banks are unique** and the pairwise
   diffs between them are 15-16 KB, against v5.00's near-empty plane 3 and
@@ -9634,15 +9646,28 @@ user remembers, and two of them are the only ones that can actually break a load
   is both where the trap fires and where the real pilot-tone search begins — so
   with the trap gone it just reads the tape, which is exactly what a worn tape
   needs. The two gates are now separate (`tapeFastMachineOk()` holds the machine
-  test they share) and the decision table is: fast load ON + wear off = instant, as
-  before; ON + wear on = auto-run, then real-time worn loading; OFF = no auto-run,
-  type `LOAD ""` yourself, either way.
-- **Consequently the "Fast tape load" row is NOT greyed while wear is on** (the
-  first cut greyed it, `p_noTapeWear`, now deleted). Half of what it does still
-  applies — it decides whether `LOAD ""` is typed for the user — and greying a row
-  that still governs that hides the one thing it is doing. The general shape:
-  **before disabling a setting because a feature "ignores" it, check whether the
-  setting does one thing or two.**
+  test they share) and the decision table is: wear off + fast load ON = instant, as
+  before; wear off + OFF = no auto-run, type `LOAD ""` yourself; **wear on = fast
+  load is turned OFF for you and the auto-run happens anyway**, then the blocks
+  arrive as real pulses.
+- **Turning any Tape wear on TURNS FAST LOAD OFF** (owner, 2026-09-20), in
+  `resolveConstraints` (UiStage.cpp) as an ordinary forced exclusion with the note
+  " Fast load off: the tape is worn ", plus `p_noTapeWear` greying the row while wear
+  is on and a `Config::load()` backstop for a card written before this. It is a
+  CONSTRAINT, not an edge: it holds for as long as wear is on, and like every other
+  exclusion here it does not restore the setting when wear goes back to Off.
+  `fastLoadOn()` has ignored `Config::flashload` under wear since the feature landed,
+  so nothing about the EMULATION changes — this is only the menu no longer claiming
+  a fast load that cannot happen.
+  **The trap it re-opens is the one that cost a hardware round the day before:
+  `autoRunAvailable()` must not read `Config::flashload` alone**, or turning wear on
+  now silently takes the auto-run with it and a launch is back to sitting at the
+  BASIC prompt. It reads `(flashload || tape_wear)`. The cost, accepted: with wear on
+  the auto-run cannot be declined — the one row that governed it is now forced off —
+  and launching a game is what asks for it. The general shape, and it cut both ways
+  within two days: **before disabling a setting because a feature "ignores" it, check
+  whether the setting does one thing or two** — and if it does two, the second one
+  needs its own gate before the row can be taken away.
 - **A level that can never load a game is a dead end, not a worn tape** (owner,
   2026-09-20: "add a chance of a successful game load — Medium 40%, Heavy 10%").
   The arithmetic makes that a MODEL question rather than a tuning one: one fault
@@ -9690,9 +9715,12 @@ user remembers, and two of them are the only ones that can actually break a load
   warble on a real speaker at Light (the half the user asked for, and no test can
   judge it); the measured 40% / 10% game rates (tens of attempts each); a TZX turbo
   loader, where the Cerikopik/JJ paths now auto-start the tape instead of
-  flash-loading; a launch with **Fast tape load OFF**, which must still land at BASIC
-  as it always did; and a WAV/MP3 tape, where only the dropouts exist and the wow
-  does not.
+  flash-loading; a launch with wear OFF and **Fast tape load OFF**, which must still
+  land at BASIC as it always did; a WAV/MP3 tape, where only the dropouts exist and
+  the wow does not; and, since 2026-09-20, the auto-disable itself — pick a wear
+  level, see the Fast load row go to No and grey, then launch a game and watch it
+  START loading (that is the `autoRunAvailable()` half, and a regression there reads
+  as "loading never begins" again).
 
 ## Snapshots: one level, one slot list, and the file loader that had gone missing (owner: "работает", 2026-09-11)
 

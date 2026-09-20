@@ -223,7 +223,9 @@ static void wearAudio() {
     }
 }
 
-// Fast load and tape wear are mutually exclusive — see the note above.
+// Fast load and tape wear are mutually exclusive — see the note above. The menu
+// and Config::load() both keep the pair from ever being set, so the wear test is a
+// backstop: an NVS written by a build older than 2026-09-20 can still carry both.
 static inline bool fastLoadOn() {
     return Config::flashload && Config::tape_wear == 0;
 }
@@ -366,7 +368,14 @@ bool Tape::autoRunAvailable() {
     // search begins. With the trap suppressed it simply reads the tape, which is
     // exactly what a worn tape needs. Gating this on wear left the machine at the
     // BASIC prompt with the tape spooling past the header: "loading never starts".
-    return Config::flashload && tapeFastMachineOk();
+    //
+    // Hence the `|| tape_wear`: since 2026-09-20 turning wear on also turns Config::
+    // flashload OFF (resolveConstraints, so the menu row cannot claim a fast load
+    // that cannot happen), and reading the flag alone here would have taken the
+    // auto-run down with it — the same bug, by a different route. The cost is that
+    // with wear on the auto-run cannot be declined; a launch always types LOAD "",
+    // which is what launching a game means.
+    return (Config::flashload || Config::tape_wear != 0) && tapeFastMachineOk();
 }
 
 void Tape::LoadTape(const string& mFile_) {

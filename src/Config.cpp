@@ -274,14 +274,14 @@ extern std::string g_snapshot_loading_path;  // Snapshot.cpp — snapshot mid-lo
 // addresses that never match the ones rom[] was bound to in this TU, so the
 // overlays would silently never apply.
 
-// WHICH of the two GMX images is bound (v5.44 or v6.44 — they differ in which screen
-// the firmware draws its own tools on). They share 19 of 32 banks outright, and a v5s
-// RAW bank may be the BASE of the other image's overlay, so one base pointer can carry
-// a different overlay per romset — which is exactly why the registration is
-// per-live-bank and not static. Only one image is ever bound at a time.
+// WHICH GMX image is bound. One ships today (v5.44); this is the single place that
+// decides, so a second image of the family — packed over the same base list, where a
+// RAW bank of one may be the BASE of the other's overlay and one base pointer can
+// therefore carry a different overlay per romset — is a romset and this function, and
+// nothing else. Only one image is ever bound at a time, which is also why the overlay
+// registration is per-live-bank and not static.
 const scorpion_gmx_bank_t* gmxLiveBankTable() {
-    return Config::romSetScorp == R_SCORP_GMX6 ? gb_rom_scorpion_gmx_6_banks
-                                                : gb_rom_scorpion_gmx_banks;
+    return gb_rom_scorpion_gmx_banks;
 }
 
 void gmxRegisterLiveOverlay(uint8_t bank) {
@@ -1298,6 +1298,11 @@ void Config::load() {
         nvs_get_b("tape_autostart", tape_autostart, sts);
         nvs_get_u8("tape_wear", tape_wear, sts);
         if (tape_wear > 3) tape_wear = 0;   // a stale/foreign NVS value
+        // Fast load and tape wear are mutually exclusive (Tape.cpp fastLoadOn), and
+        // since 2026-09-20 the menu enforces it by turning flashload OFF. Settle the
+        // pair here too: a card written by an older build carries both, and the row
+        // would then read Yes while every block arrives as real pulses.
+        if (tape_wear != 0) flashload = false;
         nvs_get_str("tape_file", tape_file, sts);
         nvs_get_u8("joystick", Config::joystick, sts);
 

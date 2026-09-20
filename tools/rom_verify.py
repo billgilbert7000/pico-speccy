@@ -110,7 +110,7 @@ check('ProfROM v4.44s CRC32', '%08X' % (zlib.crc32(prof) & 0xffffffff), '9812C53
 # live bank's overlay on every romInUse change), which is exactly what a per-bank check
 # against the dump cannot be trusted to catch on its own — so the whole 512 KB image is
 # compared, with a pinned CRC for the image identity.
-print("Scorpion GMX ProfROM v5.44 / v6.44 (32 banks each, from the generated tables):")
+print("Scorpion GMX ProfROM v5.44 (32 banks, from the generated table):")
 gmx_tbl = open(os.path.join(R, 'scorpion', 'scorpion_gmx_banks.h'), encoding='latin-1').read()
 gmx_syms = {'gb_rom_0_pentagon_128k': base_pent,
             'gb_rom_1_sinclair_128k': s128_1,
@@ -119,12 +119,11 @@ def gmx_sym(sym):
     if sym not in gmx_syms:
         gmx_syms[sym] = arr('scorpion/scorpion_gmx_rom.c', sym)
     return gmx_syms[sym]
-# Each table must be sliced by NAME, not by order: the two share most of their arrays
-# and 19 of v6s's rows are v5s's rows verbatim, so reading "the first 32 rows" would
-# silently verify v5s twice.
+# A table is sliced by NAME, not by order — a second image of this family would share
+# most of its arrays and repeat whole rows of the first, so reading "the first 32 rows"
+# could silently verify the same image twice.
 for tsym, src, want_crc, label in (
-        ('gb_rom_scorpion_gmx_banks',   'profrom_gmx_v5s.bin', '6E9FD318', 'v5s'),
-        ('gb_rom_scorpion_gmx_6_banks', 'profrom_gmx_v6s.bin', 'FCA97CD6', 'v6s')):
+        ('gb_rom_scorpion_gmx_banks',   'profrom_gmx_v5s.bin', '6E9FD318', 'v5s'),):
     body = gmx_tbl.split('%s[32] = {' % tsym, 1)
     if len(body) != 2:
         fails.append('GMX table %s' % label); print("  FAIL GMX %s: table not found" % label); continue

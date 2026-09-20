@@ -815,16 +815,16 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE FLASH_SIZE=${FLASH_SIZE})
 # plugged-in Pico 2 MODULE, not of the carrier board (a Murmulator 1 takes a module
 # with PSRAM on XIP CS1 = GPIO19 just fine), so the gate is the RUNTIME butter
 # probe: without a chip the GMX pick falls back to Yellow PCB
-# (Config::requestMachine + resolveConstraints). TWO images ship as two romsets
-# (v5.44 and v6.44, the latter drawing its own tools in the extended 640x200 screen)
-# for ~549 KB total — the second adds 212 992 B, with 19 of its 32 banks shared with
-# the first because pack_gmx packs both over one base list. They come
-# straight out of what is left for the GM.DLS bank, which is now everything above the
-# firmware (rp2350-memmap.ld): on 4 MB that leaves the bank ~1.60-1.63 MB, and the
-# EXTENDED window a no-QSPI-PSRAM board can trade for is untouched by them (the ROM
-# section grows upward, not downward). A bank already programmed at a different base
-# fails the header check and re-provisions from SD. GMX_IN_FLASH=0 remains an escape
-# hatch (drops both ROMs and the menu rows; the bank region grows by itself).
+# (Config::requestMachine + resolveConstraints). ONE image ships (v5.44), ~336 KB.
+# It comes straight out of what is left for the GM.DLS bank, which is now everything
+# above the firmware (rp2350-memmap.ld): on 4 MB that leaves the bank ~1.81-1.86 MB,
+# and the EXTENDED window a no-QSPI-PSRAM board can trade for is untouched by it (the
+# ROM section grows upward, not downward). The v6.44 image — the same tools drawn in
+# the extended 640x200 screen — shipped beside it as a second romset for a day
+# (2026-09-20) and cost 212 992 B, only 13 of its 32 banks being its own. A bank
+# already programmed at a different base fails the header check and re-provisions
+# from SD. GMX_IN_FLASH=0 remains an escape hatch (drops the ROM and the menu rows;
+# the bank region grows by itself).
 target_compile_definitions(${PROJECT_NAME} PRIVATE GMX_IN_FLASH=1)
 # Scorpion PROF-ROM v4.44s (romset "ZS-1024 + ProfROM"): ~225 KB of flash for the
 # 256 KB image (tools/rom_pack.py prof). Like every other ROM it comes out of the

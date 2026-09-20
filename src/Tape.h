@@ -220,7 +220,9 @@ public:
     // resumes inside the ROM's own LD-BYTES, i.e. it types LOAD "" for the user and
     // nothing more. It needs a ROM those snapshots were captured on, but it does NOT
     // need the trap — so it SURVIVES tape wear, and must: without it a launch mounts
-    // the tape, presses Play and leaves the machine at the BASIC prompt.
+    // the tape, presses Play and leaves the machine at the BASIC prompt. It does not
+    // read Config::flashload alone either, because wear now turns that off (see the
+    // definition).
     static bool autoRunAvailable();
     static void LoadRemembered(); // re-mount Config::tape_file after F11/boot; auto-plays if tape_autostart
     static void Eject();          // take the tape out: close, drop the listing, forget Config::tape_file
