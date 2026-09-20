@@ -15,10 +15,11 @@
  *   D=$(mktemp -d)
  *   cp src/Nvram24.h src/Nvram24.cpp tools/nvram24_test.cpp "$D"
  *   printf '#pragma once\n#include <stdint.h>\ntypedef unsigned UINT; typedef int FIL;\n#define CONFIG_DIR "/tmp"\n#define FA_READ 1\n#define FA_WRITE 2\n#define FA_CREATE_ALWAYS 8\nstatic inline FIL* fopen2(const char*, int){return 0;}\nstatic inline void fclose2(FIL*){}\nstatic inline int f_read(FIL*,void*,unsigned,UINT*){return 0;}\nstatic inline int f_write(FIL*,const void*,unsigned,UINT*){return 0;}\nnamespace FileUtils { static const bool fsMount = false; static inline void mkdirParents(const char*){} }\n' > "$D"/FileUtils.h
- *   printf '#pragma once\nnamespace Debug { static inline void log(const char*, ...){} }\n' > "$D"/Debug.h
+ *   printf '#pragma once\n#include <stdio.h>\nnamespace Debug { static inline void log(const char*, ...){} }\n' > "$D"/Debug.h
+ *   printf '#pragma once\nenum { ROMSET_COUNT = 1 };\nstatic const char* const kRomsetName[1] = { "Test" };\nnamespace Config { static const int romSet = 0; }\n' > "$D"/Config.h
  *   mkdir -p "$D"/pico
  *   printf '#pragma once\nstatic inline int get_absolute_time(){return 0;}\nstatic inline unsigned to_ms_since_boot(int){return 0;}\n' > "$D"/pico/time.h
- *   g++ -O2 -I"$D" -o /tmp/nvram24_test "$D"/nvram24_test.cpp "$D"/Nvram24.cpp && /tmp/nvram24_test
+ *   g++ -O2 -DSMUC_TRACE=1 -I"$D" -o /tmp/nvram24_test "$D"/nvram24_test.cpp "$D"/Nvram24.cpp && /tmp/nvram24_test
  *
  * Re-run after ANY change to Nvram24.cpp.
  */

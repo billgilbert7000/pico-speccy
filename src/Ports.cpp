@@ -2679,7 +2679,14 @@ static inline bool smucDiskActive() { return IDE::portScheme == IDE::SMUC; }
 //  - **An access the DOSEN/SYSEN gate REJECTED must be visible**, or "the guest
 //    never found the card" and "we refused to answer" look identical.
 static uint16_t s_smuc_tr = 0;      // ATA + detect + gated budget
-static uint32_t s_smuc_quiet = 0;   // SYS/RTC/FDD accesses folded away
+// Folded accesses, split by port family. One lumped counter said "71680
+// accesses" and left the whole question open — a bit-banged 2 KB NVRAM pass is
+// ~74000 SYS writes and a polled clock is ~14 reads a second, so the total
+// alone cannot tell "the guest is streaming the settings image" from "the guest
+// is idling on the clock". Split, it answers that in one line.
+static uint32_t s_smuc_q_sys = 0;   // #FFBA — the NVRAM's I2C bus + HDD reset
+static uint32_t s_smuc_q_rtc = 0;   // #DFBA — the MC146818
+static uint32_t s_smuc_q_fdd = 0;   // #7FBA — the virtual-FDD latch
 #define SMUC_TR_CAP   600
 #define SMUC_QUIET_EVERY 512
 static const char* smucRegName(uint16_t a) {
@@ -2699,12 +2706,24 @@ static inline bool smucInteresting(uint16_t a) {
 }
 static void smucTrace(bool wr, uint16_t a, uint8_t v, bool gated) {
   if (!gated && !smucInteresting(a)) {
-    if (++s_smuc_quiet % SMUC_QUIET_EVERY == 0)
-      Debug::log("[SMUC] ...%u NVRAM/clock/FDD accesses folded", (unsigned)s_smuc_quiet);
+    if (!(a & 0x8000))           s_smuc_q_fdd++;   // #7FBA
+    else if (a & 0x2000)         s_smuc_q_sys++;   // #FFBA
+    else                         s_smuc_q_rtc++;   // #DFBA
     return;
   }
   if (s_smuc_tr >= SMUC_TR_CAP) return;
   if (++s_smuc_tr == SMUC_TR_CAP) { Debug::log("[SMUC] ==== TRACE CAP ===="); return; }
+  // The folded count rides along with a line that was going to be printed
+  // anyway. Printing it on its own schedule (it was every 512 accesses) put a
+  // line on the UART several times a second for as long as the guest polled
+  // the clock — ~69000 accesses in one boot, i.e. 138 lines of pure noise that
+  // also GARBLED the lines that mattered (a capture from 2026-09-20 carries
+  // "accesses fs folded" / "foolded" where two writers interleaved).
+  if (s_smuc_q_sys | s_smuc_q_rtc | s_smuc_q_fdd) {
+    Debug::log("[SMUC] ...folded: NVRAM-bus(FFBA)=%u clock(DFBA)=%u FDD(7FBA)=%u",
+               (unsigned)s_smuc_q_sys, (unsigned)s_smuc_q_rtc, (unsigned)s_smuc_q_fdd);
+    s_smuc_q_sys = s_smuc_q_rtc = s_smuc_q_fdd = 0;
+  }
   Debug::log("[SMUC%s] %s %04X %-9s %02X reg=%u dos=%d 1FFD=%02X sys=%02X pc=%04X",
              gated ? " GATED" : "", wr ? "wr" : "rd", a, smucRegName(a), v,
              (unsigned)((a >> 8) & 7), (int)ESPectrum::trdos, Ports::port1FFD,

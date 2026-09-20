@@ -35,6 +35,38 @@ static const int     SDA_IN_SHIFT = 4; // host SDA arrives on D4
 static uint16_t wr_n = 0;           // byte writes since the last write-back
 static uint16_t wr_last = 0;        // the last address written
 
+#if SMUC_TRACE
+// Stage probes for "my SMUC settings are gone". The question a save line alone
+// cannot answer is WHERE a write died, and the I2C chain has four places to die
+// in: the port never reaches us (the DOSEN/SYSEN gate — that shows as
+// [SMUC GATED] in Ports.cpp), the waveform never produces a START, the device
+// address is not ours, or the state machine never reaches a data byte. Each
+// stage announces itself ONCE, so the answer is four lines at the top of a
+// capture instead of a flood.
+static bool tr_bus = false, tr_start = false, tr_addr = false,
+            tr_foreign = false, tr_store = false, tr_read = false;
+#define NV_ONCE(flag, ...) do { if (!(flag)) { (flag) = true; Debug::log(__VA_ARGS__); } } while (0)
+
+// ...and the stages that have to be WATCHED rather than announced, because the
+// question is whether a write EVER happens — a one-shot that never fires is
+// indistinguishable from a probe that was never compiled in. Counted here and
+// reported from flush() (pumped once per frame), rate-limited and only when a
+// counter moved, so an idle machine stays silent and a settings change shows up
+// as `stored=` leaving zero.
+static uint32_t tr_c_start = 0, tr_c_wr = 0, tr_c_rd = 0,
+                tr_c_bytes_rd = 0, tr_c_bytes_wr = 0;
+// ...and WHICH part of the 2 KB image is being touched. The firmware keeps its
+// settings word at 0x200 and has a bounds-checked user window at 0x400-0x7FF
+// (ProfROM v4.44s, plane 1 bank 0), so "it read 512 bytes" means something
+// different depending on where they were.
+static uint16_t tr_rd_lo = 0xFFFF, tr_rd_hi = 0;
+static uint16_t tr_wr_lo = 0xFFFF, tr_wr_hi = 0;
+static uint32_t tr_c_last = 0;      // last reported total
+static uint32_t tr_report_ms = 0;
+#else
+#define NV_ONCE(flag, ...) do { } while (0)
+#endif
+
 uint8_t* Nvram24::mem      = nullptr;
 uint16_t Nvram24::address  = 0;
 uint8_t  Nvram24::datain   = 0;
@@ -114,6 +146,23 @@ void Nvram24::load() {
 }
 
 void Nvram24::flush(bool force) {
+#if SMUC_TRACE
+    if (mem) {
+        uint32_t tot = tr_c_start + tr_c_wr + tr_c_rd + tr_c_bytes_rd + tr_c_bytes_wr;
+        uint32_t t   = to_ms_since_boot(get_absolute_time());
+        if (tot != tr_c_last && (!tr_report_ms || (t - tr_report_ms) >= 1000)) {
+            Debug::log("[NVRAM24] i2c: start=%u addr_wr=%u addr_rd=%u bytes_rd=%u [%03X..%03X] STORED=%u [%03X..%03X] dirty=%d",
+                       (unsigned)tr_c_start, (unsigned)tr_c_wr, (unsigned)tr_c_rd,
+                       (unsigned)tr_c_bytes_rd,
+                       (unsigned)(tr_c_bytes_rd ? tr_rd_lo : 0), (unsigned)tr_rd_hi,
+                       (unsigned)tr_c_bytes_wr,
+                       (unsigned)(tr_c_bytes_wr ? tr_wr_lo : 0), (unsigned)tr_wr_hi,
+                       (int)dirty);
+            tr_c_last = tot;
+            tr_report_ms = t ? t : 1;
+        }
+    }
+#endif
     if (!mem || !dirty || !FileUtils::fsMount) return;
     uint32_t now = to_ms_since_boot(get_absolute_time());
     if (!force && flush_ms && (now - flush_ms) < 1500) return;   // debounce bursts
@@ -142,6 +191,9 @@ uint8_t Nvram24::read() { return mem ? out : SDA_1; }
 
 void Nvram24::write(uint8_t val) {
     if (!mem) return;
+#if SMUC_TRACE
+    NV_ONCE(tr_bus, "[NVRAM24] bus activity: first #FFBA write %02X", (unsigned)val);
+#endif
 
     if ((val ^ prev) & SCL) {                       // clock edge
         if (val & SCL) {                            // rising: chip samples SDA
@@ -170,12 +222,31 @@ void Nvram24::write(uint8_t val) {
                     // Device address: 1010 pppR — the three page bits are the
                     // high bits of an 11-bit address, R selects a read.
                     if ((datain & 0xF0) != 0xA0) {
+                        // Not this chip. On a bus with only the 24LC16 on it
+                        // this is the signature of a waveform we are decoding
+                        // wrong, not of a second device.
+                        NV_ONCE(tr_foreign,
+                                "[NVRAM24] device address %02X is not ours (want A0-AF)",
+                                (unsigned)datain);
                         state = IDLE;
                         out_z = 1;
                         goto done;
                     }
+                    NV_ONCE(tr_addr, "[NVRAM24] addressed: %02X (page %u, %s)",
+                            (unsigned)datain, (unsigned)((datain >> 1) & 7),
+                            (datain & 1) ? "read" : "write");
+#if SMUC_TRACE
+                    if (datain & 1) tr_c_rd++; else tr_c_wr++;
+#endif
                     address = (uint16_t)((address & 0xFF) + ((datain << 7) & 0x700));
                     if (datain & 1) {               // read from the current address
+                        NV_ONCE(tr_read, "[NVRAM24] first byte READ @%03X = %02X",
+                                (unsigned)address, (unsigned)mem[address]);
+#if SMUC_TRACE
+                        tr_c_bytes_rd++;
+                        if (address < tr_rd_lo) tr_rd_lo = address;
+                        if (address > tr_rd_hi) tr_rd_hi = address;
+#endif
                         dataout = mem[address];
                         address = (address + 1) & (NVRAM24_SIZE - 1);
                         bitsout = 0;
@@ -194,6 +265,13 @@ void Nvram24::write(uint8_t val) {
                     // vanish silently, while guessing wrong the permissive way
                     // only stores bytes real hardware would have dropped.
                     // A page write wraps inside its own 16-byte page.
+                    NV_ONCE(tr_store, "[NVRAM24] first byte STORED @%03X = %02X",
+                            (unsigned)address, (unsigned)datain);
+#if SMUC_TRACE
+                    tr_c_bytes_wr++;
+                    if (address < tr_wr_lo) tr_wr_lo = address;
+                    if (address > tr_wr_hi) tr_wr_hi = address;
+#endif
                     mem[address] = datain;
                     dirty = true;
                     wr_n++; wr_last = address;
@@ -226,6 +304,10 @@ void Nvram24::write(uint8_t val) {
         } else {                                    // SDA falls while SCL high
             state = RCV_CMD;
             bitsin = 0;
+            NV_ONCE(tr_start, "[NVRAM24] I2C START seen");
+#if SMUC_TRACE
+            tr_c_start++;
+#endif
         }
         out_z = 1;
     }

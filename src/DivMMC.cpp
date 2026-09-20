@@ -4,6 +4,7 @@
 
 #include <cstring>
 #include <stdlib.h>
+#include <cstdio>
 #include "MemESP.h"
 #include "Config.h"
 #include "Debug.h"
@@ -17,6 +18,66 @@ extern int butter_pages;
 // Raw-passthrough target: physical SD (pdrv 0) normally, the USB stick
 // (pdrv 1) when it took over as the root volume (no SD card at boot).
 static BYTE raw_pdrv() { return FileUtils::usbRoot ? 1 : 0; }
+
+#if ZC_PORT_TRACE
+// Z-Controller / DivSD card trace. Two lessons from the SMUC and GMX traces are
+// built into it, because both cost a hardware round when they were missing:
+//   * a bring-up cap that expires mid-session BLINDS the capture — the plain
+//     `ZC/DivSD rd/wr` counters below stop at 12 reads, which a single
+//     directory scan burns before the guest reaches the thing being diagnosed;
+//   * a per-access flood garbles the UART and hides the one line that matters,
+//     so READS are folded against a ring of recent line hashes and only the
+//     count is carried.
+// WRITES are never folded and never collapsed: they are rare (a whole session
+// of ProfROM settings edits made six), they are what "did the guest actually
+// persist anything, and where" asks about, and each one carries the head of
+// the block so the content is identifiable without a second capture.
+static uint16_t zc_tr_n = 0;          // lines emitted (session budget)
+static uint32_t zc_tr_ring[32];       // hashes of the last 32 distinct lines
+static uint8_t  zc_tr_ri = 0;
+static uint32_t zc_tr_folded = 0;
+
+static void zcTraceEmit(const char* line) {
+    if (zc_tr_folded) {
+        Debug::log("ZC: ...%u repeated accesses folded", (unsigned)zc_tr_folded);
+        zc_tr_folded = 0;
+    }
+    Debug::log("%s", line);
+}
+
+// Fold a line that repeats one of the last 32 distinct ones (reads, command
+// frames). Returns without printing when folded.
+static void zcTraceFold(const char* line) {
+    if (zc_tr_n >= 4000) return;
+    uint32_t h = 2166136261u;
+    for (const char* p = line; *p; p++) h = (h ^ (uint8_t)*p) * 16777619u;
+    for (uint8_t i = 0; i < 32; i++) if (zc_tr_ring[i] == h) { zc_tr_folded++; return; }
+    zc_tr_ring[zc_tr_ri] = h;
+    zc_tr_ri = (uint8_t)((zc_tr_ri + 1) & 31);
+    zc_tr_n++;
+    zcTraceEmit(line);
+}
+
+// A write: always printed, with the head of the block. A settings file, a FAT
+// directory entry and a raw config sector are told apart by their first bytes,
+// which is the whole question a "nothing is written to the file" report asks.
+static void zcTraceWrite(uint32_t sector, int res, const uint8_t* buf) {
+    if (zc_tr_n >= 4000) return;
+    char line[160];
+    int n = snprintf(line, sizeof(line), "ZC wr sec=%lu res=%d |",
+                     (unsigned long)sector, res);
+    for (int i = 0; i < 16 && n < (int)sizeof(line) - 4; i++)
+        n += snprintf(line + n, sizeof(line) - n, "%02X ", buf[i]);
+    n += snprintf(line + n, sizeof(line) - n, "|");
+    for (int i = 0; i < 16 && n < (int)sizeof(line) - 2; i++) {
+        uint8_t c = buf[i];
+        line[n++] = (c >= 32 && c < 127) ? (char)c : '.';
+    }
+    line[n] = 0;
+    zc_tr_n++;
+    zcTraceEmit(line);
+}
+#endif
 
 // Static member definitions
 bool DivMMC::enabled = false;
@@ -645,6 +706,14 @@ void DivMMC::flushWriteBuffer() {
 void DivMMC::loadSector(uint32_t sector) {
     if (divsd_mode) {
         DRESULT r = disk_read(raw_pdrv(), mmc_sector_buf, sector, 1);
+#if ZC_PORT_TRACE
+        {   // folded: a FAT walk re-reads the same handful of sectors forever
+            char line[64];
+            snprintf(line, sizeof(line), "ZC rd sec=%lu res=%d",
+                     (unsigned long)sector, (int)r);
+            zcTraceFold(line);
+        }
+#else
         // Bring-up trace: the first reads (+ early errors) show whether the
         // guest talks to the card at all and whether transfers succeed
         static uint8_t rd_trace = 0;
@@ -652,6 +721,7 @@ void DivMMC::loadSector(uint32_t sector) {
             rd_trace++;
             Debug::log("ZC/DivSD rd sec=%lu res=%d", (unsigned long)sector, (int)r);
         }
+#endif
         if (r != RES_OK) memset(mmc_sector_buf, 0xFF, 512);
         return;
     }
@@ -670,11 +740,15 @@ void DivMMC::loadSector(uint32_t sector) {
 void DivMMC::storeSector(uint32_t sector) {
     if (divsd_mode) {
         DRESULT r = disk_write(raw_pdrv(), mmc_sector_buf, sector, 1);
+#if ZC_PORT_TRACE
+        zcTraceWrite(sector, (int)r, mmc_sector_buf);
+#else
         static uint8_t wr_trace = 0;
         if (wr_trace < 8 || (r != RES_OK && wr_trace < 16)) {
             wr_trace++;
             Debug::log("ZC/DivSD wr sec=%lu res=%d", (unsigned long)sector, (int)r);
         }
+#endif
         return;
     }
     if (!mmc_file_open[0]) return;
@@ -963,7 +1037,15 @@ void DivMMC::mmc_write(uint8_t value) {
         mmc_index_command++;
         mmc_wr_resp = -1;
 #if ZC_PORT_TRACE
-        Debug::log("ZC: CMD%u (%02X)", (unsigned)(value & 0x3F), (unsigned)value);
+        // Block commands are reported by load/storeSector with their sector;
+        // here only the init/status frames, folded so a polled CMD13 cannot
+        // drown the capture.
+        if (value != 0x51 && value != 0x52 && value != 0x58 && value != 0x59) {
+            char line[48];
+            snprintf(line, sizeof(line), "ZC: CMD%u (%02X)",
+                     (unsigned)(value & 0x3F), (unsigned)value);
+            zcTraceFold(line);
+        }
 #endif
         return;
     }
@@ -1437,7 +1519,11 @@ void DivMMC::zc_write_config(uint8_t value) {
     bool new_cs = (value & 0x02) == 0;
     if (new_cs != mmc_cs_active) {
 #if ZC_PORT_TRACE
-        Debug::log("ZC: cfg=%02X cs=%d", (unsigned)value, (int)new_cs);
+        {   char line[48];
+            snprintf(line, sizeof(line), "ZC: cfg=%02X cs=%d",
+                     (unsigned)value, (int)new_cs);
+            zcTraceFold(line);
+        }
 #endif
         mmc_cs(new_cs ? 0x00 : 0x01); // mmc_cs treats bit0==0 as active
     }
