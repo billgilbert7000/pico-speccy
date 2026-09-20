@@ -1894,7 +1894,10 @@ void Z80::decodeOpcode76()
               // Skip ROM FlashLoad while JJ screen animation is in progress —
               // the loader's edge detection timeout can briefly return to ROM,
               // and we must not let ROM FlashLoad consume tape blocks.
-              if (Config::flashload && !Tape::jjScreenAnimating) {
+              // Tape wear (Config::tape_wear) ignores fast load: the trap fills the
+              // block straight out of the file without generating a single pulse, so
+              // a chewed tape would always load perfectly. See Tape.cpp fastLoadOn().
+              if (Config::flashload && !Config::tape_wear && !Tape::jjScreenAnimating) {
                 // Save return PC before FlashLoad (it doesn't modify REG_PC)
                 uint16_t trapPC = REG_PC;
                 const bool flOk = Tape::FlashLoad();
@@ -2204,7 +2207,7 @@ void Z80::decodeOpcodef1() /* POP AF */
     // Both need FlashLoad. After FlashLoad, pop() gives the correct return:
     //   CALL case: pops CALL return addr → back to ROM caller
     //   JP case: pops game entry addr → starts game
-    if (REG_PC == 0x557 && Z80Ops::isByte && Config::flashload &&
+    if (REG_PC == 0x557 && Z80Ops::isByte && Config::flashload && !Config::tape_wear &&
         !Tape::jjScreenAnimating &&
         (Tape::tapeFileType == TAPE_FTYPE_TAP || Tape::tapeFileType == TAPE_FTYPE_TZX || Tape::tapeFileType == TAPE_FTYPE_PZX) &&
         Tape::tapeFileName != "none") {

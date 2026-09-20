@@ -718,6 +718,19 @@ static const Option opt_trdos_rom[] = {
     { "Custom",      3 },
 };
 
+// Tape wear (Storage > Tape): a stretched, chewed cassette. Off is the default
+// and costs one byte test per tape pulse.
+static const Option opt_tape_wear[] = {
+    { "Off",    0 },
+    { "Light",  1 },
+    { "Medium", 2 },
+    { "Heavy",  3 },
+};
+// Fast load never generates a pulse, so a worn tape would always load perfectly:
+// Tape.cpp ignores flashload while wear is on, and the row says so by going grey
+// rather than sitting there disagreeing with what the machine does.
+static bool p_noTapeWear() { return Stage::get(SET_TAPE_WEAR) == 0; }
+
 static const Node kTape[] = {
     NM_ACTION(TXT_TAPE_SELECT,    act_tapeSelect,   p_hasSD),
     NM_ACTION(TXT_TAPE_PLAYSTOP,  act_tapePlayStop, nullptr),
@@ -727,7 +740,8 @@ static const Node kTape[] = {
     NM_BOOL_EN(TXT_TAPE_REALIN " (GP" _PIN_XSTR(LOAD_WAV_PIO) ")",
                                   SET_TAPE_REALIN,  nullptr, p_wavPinFree),
 #endif
-    NM_BOOL  (TXT_TAPE_FASTLOAD,  SET_FLASHLOAD,    nullptr),
+    NM_BOOL_EN(TXT_TAPE_FASTLOAD, SET_FLASHLOAD,    nullptr, p_noTapeWear),
+    NM_RADIO (TXT_TAPE_WEAR,      SET_TAPE_WEAR,    opt_tape_wear, nullptr),
     NM_BOOL  (TXT_TAPE_RG,        SET_TAPE_RG,      nullptr),
     NM_BOOL  (TXT_TAPE_AUTOSTART, SET_TAPE_ASTART,  nullptr),
 };

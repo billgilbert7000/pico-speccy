@@ -9510,6 +9510,83 @@ damage offset** (Black Raven: ±10 in 2-byte compare units = ±20 bytes).
   must be 12..249 and within ±10 of the table value. The crack NOP'd those three
   branches.
 
+## Tape wear — "the recorder is chewing the tape" (2026-09-20, NOT hw-tested)
+
+`Config::tape_wear` (Storage > Tape > Tape wear: Off / Light / Medium / Heavy)
+plays a stretched, creased, oxide-shedding cassette. Asked for as a nostalgia
+feature — the old deck chewed the tape, the sound distorted, and the game ended
+in `R Tape loading error`. Three faults, because each is a different thing the
+user remembers, and two of them are the only ones that can actually break a load:
+
+- **wow** — the capstan speed wanders, so every pulse is a little long or short.
+  This is the AUDIBLE half (Ports.cpp mixes `tapeEarBit` into the beeper, so the
+  tape signal is on the speaker) and on its own it is harmless, which is not luck
+  but arithmetic: LD-BYTES classifies a bit on `t1 + t2` against a threshold half
+  way between 2x855 and 2x1710 = 2565 T, and even Heavy's ±16% leaves a 0 bit at
+  1984 and a 1 bit at 2873. The host test asserts it rather than assuming it.
+- **lurch** — the tape binds and pulses stretch 1.5-3x, so a 0 bit reads as a 1.
+  Note a lurch over a run of 1 bits is **harmless**, on real hardware too: the
+  test expects ~44 of 50 injected lurches to break a block, not 50.
+- **drop** — a crease or a bald patch lifts the tape off the head: the ear bit
+  FREEZES, so there is no edge at all. Either LD-EDGE times out or the merged
+  pulses walk the bit stream out of step. Always fatal to the block.
+
+- **The model is `src/TapeWear.h` and depends on nothing from the firmware** —
+  that is the only reason `tools/tapewear_test.cpp` can drive it on a host
+  (`g++ -O2 -Wall -Wextra -Isrc -o /tmp/tapewear_test tools/tapewear_test.cpp`).
+  **Re-run it after ANY change there.** It carries a synthetic 48K LD-BYTES
+  decoder, so it checks the thing that was actually asked for: Off loads a 6912
+  byte block byte for byte, Heavy essentially never does, Light usually loads a
+  small one, and the wow alone never corrupts a byte. Every assertion was checked
+  to FAIL under a hand-applied mutation — see the two that the FIRST suite could
+  not catch, below.
+- **ONE hook, at the bottom of `Tape::Read`'s do-loop** (`tapeNext =
+  wearPulse(tapeNext)`), which is what makes every format that plays through that
+  state machine — TAP, TZX including GDB and CSW, PZX — worn by construction. The
+  perturbed length feeds the loop's own `while (tapeCurrent >= tapeNext)`, so the
+  time base stays consistent. WAV/MP3 return before the loop and get dropouts only
+  (`wearAudio`, driven by elapsed T-states): a wow on a recorded waveform would
+  mean resampling it, and those files are recordings of a real tape anyway.
+- **Fast load must be IGNORED while this is on** (`fastLoadOn()`, Tape.cpp), and
+  that is the whole feature, not a detail: the ROM trap fills the block straight
+  out of the file without ever generating a pulse, so a worn tape with fast load
+  is a worn tape that always loads perfectly. Five sites — `flashloadAvailable()`,
+  the Cerikopik and JJ turbo candidates, the turbo auto-start branch, and the two
+  ROM traps in Z80_JLS.cpp (0x56b/0x56d/0x57d and Byte's 0x557). The menu greys
+  the "Fast tape load" row (`p_noTapeWear`) rather than silently disagreeing with
+  the user. Consequence, and it is the authentic one: a browser launch then takes
+  the flashload-off path — mount, press Play, and the user types `LOAD ""`.
+- **Nothing is damaged where nothing is recorded**: a fault may only START in a
+  signal-bearing phase. Not tidiness — an inter-block PAUSE is one "pulse" of
+  3500000 T, and letting the schedule count it would spend the whole fault budget
+  in a single step, so a Light tape would fault at every block boundary.
+- The level is read LIVE on every pulse and a change re-arms the schedule, so
+  there is no hook to write (AC_PURE) and a menu edit reaches the tape already
+  playing. `Play()` reseeds the RNG from `CPU::global_tstates`: rewinding lands
+  the head on a different part of the damage, so "try once more and it might
+  load" — which is the memory being emulated — is literally true.
+- **Two mutations the first test suite could not catch, and the shape is worth
+  keeping**: with both fault kinds drawn 50/50 in one run, neutering the lurch
+  (`evtMul = 256`) or the dropout (`freeze = false`) still left the OTHER kind to
+  break the block, so the suite passed. The fix is a per-kind test that injects
+  ONE fault by hand with a control run beside it, plus a separate check on the
+  scheduler's own `evtMul` range — because the injected test sets `evtMul` itself
+  and therefore cannot see that mutation either. **A test that exercises two
+  mechanisms at once can only prove that at least one of them works.**
+- The test also re-learned the `peek16` lesson the hard way:
+  `rom.pulse(w.pulse(len, true, freeze), freeze)` reads the `freeze` OUT-PARAMETER
+  in unspecified order against the call that writes it — GCC took the stale value,
+  every dropout silently became a no-op, and the per-kind assertion failed for a
+  reason that had nothing to do with the model.
+- `-DTAPE_WEAR_TRACE=ON` logs each fault (kind, length in us, block, phase).
+- **Hw check owed**, in order: the audible warble on a real speaker (Light, any
+  TAP — this is the half the user asked for and no test can judge it); Heavy
+  ending in `R Tape loading error`; Light loading a small block most of the time;
+  that the Fast tape load row really greys and the tape really plays (i.e. the
+  five fastLoadOn sites all took); a TZX turbo loader (the Cerikopik/JJ paths now
+  auto-start the tape instead of flash-loading); and a WAV/MP3 tape, where only
+  the dropouts exist.
+
 ## Snapshots: one level, one slot list, and the file loader that had gone missing (owner: "работает", 2026-09-11)
 
 The root rows `Save snapshot` / `Load snapshot` are replaced by one `Snapshots`
