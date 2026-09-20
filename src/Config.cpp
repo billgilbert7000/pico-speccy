@@ -84,6 +84,7 @@ volatile bool Config::real_player = false;
 bool     Config::profi_ext_keys = false; // Profi extended keyboard mode
 bool     Config::tape_timing_rg = false; // Rodolfo Guerra ROMs tape timings
 bool     Config::tape_autostart = true;  // auto-play tape on load + re-mount remembered tape after reset/boot
+uint8_t  Config::tape_wear = 0;         // Storage > Tape > Tape wear (0 off .. 3 heavy)
 bool     Config::rightSpace = true;
 bool     Config::wasd = true;
 Config::BreakPoint Config::breakPoints[Config::MAX_BREAKPOINTS];
@@ -1295,6 +1296,8 @@ void Config::load() {
         real_player = b;
         nvs_get_b("tape_timing_rg", tape_timing_rg, sts);
         nvs_get_b("tape_autostart", tape_autostart, sts);
+        nvs_get_u8("tape_wear", tape_wear, sts);
+        if (tape_wear > 3) tape_wear = 0;   // a stale/foreign NVS value
         nvs_get_str("tape_file", tape_file, sts);
         nvs_get_u8("joystick", Config::joystick, sts);
 
@@ -1734,6 +1737,7 @@ void Config::save(const char* path, const char* profileName) {
     nvs_set_str(buf,"wasd", wasd ? "true" : "false");
     nvs_set_str(buf,"tape_timing_rg",tape_timing_rg ? "true" : "false");
     nvs_set_str(buf,"tape_autostart", tape_autostart ? "true" : "false");
+    nvs_set_u8(buf,"tape_wear", tape_wear);
     {
         // A quick-started download lives in /tmp and is gone after reboot — never
         // persist it (it would just fail to reopen). The in-RAM value still survives

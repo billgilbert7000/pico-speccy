@@ -211,6 +211,11 @@ public:
     static bool     profi_ext_keys;  // Profi extended keyboard mode (default false)
     static bool     tape_timing_rg;
     static bool     tape_autostart;  // auto-play tape on load + after F11/boot re-mount (default true)
+    // Storage > Tape > Tape wear: 0 off, 1 light, 2 medium, 3 heavy. Emulates a
+    // stretched/chewed cassette — wow, speed lurches and head dropouts, which end
+    // in the ROM's own "R Tape loading error". Non-zero IGNORES flashload (a fast
+    // load never generates a pulse, so it could never go wrong). See Tape.cpp.
+    static uint8_t  tape_wear;
     static bool     rightSpace;
     static bool     wasd;
     enum BPType : uint8_t { BP_PC=0, BP_PORT_READ=1, BP_PORT_WRITE=2, BP_MEM_WRITE=3, BP_MEM_READ=4, BP_NONE=0xFF };

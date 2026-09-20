@@ -96,6 +96,7 @@ Best performance for case Pimoroni "Pico Plus 2" is used.
 - Real tape input from the board's WAV pin (Tape → Real sound input, labelled with the GPIO number; greyed out when ZiFi owns that pin).
 - Tape browser (F7): jump to any block of the mounted tape, or F8 to eject the tape altogether.
 - Flashload of TZX/TAP/PZX files (standard loaders only).
+- Tape wear (Tape → Tape wear: Off / Light / Medium / Heavy): plays the tape as if the recorder were chewing it — the speed wanders (audible warble), the tape binds for a moment, and the head loses contact for a few milliseconds, which ends in the ROM's own "R Tape loading error" just like 1987. Rewinding and pressing Play again is a fresh roll of the dice. Fast load is ignored while it is on (it never generates a pulse, so it could never go wrong), and the Fast tape load row greys out to say so.
 - Rodolfo Guerra's ROMs fast load routines support with on the fly standard speed blocks translation.
 - TAP file saving to SD card.
 - SNA and Z80 snapshot loading.

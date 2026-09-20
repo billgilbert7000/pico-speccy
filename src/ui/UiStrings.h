@@ -135,6 +135,7 @@
 #define TXT_TAPE_FASTLOAD   "Fast tape load"
 #define TXT_TAPE_RG         "R.G. ROM timings"
 #define TXT_TAPE_AUTOSTART  "Auto-start"
+#define TXT_TAPE_WEAR       "Tape wear"
 
 // ── Joystick / Additional preferences ──────────────────────────────────────────
 #define TXT_JOY_CURSOR_AS   "Cursor as joy"

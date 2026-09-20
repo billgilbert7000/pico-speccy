@@ -63,6 +63,7 @@ option(VDISK_TRACE "Trace the SMUC virtual-FDD bridge: #7FBA select + WD1793 RDS
 option(SMUC_TRACE "Trace SMUC port accesses, including ones the DOSEN/SYSEN gate rejected (capped)" OFF)
 option(GMX_TRACE "Trace Scorpion GMX paging: port #00 magic/reset, 7EFD plane, 1FFD writes, romInUse transitions, TR-DOS trap entry/exit (capped)" OFF)
 option(TIMEX_PORT_TRACE "Trace Timex TC2068: every #F4/#F5/#F6/#FF access with the Z80 PC, plus the tape mount decision and every CP A in ROM space (the flashload trap) — run-collapsed and capped" OFF)
+option(TAPE_WEAR_TRACE "Log every fault the worn-tape emulation injects (Storage > Tape > Tape wear): kind, length, block and phase" OFF)
 option(TSFM_TRACE "1 Hz TSFM budget probe: status-read/write counts per frame + how late in the frame the FM player runs" OFF)
 option(PAGE_TRACE "Trace ROM selection: every 0x7FFD write, TR-DOS map/unmap, and an alarm when an IM1 interrupt enters the 128K ROM with a dead 0x5B00 stub" OFF)
 option(SND_PORT_TRACE "Enable per-port I/O histogram (sound-DAC port hunting)" OFF)
@@ -1054,6 +1055,10 @@ endif()
 # Scorpion GMX paging trace (see Ports.cpp / Z80_JLS.cpp `#if GMX_TRACE`).
 if (GMX_TRACE)
     target_compile_definitions(${PROJECT_NAME} PRIVATE GMX_TRACE=1)
+endif ()
+# Worn-tape fault log (see Tape.cpp `#if TAPE_WEAR_TRACE`).
+if (TAPE_WEAR_TRACE)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE TAPE_WEAR_TRACE=1)
 endif ()
 # Timex TC2068 SCLD port trace (see Ports.cpp `#if TIMEX_PORT_TRACE`).
 if (TIMEX_PORT_TRACE)

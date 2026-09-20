@@ -52,6 +52,8 @@ using namespace std;
 #include "Snapshot.h"
 #include "messages.h"
 #include "Z80_JLS/z80.h"
+#include "Debug.h"
+#include "TapeWear.h"
 #include "pwm_audio.h"
 
 #include "music_file.h"
@@ -139,6 +141,88 @@ void Tape::FreeSymDefTable() {
         SymDefTable = nullptr;
         SymDefTableSize = 0;
     }
+}
+
+// ── Worn tape: "the recorder is chewing the tape" ─────────────────────────────
+//
+// Config::tape_wear (Storage > Tape > Tape wear, Off/Light/Medium/Heavy) plays
+// the tape as if it were stretched, creased and shedding oxide. The model is
+// src/TapeWear.h — firmware-free, so tools/tapewear_test.cpp can drive it on a
+// host; what lives here is the glue it cannot have: reading Config, freezing the
+// ear bit, and the ONE hook at the bottom of Tape::Read's do-loop, which is what
+// makes every format that plays through that state machine (TAP, TZX including
+// GDB and CSW, PZX) worn by construction. WAV/MP3 return before the loop and get
+// dropouts only, through wearAudio().
+//
+// Fast load is IGNORED while this is on (fastLoadOn() below): the ROM trap fills
+// the block straight out of the file without ever generating a pulse, so a worn
+// tape with fast load would be a worn tape that always loads perfectly. The menu
+// greys the "Fast tape load" row rather than silently disagreeing with it.
+
+static tapewear::State wear;
+static uint8_t  wearFrozenBit = 0;         // level the head was on when it lifted
+static uint64_t wearAudioLast = 0;         // WAV/MP3 path: last T-state seen
+
+// True while the phase carries recorded signal. A fault in a pause or a tail is
+// inaudible and invisible, and one 1-second pause "pulse" would spend the whole
+// fault budget in a single step.
+static inline bool wearSignalPhase() {
+    switch (Tape::tapePhase) {
+        case TAPE_PHASE_STOPPED:
+        case TAPE_PHASE_END:
+        case TAPE_PHASE_PAUSE:
+        case TAPE_PHASE_PAUSE_GDB:
+        case TAPE_PHASE_TAIL:
+        case TAPE_PHASE_TAIL_GDB:
+            return false;
+        default:
+            return true;
+    }
+}
+
+static void wearReset() {
+    wear.reset(Config::tape_wear, (uint32_t)(CPU::global_tstates + CPU::tstates));
+    wearAudioLast = CPU::global_tstates + CPU::tstates;
+    wearFrozenBit = Tape::tapeEarBit;
+}
+
+static uint32_t wearPulse(uint32_t next) {
+    const uint8_t was = wear.evtKind;
+    if (!wear.sync(Config::tape_wear)) return next;
+    bool freeze = false;
+    const uint32_t out = wear.pulse(next, wearSignalPhase(), freeze);
+#if TAPE_WEAR_TRACE
+    if (wear.evtKind && !was)
+        Debug::log("[WEAR] %s %u us  blk=%d phase=%d",
+                   wear.evtKind == tapewear::FAULT_DROP ? "drop" : "lurch",
+                   (unsigned)((wear.evtLeft * 2) / 7), (int)Tape::tapeCurBlock,
+                   (int)Tape::tapePhase);
+#endif
+    if (freeze) {
+        // The head has nothing against it: the level simply stops moving. The
+        // frozen level is the one the tape was on when contact was lost, so the
+        // loader sees one very long pulse and then the signal resumes mid-block.
+        if (was == tapewear::FAULT_NONE) wearFrozenBit = Tape::tapeEarBit;
+        Tape::tapeEarBit = wearFrozenBit;
+    }
+    return out;
+}
+
+static void wearAudio() {
+    const uint8_t was = wear.evtKind;
+    if (!wear.sync(Config::tape_wear)) return;
+    const uint64_t now = CPU::global_tstates + CPU::tstates;
+    const uint64_t d = now - wearAudioLast;
+    wearAudioLast = now;
+    if (wear.audio(d > tapewear::MAX_PULSE_T ? 0u : (uint32_t)d)) {
+        if (was == tapewear::FAULT_NONE) wearFrozenBit = Tape::tapeEarBit;
+        Tape::tapeEarBit = wearFrozenBit;
+    }
+}
+
+// Fast load and tape wear are mutually exclusive — see the note above.
+static inline bool fastLoadOn() {
+    return Config::flashload && Config::tape_wear == 0;
 }
 
 #define my_max(a,b) (((a) > (b)) ? (a) : (b))
@@ -258,7 +342,7 @@ void StopRealPlayer(void) {
 
 // Load tape file (.wav, .tap, .tzx)
 bool Tape::flashloadAvailable() {
-    return Config::flashload && Config::arch != A_ALF &&
+    return fastLoadOn() && Config::arch != A_ALF &&
            Config::romSet != R_ZX81P && Config::romSet != R_48K_CS &&
            Config::romSet != R_128K_CS;
 }
@@ -1149,6 +1233,8 @@ void Tape::Play() {
     // Start loading
     Tape::tapeStatus = TAPE_LOADING;
     tapeStart = CPU::global_tstates + CPU::tstates;
+
+    wearReset();
 }
 
 void Tape::WAV_GetBlock() {
@@ -1228,6 +1314,7 @@ IRAM_ATTR void Tape::Read() {
                 tapeEarBit = v > 0 ? 1 : 0;
             }
         }
+        wearAudio();
         tapeStart = CPU::global_tstates + CPU::tstates - tapeCurrent; // recover?
         return;
     }
@@ -1258,6 +1345,7 @@ IRAM_ATTR void Tape::Read() {
             Stop();
             f_lseek(tape, 0);
         }
+        wearAudio();
         tapeStart = CPU::global_tstates + CPU::tstates - tapeCurrent; // recover?
         return;
     }
@@ -1790,6 +1878,7 @@ IRAM_ATTR void Tape::Read() {
                 tapeCurBlock++;
                 GetBlock();
             } 
+            tapeNext = wearPulse(tapeNext);
         } while (tapeCurrent >= tapeNext);
 
         // More precision just for DRB and CSW. Makes some loaders work but bigger TAIL_LEN also does and seems better solution.
@@ -2541,13 +2630,13 @@ bool Tape::TapePortRead() {
     };
 
     // Signature check for Cerikopik/JJ turbo loaders installed at 0xFE00.
-    // Only active when Config::flashload is ON (fast mode).
+    // Only active in fast mode (fastLoadOn(): Config::flashload with tape wear off).
     bool loaderCommon = (tapeFileType == TAPE_FTYPE_TAP || tapeFileType == TAPE_FTYPE_TZX) &&
         tapeCurBlock > 0 && tapeCurBlock < tapeNumBlocks &&
         MemESP::readbyte(0xFE00) == 0xF3;  // DI at 0xFE00
 
     // Standard Cerikopik: DI / CALL 0xFE06 / EI / RET
-    bool isCerikopikCandidate = loaderCommon && Config::flashload &&
+    bool isCerikopikCandidate = loaderCommon && fastLoadOn() &&
         MemESP::readbyte(0xFE01) == 0xCD &&  // CALL nn
         MemESP::readbyte(0xFE02) == 0x06 &&
         MemESP::readbyte(0xFE03) == 0xFE &&  // 0xFE06
@@ -2555,7 +2644,7 @@ bool Tape::TapePortRead() {
         MemESP::readbyte(0xFE05) == 0xC9;    // RET
 
     // Jumping Jack variant: DI / LD (0xFE17),SP / LD SP,0xFF80
-    bool isJJCandidate = loaderCommon && Config::flashload &&
+    bool isJJCandidate = loaderCommon && fastLoadOn() &&
         tapeFileType == TAPE_FTYPE_TZX &&
         MemESP::readbyte(0xFE01) == 0xED &&  // ED prefix
         MemESP::readbyte(0xFE02) == 0x73 &&  // LD (nn),SP
@@ -2693,9 +2782,10 @@ bool Tape::TapePortRead() {
                 } else if (isJJCandidate && pc >= 0xFE00) {
                     // JJ FlashLoad (tape stopped, unwind done inside)
                     JJFlashLoad();
-                } else if (loaderCommon && !Config::flashload && pc >= 0xFE00) {
-                    // Turbo loader detected but flashload is OFF — auto-start tape
-                    // so the loader can read edges directly from the tape signal.
+                } else if (loaderCommon && !fastLoadOn() && pc >= 0xFE00) {
+                    // Turbo loader detected but fast mode is off (flashload off, or
+                    // tape wear on, which ignores it) — auto-start the tape so the
+                    // loader can read edges directly from the tape signal.
                     tapeAutoPlay = true;
                     Play();
                     Read();

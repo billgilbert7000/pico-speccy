@@ -335,7 +335,11 @@ const char* romsetName(int32_t composite);
     /* Video > VGA > Guest palette (Config::vga_dither). Same shape as SET_HDMI_SNAP  */ \
     /* one row above: the hook re-runs the whole palette pipeline so the TS-Conf CRAM */ \
     /* slots are re-emitted through (or around) the Bayer dither.                     */ \
-    X(SET_VGA_DITHER,      AC_LIVE,   F_PREVIEW | F_PALETTE, get_vgaDither,  put_vgaDither,  hook_vgaDither, -1)
+    X(SET_VGA_DITHER,      AC_LIVE,   F_PREVIEW | F_PALETTE, get_vgaDither,  put_vgaDither,  hook_vgaDither, -1) \
+    /* Storage > Tape > Tape wear (Config::tape_wear, 0 off .. 3 heavy). AC_PURE:     */ \
+    /* Tape.cpp reads the level live on every pulse and re-arms its own schedule when */ \
+    /* it moves, so there is nothing to apply. Appended last per the APPEND ONLY rule.*/ \
+    X(SET_TAPE_WEAR,       AC_PURE,   0,                     get_tapeWear,   put_tapeWear,   nullptr,        -1)
 
 #define NM_X_ENUM(id, cls, flags, g, p, h, f) id,
 enum SettingId : uint16_t {
