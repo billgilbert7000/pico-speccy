@@ -27,6 +27,14 @@
       "len": 360,
       "runs": 12,
       "diff_bytes": 276
+    },
+    {
+      "name": "6.11e",
+      "sym": "gb_rom_4_trdos_611e",
+      "overlay_sym": "gb_overlay_trdos_611e",
+      "len": 3001,
+      "runs": 106,
+      "diff_bytes": 2353
     }
   ]
 }

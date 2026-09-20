@@ -46,7 +46,8 @@ print("overlays over the inverted bases:")
 for name, ov, ref in (
         ('TR-DOS 5.03',   'gb_overlay_trdos_503',   'trdos/src/503.bin'),
         ('TR-DOS 5.04TM', 'gb_overlay_trdos_504tm', 'trdos/src/504tm.bin'),
-        ('TR-DOS 5.05D',  'gb_overlay_trdos_505d',  'trdos/src/505d.bin')):
+        ('TR-DOS 5.05D',  'gb_overlay_trdos_505d',  'trdos/src/505d.bin'),
+        ('TR-DOS 6.11e',  'gb_overlay_trdos_611e',  'trdos/src/611e.bin')):
     check(name, apply_overlay(base_trdos, arr('trdos/trdos_overlays.c', ov)), dump(ref))
 check('Sinclair 128K rom0',
       apply_overlay(base_pent, arr('pentagon/pentagon_overlays.c',

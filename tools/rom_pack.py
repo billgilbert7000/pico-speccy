@@ -197,6 +197,14 @@ FAMILIES = {
             {'key': '503',        'name': '5.03',   'sym': 'gb_rom_4_trdos_503'},
             {'key': '504tm',      'name': '5.04TM', 'sym': 'gb_rom_4_trdos_504tm'},
             {'key': '505d',       'name': '5.05D',  'sym': 'gb_rom_4_trdos_505d'},
+            # BetaDisk 128 v.6.11e (speccy4ever.speccy.org/_TR.htm -> rom/TRD611E.ROM,
+            # md5 116bf9177c846e0dc756b059fcd6a8fe; the image says "* TR-DOS Ver 6.11E*"
+            # and "BETA1024"). A different generation, not a patch release: it differs
+            # from EVERY other TR-DOS here by ~2350 bytes (504t 2353, 503 2331, 504tm
+            # 2373, 505d 2560), so its overlay is ~2.8 KB where the others are 114-572 B
+            # — still six times cheaper than the 16 KB raw array, and the base stays
+            # 504t because TS-Conf must be able to read it as a raw pointer.
+            {'key': '611e',       'name': '6.11e',  'sym': 'gb_rom_4_trdos_611e'},
         ],
     },
     # 48K family: all variants overlay the Sinclair 48K base. byte_48k is also used

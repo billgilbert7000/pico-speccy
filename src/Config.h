@@ -378,7 +378,7 @@ public:
     static bool trdosFastMode;
     static bool trdosAutoBoot;  // inject a "boot" file into TRD/SCL images that lack one
     static uint8_t trdosSoundLed; // 0=Off, 1=Led, 2=Sound, 3=Sound+Led
-    static uint8_t trdosBios; // 0=5.03, 1=5.04TM, 2=5.05D, 3=Custom (flashable)
+    static uint8_t trdosBios; // 0=5.03, 1=5.04TM, 2=5.05D, 3=Custom (flashable), 4=6.11e
     // ALF cartridge: 0 = built-in default "Elf-1" (256KB, in flash); >0 = a cartridge
     // loaded into the shared flash region (gm_bank region), value = size in 16K banks.
     static uint8_t alfCartBanks;

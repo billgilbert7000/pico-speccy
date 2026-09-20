@@ -6486,10 +6486,12 @@ static void buildEmulatorInfoText() {
                 pos += infoAppend(buf, pos, bufsz, "\n");
 
                 {
-                    static const char* trbios[] = { "5.03", "5.04TM", "5.05D", "Custom" };
+                    // Indexed BY THE VALUE, so the order here is Config::trdosBios's,
+                    // not the menu's display order (6.11e is 4, Custom stays 3).
+                    static const char* trbios[] = { "5.03", "5.04TM", "5.05D", "Custom", "6.11e" };
                     pos += infoAppend(buf, pos, bufsz,
                         "  ROM / autoboot: %s / %s\n",
-                        trbios[Config::trdosBios < 4 ? Config::trdosBios : 2],
+                        trbios[Config::trdosBios < 5 ? Config::trdosBios : 2],
                         Config::trdosAutoBoot ? "On" : "Off");
                 }
 

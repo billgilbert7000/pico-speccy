@@ -708,10 +708,13 @@ static const Option opt_sndled[] = {             // shared by Betadisk and MB-02
     { "Sound",        2 },
     { "Sound + LED",  3 },
 };
+// Values ARE Config::trdosBios and are NVS-persisted, so 6.11e appends as 4 and
+// "Custom" keeps 3 — the display order is free and puts it where it belongs.
 static const Option opt_trdos_rom[] = {
     { "5.03",        0 },
     { "5.04TM",      1 },
     { "5.05D",       2 },
+    { "6.11e",       4 },
     { "Custom",      3 },
 };
 

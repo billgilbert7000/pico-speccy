@@ -4,4 +4,5 @@ extern "C" {
 extern const unsigned char gb_overlay_trdos_503[];
 extern const unsigned char gb_overlay_trdos_504tm[];
 extern const unsigned char gb_overlay_trdos_505d[];
+extern const unsigned char gb_overlay_trdos_611e[];
 }

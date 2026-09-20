@@ -797,6 +797,7 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
         switch (Config::trdosBios) {
             case 0: ov = gb_overlay_trdos_503;   break;  // 5.03
             case 1: ov = gb_overlay_trdos_504tm; break;  // 5.04TM
+            case 4: ov = gb_overlay_trdos_611e;  break;  // BetaDisk 128 v.6.11e
             case 3: base = gb_rom_4_trdos_custom; break; // user-uploaded custom (raw)
             default: break;                              // 5.05D = overlay over 5.04T
         }

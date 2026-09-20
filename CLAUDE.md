@@ -1877,6 +1877,22 @@ of `aligned(4096)` padding. Free heads: DVp2 82.7 KB, z0p2 79.1, z0p2-PIOUSB 64.
   Pentagon base, Profi/Karabas bank 2, Scorpion bank 0, GMX/ProfROM planes, and the
   TR-DOS 5.03/5.04TM/5.05D menu switch) as covered by `rom_verify.py` and the
   linked-image byte check, not by a hardware pass each.
+- **TR-DOS BetaDisk 128 v.6.11e** (added 2026-09-13, NOT hw-tested): Devices > Beta
+  128 > ROM, `Config::trdosBios == 4`. Source `speccy4ever.speccy.org/_TR.htm` ->
+  `rom/TRD611E.ROM`, md5 `116bf9177c846e0dc756b059fcd6a8fe`, the image saying
+  `* TR-DOS Ver 6.11E*` / `BETA1024` (the site is reachable with `curl -sk -A
+  Mozilla`, as for the TC2048 ROM). It is a different GENERATION, not a patch
+  release — ~2350 bytes differ from every other TR-DOS in the tree (504t 2353, 503
+  2331, 504tm 2373, 505d 2560) — so its overlay is **3001 B** where the others are
+  114-572, still six times cheaper than a 16 KB raw array, and the base stays 504t
+  because TS-Conf reads window 0 as a raw pointer. Costs 4096 B of firmware after
+  alignment: DVp2 headroom 23 352 -> 19 256.
+  **The VALUE is 4, not 3**: `trdosBios` is NVS-persisted and "Custom" already owns
+  3, so the new entry appends and the menu's display order (which puts 6.11e before
+  Custom) is free. Three places index by that value and all three had to learn it —
+  the `hook_trdosRom` switch, the identical switch in `Config::requestMachine`, and
+  Hardware Info's `trbios[]` NAME TABLE, whose order is the value's and not the
+  menu's (and whose clamp was `< 4`).
 - **`tools/rom_verify.py` is the safety net — run it after ANY change to a ROM
   source, to `rom_pack.py`, or to a base choice.** It reassembles both shipped
   ZX-Evo images and every re-based variant out of the GENERATED arrays and diffs
