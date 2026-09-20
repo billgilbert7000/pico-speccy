@@ -102,6 +102,7 @@ bool g_scorp_gmx = false;
 bool g_scorp_prof = false;
 bool g_scorp_banked = false;
 bool g_scorp_1024 = false;
+bool g_scorp_turbo_plus = false;
 bool g_gmx_tap = false;
 bool Z80Ops::isP3 = false;
 bool Z80Ops::isTsconf = false;
@@ -194,6 +195,9 @@ void CPU::reset() {
     // the same 1FFD D7,D6 page extension.
     g_scorp_1024 = Z80Ops::isScorpion && (Config::romSetScorp == R_SCORP_1024 ||
                                           Config::romSetScorp == R_SCORP_PROF);
+    // The "+" of Turbo+ IS the read-triggered speed toggle (Ports::input). Yellow
+    // is MAME's plain scorpion_state and has no such handler.
+    g_scorp_turbo_plus = Z80Ops::isScorpion && (Config::romSetScorp != R_SCORP);
     g_gmx_tap = false;   // re-armed by Ports::scorpionRomUpdate once paging settles
     // The +2A/+3 is the R_P3 romset of the 128K arch (the way +2 is). It shares the
     // arch's frame timing but NOT its paging, contention or floating bus, so the

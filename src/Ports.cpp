@@ -1182,6 +1182,31 @@ IRAM_ATTR uint8_t Ports::input(uint16_t address) {
     uint8_t gmxData;
     if (gmxPortRead(address, &gmxData)) return gmxData;
   }
+  // Scorpion Turbo+ speed toggle. The clock is switched by READING a port, not by
+  // writing one: MAME's scorpiontb_state::scorpion_io installs
+  //   map(0x0021).mirror(0x3fdc) -> m_turbo = 0, set_clock_scale(1)   // #1FFD-shaped
+  //   map(0x4021).mirror(0x3fdc) -> m_turbo = 1, set_clock_scale(2)   // #7FFD-shaped
+  // both returning 0xFF. ~0x3FDC = 0xC023, so the decode is A15=0, A14 picks the
+  // speed, A5=1, A1=0, A0=1. This is what the Shadow monitor's "Computer speed" item
+  // drives (hw 2026-09-20: the item did nothing, while the monitor still displayed
+  // the speed correctly after Alt+F2 — it MEASURES the clock, so the display was
+  // never the broken half). Was listed as a known gap in CLAUDE.md, deferred over a
+  // fear that the partial decode would swallow ordinary reads; it does not, because
+  // A1 must be 0 and A0 must be 1: the Beta ports (#1F/#3F/#5F/#7F/#FF), Kempston
+  // #1F, #FADF and the keyboard all have A1=1 or A0=0, and the AY at #FFFD has
+  // A15=1. AFTER gmxPortRead, because #7AFD/#7CFD/#7EFD match the fast pattern and
+  // MAME gives the GMX register file precedence the same way (its io view is
+  // installed after the turbo handlers).
+  // 0x8023, not 0xC023: A14 must be FREE in the test — it is what picks the speed.
+  if (g_scorp_turbo_plus && (address & 0x8023) == 0x0021) {
+    const uint8_t want = (address & 0x4000) ? 1 : 0;   // scale 1<<turbo = 3.5 / 7
+    if (want != ESPectrum::multiplicator) {
+      ESPectrum::multiplicator = want;
+      CPU::updateStatesInFrame();
+      OSD::notifyClock(want ? " CPU: 7 MHz " : " CPU: 3.5 MHz ");
+    }
+    return 0xFF;
+  }
   // Timex TC2068: the SCLD horizontal-select register (#F4) and the AY-3-8912 on
   // #F5/#F6. Low-byte decode only (Fuse periph mask 0x00ff; MAME ts2068_io mirrors
   // 0xff00), and BEFORE the ULA even-port branch because #F4 and #F6 have A0=0 and

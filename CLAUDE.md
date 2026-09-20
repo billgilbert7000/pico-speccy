@@ -7101,13 +7101,27 @@ generated**; the same shape would bite any other family that keeps a raw bank.
   `romSetScorp`/`pref_romSetScorp`, on-disk arch spelling "Scorpion", romset
   "Scorp".
 - Deliberately NOT in v1: ProfROM banks, Turbo+ IN-#7FFD/#1FFD turbo toggle, SMUC.
-  ProfROM banks and SMUC landed 2026-09-04 (sections below). **Still missing: the
-  Turbo+ turbo toggle** — MAME scorpiontb maps a READ of #1FFD-ish (A15=0 A14=0
-  A5=1 A0=1, mirror 0x3FDC) to "3.5 MHz" and of #7FFD-ish (A14=1) to "7 MHz". Not
-  implemented because that partial decode also swallows ordinary reads (`IN A,(#FF)`
-  from a low BC would drop the machine to 3.5), and ESPectrum::multUser already owns
-  the clock — but ProfROM software that expects to turbo itself will run at whatever
-  the user picked.
+  ProfROM banks and SMUC landed 2026-09-04 (sections below); **the Turbo+ toggle
+  landed 2026-09-20 and is hw-confirmed** (owner: "индикатор турбо теперь работает").
+- **The Turbo+ speed toggle is a port READ, not a write** (`g_scorp_turbo_plus`,
+  set in CPU::reset; the decode is in `Ports::input` right after `gmxPortRead`).
+  MAME `scorpiontb_state::scorpion_io`: `map(0x0021).mirror(0x3fdc)` -> 3.5 MHz and
+  `map(0x4021).mirror(0x3fdc)` -> 7 MHz, both returning 0xFF. ~0x3FDC = 0xC023, so
+  the test is A15=0, A5=1, A1=0, A0=1 with **A14 free — it is what picks the speed**
+  (the first cut masked 0xC023 and therefore only ever matched "slow"). Every romset
+  but the Yellow PCB has it: MAME puts the handlers in `scorpiontb_state` and plain
+  `scorpion_state` does not inherit them. It must come AFTER `gmxPortRead` because
+  #7AFD/#7CFD/#7EFD all match the fast pattern, and MAME gives the GMX register file
+  the same precedence (its io view is installed after the turbo handlers).
+  **The fear that deferred this for months was unfounded**: the decode needs A1=0 AND
+  A0=1, and the Beta ports (#1F/#3F/#5F/#7F/#FF), Kempston #1F, #FADF and the keyboard
+  all have A1=1 or A0=0, while the AY at #FFFD has A15=1. Checked against MAME's mask
+  over all 65536 addresses — 0 mismatches, 2048 addresses per speed.
+  **How it was found is the part worth keeping**: the report was "the Shadow monitor's
+  Computer speed does nothing, BUT it displays the speed correctly after Alt+F2". That
+  second half is what named the mechanism — a monitor that follows a change it did not
+  make is MEASURING the clock, not reading a register, so the display was never the
+  broken half and the register hunt (`#7EFD` D7, its D2 read-back) was the wrong tree.
 
 ### Scorpion SYSEN ports + magic NMI + WD1793 motor model (hw-confirmed 2026-08-30)
 

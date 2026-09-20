@@ -105,6 +105,11 @@ extern bool g_timex_machine;
 // (1 MB) — page = D7D6<<4 | D4<<3 | 7FFD 0-2 (MAME scorpion_update_memory, ZXMAK2
 // MemoryScorpionProfRom1024 GetRamPage). Green/Turbo+ timing, no even-M1.
 extern bool g_scorp_1024;
+// Scorpion Turbo+ speed toggle: the machine switches its own clock when the guest
+// READS a port — #1FFD-shaped -> 3.5 MHz, #7FFD-shaped -> 7 MHz (MAME scorpiontb).
+// Every romset but the Yellow PCB has it; MAME puts the two read handlers in
+// scorpiontb_state, and plain scorpion_state (our R_SCORP) does not inherit them.
+extern bool g_scorp_turbo_plus;
 // Scorpion ProfROM romset live (R_SCORP_PROF): 4 ROM planes x 4 banks with the
 // plane picked by the legacy 0x0100-0x010F M1 tap (ZXMAK2 MemoryScorpionProfRom
 // BusProfRomGate), ZS-1024 paging, Green/Turbo+ timing, no even-M1. Set in
