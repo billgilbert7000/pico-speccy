@@ -340,9 +340,18 @@ bool NgsMp3::init() {
         s_helixBuf.free();
     }
     s_helix_used = 0;
-    // Whatever SRAM did not cover, plus slack for the per-structure 4-byte rounding.
+    // The butter part is a FULL arena, not "whatever SRAM did not cover": the bump
+    // allocator sends a structure to butter when it does not fit the SRAM
+    // REMAINDER, and that remainder is not the shortfall. With 20480 B of SRAM,
+    // MP3DecInfo + HuffmanInfo (4624) + SubbandInfo (8712) leave ~6.6 KB, so
+    // IMDCTInfo (6944) spills — into a 4160 B butter part sized as 24576-20480+64.
+    // MP3InitDecoder then failed and the stream played in stub mode: NPL's clock
+    // ran and nothing came out (hw 2026-09-21, `MP3InitDecoder failed (arena
+    // 24576 B)` twice in one session, the third attempt succeeding only because
+    // the heap happened to hand out a different SRAM step). Butter is plentiful;
+    // the SRAM step still decides what is HOT, which is all the split was for.
     if (s_helix_cap < HELIX_ARENA_SIZE) {
-        const uint32_t rest = HELIX_ARENA_SIZE - s_helix_cap + 64;
+        const uint32_t rest = HELIX_ARENA_SIZE + 64;
         if (!s_helixPsBuf.alloc(rest, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM) ||
             !s_helixPsBuf.data()) {
             s_helixPsBuf.free();
@@ -361,8 +370,9 @@ bool NgsMp3::init() {
         s_helixBuf.free();   s_helix_arena = nullptr; s_helix_cap = 0;
         s_helixPsBuf.free(); s_helix_ps    = nullptr; s_helix_ps_cap = 0;
         s_stateBuf.free();
-        Debug::log("NgsMp3: MP3InitDecoder failed (arena %u B) — MP3 stubbed",
-                   (unsigned)HELIX_ARENA_SIZE);
+        Debug::log("NgsMp3: MP3InitDecoder failed (sram %u/%u butter %u/%u) — MP3 stubbed",
+                   (unsigned)s_helix_used, (unsigned)s_helix_cap,
+                   (unsigned)s_helix_ps_used, (unsigned)s_helix_ps_cap);
         return false;
     }
     s_st = (Mp3State*)s_stateBuf.data();

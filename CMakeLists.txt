@@ -644,7 +644,7 @@ if (NOT TSCONF_CODE_OVERLAY)
 endif()
 
 if (GSOVL_WIN_SIZE STREQUAL "AUTO")
-    set(_GSOVL_BYTES 26624)   # 26 KB: 25 422 measured + ~1.2 KB for edits
+    set(_GSOVL_BYTES 28672)   # 28 KB: 26 776 plain / 27 912 NGS_TRACE measured 2026-09-21 (C_GRST/boot-gate/idle-throttle rounds) + slack
     # The GS trace options add code to the same objects (counters, the handshake
     # ring writer, the per-command SD log), so the window has to grow with them.
     if (GS_PERF_TRACE OR NGS_TRACE OR NGS_SD_TRACE OR GS_DEBUG_TRACE)

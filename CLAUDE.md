@@ -351,6 +351,132 @@ garbage. Reference: NedoPC `fpga/current/dma/dma_zx.v` + `docs/dma_zx_doc.txt`
   the main dump. Without it a two-CPU deadlock is unreadable — the ZX half only
   ever says "waiting on #BB".
 
+### WC GS Player vs NeoGS: a C_GRST keeps the host handshake, and the boot must be fast (2026-09-21; hw-confirmed through round 5 — GS Player, NPL MOD+MP3, TheLink)
+
+"TS-Conf + Wild Commander + GSPlayer works with GS and not with NeoGS." Disassembled
+`GSPLAYER.WMF` v0.995 (`debug/WC/WC/`, code at `#8000`, 512-byte GS-side payload at
+`0x9C73`, disassemble it at org `0x4000`). It is NGS-aware (payload sets GSCFG0 CKSEL
+via `IN/OUT (#0F)`, "CAN'T PLAY FROM SD(NGS)" for files on the card's own SD) and its
+detect, run ONCE per plugin load (`(9A1F) == 0xFF`), is:
+`OUT (#33),#80` -> 256 reads of `#B3` that must all be equal -> `OUT (#BB),#23` (fw:
+number of RAM pages) -> HALT-loop until D0 clears, 490 frames = ~10 s ("Waiting to GS
+response...") -> `IN (#B3)` must be >= 3 -> `#6A`, `#6B`, `#F3`. Playback is its own
+streamer: `#14`/`#13` upload+run the payload (DI, IM2, DAC by reading 0x61xx/0x62xx,
+pages via MPAG, bytes taken through the D7 ping-pong, `IN A,(01)` != 0 = stop, so the
+host writes command 0 first and never acks it). Everything the classic GS lacks is the
+`#33` reset — on classic GS that OUT is a no-op and `#23` answers at once.
+
+- **What the RTL says the reset is** (`top.v`: `$33` -> `resetter` -> `internal_reset_n`,
+  "internal reset for everything"): GSCFG0 back to `0x30` (NOROM=0, CKSEL=10 MHz), so
+  the flash LOADER runs from ROM; every bitstream C..current has the port. **zxbus.v's
+  handshake has NO reset term** — `command_reg_out`, both data registers,
+  `command_bit`, `data_bit` survive; only its async-toggle sync chains take `rst_n`.
+- **What the fw then does with a pending command**: the loader (`loader_ngs.a80`)
+  polls ZXSTAT D0 for 256 iterations (~0.9 ms at the reset clock), `RDBYT01` reads a
+  command that lands inside that window (the 0x55/0xAA update handshake) and
+  `RDBYT03` does `OUT (CLRCBIT)` unconditionally after its LDIR, then `RROMSD` (the
+  SD walk) and the GS image's `INIT`, whose first instructions are `OUT (CLRCBIT)` /
+  `XOR A / OUT (ZXDATWR),A`. **So on hardware the player's `#23` is never answered**:
+  the loader clears D0 within milliseconds, the host's wait falls through at its next
+  frame and it reads the OLD data latch as the page count — the detect passes by
+  accident whenever that latch holds >= 3, and fails after a clean boot (INIT's 0).
+  The later `#6A`/`#6B`/`#F3`/`#14` are D0-waited without timeout, so they simply
+  wait for the boot to finish; the flow works on hardware because the boot is ~1 s.
+- **Ours failed deterministically, for three reasons, all fixed in GS.cpp:**
+  1. `ngs_warm_reset` wiped the FIFOs and `reg_status` — a `#23` written before core1
+     consumed the LATCHED reset (~0.6 ms window at 14 MHz) vanished with its D0.
+     Now the FIFOs collapse to their newest byte (what the single hardware registers
+     hold) and the flags stand. The explicit flush is F11's (`hostIfaceFlush`).
+  2. Turbo-boot was OFF under a live TS-Conf core1 renderer, and WC is TEXT mode, so
+     the loader's SD walk (~350M T) took 15+ s at 1x against the player's 10 s. It now
+     runs at 8x while `GS::hostActive()` — the guest is polling the card — and stays
+     on the slack for a card rebooting under a demo that ignores it.
+  3. `hostWriteBB`'s boot spin (freezes core0 until `s_gs_main_loop`) is capped at
+     3 s instead of 5. With 1+2 it ends when the fw is up (~2 s), and it is what makes
+     OUR detect pass honestly: `#23` is pushed after INIT and COM23 answers NUMPG. It
+     stays as the safety net for the F11 deviation (the card reboots on a ZX reset).
+- **Round 2 (same day): the first build changed nothing, and the owner's log named
+  why** — `GS: idle throttle off` -> `NGS: first ZXDATWR 00 (fw alive)` -> `NGS: fw
+  dispatcher ready` -> `idle throttle ON — card unobserved`, with NO `hostWriteBB
+  timeout`: the card was reset and rebooted, but the host had stopped polling before
+  the dispatcher was even up, i.e. the detect fell through within a frame. The `#23`
+  was written before core1 consumed the latched reset, so `s_gs_main_loop` was still
+  true, the spin never armed, the command went into the FIFO, the LOADER ate it (the
+  hardware path above) and the stale latch read < 3 -> `(9A3B)=1` -> `RET` = "GS not
+  found" -> WC straight back to the panel. Fix: `hostWriteCtrl(0x80)` drops
+  `s_gs_main_loop`/`s_gs_booted` SYNCHRONOUSLY on core0, every setter of the gate
+  checks `!s_ngs_grst_pending` (the OLD fw's idle loop sits exactly on the PCs that
+  raise it), and the spin calls `gs_host_touch()` per iteration — a frozen core0
+  touches nothing, so `hostActive()` lapsed 500 ms into the boot and turbo-boot
+  switched itself off under the TS-Conf renderer. Deliberate deviation in the
+  player's favour: hardware never answers that `#23`; we deliver it after the boot.
+- **Round 3 (same day, NGS_TRACE log): the spin and turbo-boot now work — `boot gate
+  held cmd F3 for 662 ms, fw up` — and F3 is the tell**: the player sends F3 on its
+  NOT-FOUND path, i.e. the 256-read stability check of `#B3` had already failed and
+  `#23` was never written. Before the reset the idle card showed `st=80`: our g2h
+  queue held BOTH boot bytes the fw's INIT writes to port 03 (`XOR A / OUT (ZXDATWR)`
+  = 00, then NUMPG = 3E). Hardware has one `data_reg_in` = the last byte, and the
+  fw's INITVAR-tail `IN (ZXDATRD)` drops data_bit there; our card-side read
+  deliberately does NOT drop the queue (reverted 2026-08-07, ZP4's module load
+  needs it). So the host popped 00, then 3E -> "unstable" -> not found. Fix: the
+  g2h collapse to the newest byte runs SYNCHRONOUSLY in `hostWriteCtrl(0x80)` on
+  core0 (the queue's consumer), not only in `ngs_warm_reset` on core1, which came
+  too late for reads that start ~1 us after the OUT. Known residual deviation: after
+  ANY boot the idle card shows D7=1 with the boot bytes queued where hardware
+  shows D7=0 with NUMPG in the register — a program polling D7 before its first
+  command sees a phantom reply. Two diagnostics stayed in the plain build:
+  `NGS: host C_GRST via #33` and `GS: boot gate held cmd XX for N ms, fw up` /
+  `...timeout (cmd XX held N ms)`; `build-ngstrace/` is the `-DNGS_TRACE=ON` twin
+  of `build/` for the 1 Hz `NGS:` line + the hs ring.
+- **Round 4 (same day, the regression run): the spin must NOT run for a GUEST-initiated
+  reset.** TheLink resets the card itself at load (`C_GRST via #33` -> `boot gate held
+  cmd 00 for 615 ms`) and the spin froze the ZX for the boot; on hardware the ZX runs
+  on and the loader eats that command. `s_grst_by_guest` (set by hostWriteCtrl 0x80,
+  cleared by `GS::ngsReset()` = F11/launch) skips the spin; GS Player still detects:
+  `#23` is eaten by the loader, the collapsed latch reads back NUMPG, and the `#6A`
+  it writes during the SD walk survives INIT's CLRCBIT via gsio_clr_cbit's
+  unread-command re-raise and is dispatched by COMINT. The spin remains for OUR
+  resets only.
+- **Round 4b: TheLink's tunnel came 1-3 s late because of the IDLE THROTTLE, not the
+  reset** — the owner's log showed `idle throttle off (episode 515)` exactly where the
+  effect started: the demo parks the host, plays nothing yet and lets its UPLOADED
+  card code prepare the effect (PC 0x59xx, ZX-DMA reads), which "unobserved + flat
+  DAC for 500 ms" ran at 1/8. TheLink had never been on hardware with the throttle
+  (added 2026-09-07). Third idle condition now: the fw's own dispatcher idle loop
+  must have polled ZXSTAT (PC 0x0270/0x0281, `s_fw_idle_polls`) within 100 ms —
+  uploaded code never does. TS-Conf + an unused card still throttles.
+- The rounds above grew `.gsovl` past its AUTO window (26 624 -> 26 776 B measured on the plain build, 27 912 with NGS_TRACE):
+  `_GSOVL_BYTES` is 28 672 now (CMakeLists), i.e. +2 KB of heap on a GS session.
+  `s_fw_idle_polls` is declared beside `s_ngs_grst_pending`, NOT in the PERF block —
+  the first build of round 4b put it under `#if GS_PERF_TRACE` and only the trace
+  variant linked.
+- **Round 5: without the spin TheLink hung at 786A** (`IN (#BB)/RLCA/JR C` = waiting
+  for D7 to CLEAR after its own #B3 write), log: fw idle at 026E-0277, `cmd=18/0`,
+  `st=80`, `b3=0` — D7 up with NO host byte pending. The two boot bytes INIT writes
+  to port 03 (00, NUMPG) sat in the g2h queue for the whole session (our card-side
+  IN (02) does not drop the queue, INITVAR's closing read does on hardware), and
+  `gsio_in_data` keeps D7 while g2h is non-empty, so the card taking TheLink's byte
+  never dropped the flag. The spin had masked it: with the command delivered after
+  boot the host's own reply reads popped those bytes. Fix at the source: a port-03
+  write while `!s_gs_main_loop` is a LATCH update — `reg_data_gs = value`, g2h
+  emptied, reply bit 0, D7 re-derived from the host side — no queue entry. This also
+  removes the "idle card shows D7=1 after every boot" deviation noted in round 3.
+- **Hw 2026-09-21, owner on grst8: "работает"** — TheLink starts and runs (the round-5
+  D7 fix; the tunnel delay was round 4b). Earlier in the same session: GS Player
+  under WC (round 3), NPL MOD (grst4) and MP3 (grst5). Not itemised beyond that, so
+  **still owed**: ZP4, NEO8, FH1/COMTR4GS, F11 with a NeoGS title on TS-Conf and on
+  Pentagon (the spin still runs on OUR resets), and FPS under WC while the card boots.
+- Test ELFs `debug/DVp2-ngs-grst8-1.0.6.elf` (plain) / `-grst8-trace-` (NGS_TRACE);
+  grst7 = the idle-throttle fw-idle gate,
+  grst5 = the Helix arena fix (hw-confirmed), grst6 = no spin on a guest reset.
+  **Hw 2026-09-21, owner on grst4: "теперь работает плеер"** — GS Player under WC
+  detects the NeoGS and plays; the owner then went on to the regression set below,
+  whose verdict is NOT in yet. **Still owed**: GSPlayer under WC
+  with NeoGS (expect ~2 s of frozen guest at the first file, then detect + sound —
+  a MOD, a WAV); then the NeoGS set the reset path touches — F11 with a NeoGS title
+  running on TS-Conf and on Pentagon, ZP4 / NPL / NEO8 / TheLink; and FPS under WC
+  while the card boots (turbo now shares core1 with the TEXT renderer).
+
 ### The handshake ring: four separate defects cost more than the bugs did
 
 Every NeoGS hang in the 2026-08-07 session was diagnosed from `NGS hs:`, and
@@ -6432,6 +6558,15 @@ Two changes, both about ORDER and both worth keeping straight:
   `out_ring` is read by core1 at 37 500/s. Moving in_ring + asm_buf (12 KB) to
   SRAM is the next lever; it is resolution-independent, so it is NOT the cause of
   the 576p-only symptom.
+- **The butter part of the split arena must be a FULL arena** (hw-confirmed 2026-09-21,
+  owner: "фикс MP3 сработал"; found in the NPL run as "MP3 plays but no sound" = stub mode).
+  `rest = HELIX_ARENA_SIZE - sram + 64` sized the butter part as the SHORTFALL, but a
+  structure spills when it does not fit the SRAM *remainder*: at the 20480 step
+  MP3DecInfo + HuffmanInfo + SubbandInfo leave ~6.6 KB, IMDCTInfo (6944) spills into
+  a 4160 B butter part and `MP3InitDecoder` fails (logged `MP3InitDecoder failed
+  (arena 24576 B)`, twice in one session; a later attempt worked only because the
+  heap handed out another SRAM step). Now `rest = HELIX_ARENA_SIZE + 64` regardless,
+  and the failure line prints `sram used/cap butter used/cap`.
 - **A MACHINE reset (F11) releases it at once** — `NgsMp3::releaseNow()`, called from
   `ESPectrum::reset` beside `GS::hostIfaceFlush`/`GS::ngsReset`, plus one re-armed
   allocation attempt (`s_init_failed` cleared, so a decoder that had been forced into

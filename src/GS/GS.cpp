@@ -725,7 +725,13 @@ static uint8_t  s_dac_mask = 3;
 // Host GSCTR (#33) requests, consumed by the GS-Z80 loop on core1 — never
 // mutate s_cpu from core0 while z80_run may be in flight.
 static volatile bool s_ngs_nmi_pending  = false;
+// Status polls issued from the fw's OWN dispatcher idle loop (PC 0x0270/0x0281
+// after the IN). The idle throttle keys on this: a card executing UPLOADED code
+// (TheLink's effect routines at 0x59xx, an NPL/ZP4 player) never reaches those
+// PCs, however quiet its ports and its DAC are — see pump(). core1 only.
+static volatile uint32_t s_fw_idle_polls   = 0;
 static volatile bool s_ngs_grst_pending = false;
+static volatile bool s_grst_by_guest    = false;   // the pending/running reboot was the GUEST's OUT (#33),#80
 // Cold-boot hold (see GS::pump): GS-Z80 stays parked until ESPectrum::loop
 // starts pumping the SD mailbox. Set in init() for NeoGS, cleared once by
 // ngsBootRelease() from core0.
@@ -1281,7 +1287,8 @@ static zuint8 __not_in_flash_func(gs_cb_in)(void* ctx, zuint16 port) {
             // 0x026E → PC=0x0270 (early-exit path when work_ram[0x4084]=0)
             // 0x027F → PC=0x0281 (steady-state path, always reached after C000)
             // Either means C000 init is done and work_ram dispatch table ready.
-            if (!s_gs_main_loop && (pc == 0x0270 || pc == 0x0281)) {
+            if (pc == 0x0270 || pc == 0x0281) s_fw_idle_polls++;
+            if (!s_gs_main_loop && !s_ngs_grst_pending && (pc == 0x0270 || pc == 0x0281)) {
                 s_gs_main_loop = true;
                 gs_trace_gs(TR_MAIN, 0, GS::reg_status);
 #ifdef GS_DEBUG_TRACE
@@ -1335,7 +1342,7 @@ static void __not_in_flash_func(gs_cb_out)(void* ctx, zuint16 port, zuint8 value
                 Debug::log("GS: RAM test found %u pages (of 63)", (unsigned)value);
             }
             bool first_main = false;
-            if (s_gs_booted && !s_gs_main_loop) {
+            if (s_gs_booted && !s_gs_main_loop && !s_ngs_grst_pending) {
                 // Second OUT(03) = C000 init done, command dispatch ready.
                 s_gs_main_loop = true;
                 first_main = true;
@@ -1635,16 +1642,27 @@ static void ngs_reset_regs() {
 // reset without FPGA reconfiguration.
 static void __not_in_flash_func(ngs_warm_reset)() {
     ngs_reset_regs();
-    // Host handshake resets with the card: firmware reboots and re-announces
-    // itself via OUT(03), so pending FIFOs/status are stale.
-    s_cmd_fifo_r  = s_cmd_fifo_w;
-    s_host_fifo_r = s_host_fifo_w;
-    gs_status_and(&GS::reg_status, ~0x80u);
-    s_card_reply_bit = 0;
-    s_g2h_r       = s_g2h_w;   // must go with reg_status=0: a surviving reply
-                               // queue would disagree with the cleared D7 and
-                               // block every later attempt to clear it
-    GS::reg_status = 0;
+    // The host handshake SURVIVES a C_GRST. top.v routes the $33 reset into
+    // `internal_reset_n` — "internal reset for everything": ports (GSCFG0 back
+    // to NOROM=0, so the flash LOADER runs), DMA, the Z80 — but zxbus.v gives
+    // command_reg_out, the data registers, command_bit and data_bit NO reset
+    // term (only its async-toggle sync chains take rst_n). So a command the
+    // host writes right after its own OUT (#33),#80 stays pending with D0 up,
+    // and what happens to it is the LOADER's business: RDBYT01 reads it if it
+    // lands inside the loader's 256-poll window, RDBYT03 clears the bit
+    // unconditionally after the LDIR, and the GS image's INIT clears it again
+    // and writes 0 to the data port. Our FIFOs collapse to what the single
+    // hardware registers would hold — the newest byte — and the flags stand.
+    //
+    // Wiping FIFOs + reg_status here lost the `#23` Wild Commander's GS Player
+    // writes ~0.6 ms after its own reset whenever core1 consumed the latched
+    // reset AFTER the write: D0 came back clear with nothing dispatched, the
+    // player's wait loop fell through and it read a stale latch as the page
+    // count (analysis 2026-09-21). The explicit flush belongs to F11
+    // (GS::hostIfaceFlush, called before ngsReset), not to C_GRST.
+    if (s_cmd_fifo_w  - s_cmd_fifo_r  > 1) s_cmd_fifo_r  = s_cmd_fifo_w  - 1;
+    if (s_host_fifo_w - s_host_fifo_r > 1) s_host_fifo_r = s_host_fifo_w - 1;
+    if (s_g2h_w       - s_g2h_r       > 1) s_g2h_r       = s_g2h_w       - 1;
     s_gs_booted    = false;
     s_gs_main_loop = false;
     // A reset cancels a pending NMI. This could not matter while z80_nmi() was
@@ -1686,17 +1704,17 @@ static zuint8 __not_in_flash_func(ngs_cb_in)(void* ctx, zuint16 port) {
         case 0x03:
             v = gsio_in_selfdata();
             break;
-        case 0x04:  // ZXSTAT — card view: reply-bit RTL rule, see above
+        case 0x04: {  // ZXSTAT — card view: reply-bit RTL rule, see above
             v = ngs_card_status();
+            const uint16_t pc = Z80_PC(s_cpu);
+            if (pc == 0x0270 || pc == 0x0281) s_fw_idle_polls++;   // fw dispatcher idle loop
 #if GS_PERF_TRACE
-            {
-                uint16_t pc = Z80_PC(s_cpu);
-                s_perf_p04_total++;
-                if (pc == s_perf_p04_pc) s_perf_p04_spin++;
-                s_perf_p04_pc = pc;
-            }
+            s_perf_p04_total++;
+            if (pc == s_perf_p04_pc) s_perf_p04_spin++;
+            s_perf_p04_pc = pc;
 #endif
             break;
+        }
         case 0x05:  // CLRCBIT
             gsio_clr_cbit();
             v = 0xFF;
@@ -1765,13 +1783,38 @@ static void __not_in_flash_func(ngs_cb_out)(void* ctx, zuint16 port, zuint8 valu
             gs_trace_gs(TR_OUT02, value, GS::reg_status);
             return;
         case 0x03:  // ZXDATWR
-            gsio_out_data(value);
+            if (!s_gs_main_loop && !s_ngs_grst_pending) {
+                // The fw's INIT writes port 03 twice before its dispatcher exists
+                // (`XOR A / OUT (ZXDATWR)` and NUMPG) and nobody reads them: on
+                // hardware INITVAR's closing `IN (ZXDATRD)` drops data_bit and
+                // data_reg_in simply holds the last byte. Our card-side IN (02)
+                // deliberately does not drop the g2h queue (ZP4 needs it), so
+                // both bytes used to sit there with D7 up for the whole session
+                // — and a host that writes #B3 and waits for D7 to CLEAR (TheLink's
+                // 0x18/0x19 upload at 786A) waited for ever, because gsio_in_data
+                // keeps D7 while g2h is non-empty (hw log 2026-09-21: fw idle at
+                // 026E-0277, cmd=18/0, st=80, b3=0). So a boot-phase write is a
+                // LATCH update: no queue entry, anything queued before the boot is
+                // gone (unreadable on hardware too once INITVAR ran), D7 follows
+                // what the HOST still has pending. GS Player's stale-latch detect
+                // reads NUMPG here, deterministically.
+                GS::reg_data_gs = value;
+                s_g2h_r = s_g2h_w;
+                s_card_reply_bit = 0;
+                if (gs_hs_idle()) gs_d7_clear_recheck();
+            } else {
+                gsio_out_data(value);
+            }
             // Boot progress, mirroring the GS-ROM lineage (fw 1.11 derives
             // from Stinger's GS 1.04): first OUT(03) = RAM test done, second
             // = init done, dispatcher ready. Without releasing the gate here,
             // hostWriteBB stalls 2 s on the very FIRST command a program
             // sends — short-timeout detects (NPL) then report "No GS".
-            if (!s_gs_booted) {
+            if (s_ngs_grst_pending) {
+                // A host reset is latched and not yet consumed: this OUT is the
+                // OLD firmware's, not the reboot's (hostWriteCtrl dropped the
+                // boot gate on core0; step() takes the reset before its next chunk).
+            } else if (!s_gs_booted) {
                 s_gs_booted = true;
                 Debug::log("NGS: first ZXDATWR %02X (fw alive)", (unsigned)value);
             } else if (!s_gs_main_loop) {
@@ -2695,7 +2738,13 @@ void __not_in_flash_func(GS::pump)() {
     // trade CLAUDE.md already records for a card booting under a heavy scene.
     // The common case, a program load, no longer reboots the card at all
     // (ESPectrum::resetForLoad), so this is the safety net, not the fix.
-    if (s_ngs && !s_gs_main_loop && !g_ts_c1_live) {   // turbo-boot: 8x wall clock
+    // ...unless the HOST is waiting for the card: a program that reset it via
+    // GSCTR (#33) and polls #BB for the answer (WC's GS Player, 10 s timeout)
+    // gets a card that boots in ~2 s at 8x, where the 1x boot under a TEXT-mode
+    // WC desktop took 15+ s — hostActive() is the same "the guest is talking to
+    // it" test the render-priority rule uses, so a card rebooting under a demo
+    // that ignores it still boots on the slack (2026-09-21).
+    if (s_ngs && !s_gs_main_loop && (!g_ts_c1_live || GS::hostActive())) {   // turbo-boot: 8x wall clock
         q16 <<= 3;
         cap <<= 3;
         // 8x the rate needs 8x the headroom before dt_us * q16 overflows 32
@@ -2703,7 +2752,19 @@ void __not_in_flash_func(GS::pump)() {
         dt_cap = 250;
     } else {
         // Idle throttle (see GS_IDLE_US): card unobserved → 1/8 wall clock.
+        // "Unobserved" is not "idle": TheLink parks the host, makes no sound and
+        // lets its UPLOADED card code prepare the next effect (ZX-DMA reads of
+        // host RAM, PC 0x59xx) — the throttle then ran that work at 1/8 and the
+        // tunnel came 1-3 s late (hw log 2026-09-21: `idle throttle off (episode
+        // 515)` right where the effect finally started). So the third condition:
+        // the fw's own dispatcher idle loop must have polled ZXSTAT within the
+        // last 100 ms (s_fw_idle_polls, PC 0x0270/0x0281 — it polls once per INT
+        // period there, still every ~200 us when throttled). Uploaded code never
+        // does, whatever its ports and DAC look like.
+        static uint32_t fw_idle_last = 0, fw_idle_seen_us = 0;
+        if (s_fw_idle_polls != fw_idle_last) { fw_idle_last = s_fw_idle_polls; fw_idle_seen_us = now; }
         const bool idle = s_gs_main_loop
+                       && (uint32_t)(now - fw_idle_seen_us)   <= 100000u
                        && (uint32_t)(now - s_host_last_us)  > GS_IDLE_US
                        && (uint32_t)(now - s_out_change_us) > GS_IDLE_US;
         if (idle != s_idle_throttled) {
@@ -3363,17 +3424,43 @@ void GS::hostWriteBB(uint8_t data) {
     // C000 init can take >200 ms at emulated speed; cap at 2 s.
     // NeoGS boots much longer: the loader walks the SD card (FAT parse,
     // NEOGS.ROM lookup — hw log: ~1.3M SPI exchanges) before falling back to
-    // the flash GS ROM, ~2 s emulated even with the mailbox pumped. 5 s cap
-    // covers a detect racing a GSCTR (#33) warm reset.
-    if (!s_gs_main_loop) {
-        const uint32_t boot_cap_us = s_ngs ? 5000000 : 2000000;
+    // the flash GS ROM, ~2 s emulated at turbo-boot with the mailbox pumped.
+    // The cap was 5 s "to cover a detect racing a GSCTR (#33) warm reset";
+    // since 2026-09-21 that race is settled the hardware way (ngs_warm_reset
+    // keeps the command pending) and turbo-boot also runs under a TS-Conf
+    // renderer while the host waits, so the spin — which FREEZES the guest,
+    // unlike hardware — is bounded at 3 s. It stays at all only as the safety
+    // net for OUR F11 deviation (the card reboots on a ZX reset; a title that
+    // reaches it within the boot would otherwise lose its first command to
+    // INIT's CLRCBIT, exactly as hardware loses one sent during a real boot).
+    // ...but NOT when the GUEST reset the card itself (OUT (#33),#80): on hardware
+    // the ZX keeps running while the card boots and the command it writes now is
+    // the LOADER's to eat (RDBYT01 inside its poll window, RDBYT03's CLRCBIT after
+    // it) — TheLink does exactly that, `C_GRST` then command 00 within
+    // microseconds, and the spin froze it for 615 ms per boot (hw log
+    // 2026-09-21: its tunnel came 1-3 s late). GS Player's `#23` is eaten the
+    // same way and its detect still passes: the collapsed latch it reads back is
+    // NUMPG (hostWriteCtrl), and the `#6A` it writes during the SD walk survives
+    // INIT's CLRCBIT through gsio_clr_cbit's unread-command re-raise and is
+    // dispatched by COMINT. The spin stays for OUR resets (F11 / a launch), where
+    // the guest has no idea the card is rebooting.
+    if (!s_gs_main_loop && !(s_ngs && s_grst_by_guest)) {
+        const uint32_t boot_cap_us = s_ngs ? 3000000 : 2000000;
         uint32_t t0 = time_us_32();
         while (!s_gs_main_loop && (time_us_32() - t0) < boot_cap_us) {
             gs_host_sd_service();  // NGS: firmware may be inside the SD boot path
+            gs_host_touch();       // the spin IS the host waiting: keeps hostActive()
+                                   // true, i.e. turbo-boot on under a TS-Conf renderer
+                                   // (it would lapse 500 ms into a 2 s boot otherwise)
             __dmb();
         }
+        const uint32_t held_ms = (time_us_32() - t0) / 1000u;
         if (!s_gs_main_loop) {
-            Debug::log("GS: hostWriteBB timeout waiting for GS boot");
+            Debug::log("GS: hostWriteBB timeout waiting for GS boot (cmd %02X held %lu ms)",
+                       (unsigned)data, (unsigned long)held_ms);
+        } else {
+            Debug::log("GS: boot gate held cmd %02X for %lu ms, fw up", (unsigned)data,
+                       (unsigned long)held_ms);
         }
     }
     // Flush stale B3 data if the FIFO has an implausibly large backlog.
@@ -3486,6 +3573,7 @@ void GS::hostIfaceFlush() {
 
 void GS::ngsReset() {
     if (!enabled || !neogs) return;
+    s_grst_by_guest    = false;  // OUR reset (F11 / launch): the guest does not know, so the boot gate spins
     s_ngs_grst_pending = true;   // consumed by step() on core1, like C_GRST
 }
 
@@ -3503,7 +3591,37 @@ void GS::hostWriteCtrl(uint8_t data) {
     gs_host_touch();
     gs_hs('N', data, reg_status);
     gs_host_sd_service();
-    if (data & 0x80) s_ngs_grst_pending = true;   // C_GRST — warm reset
+    if (data & 0x80) {                            // C_GRST — warm reset
+        // Latched for core1 (s_cpu is core1's), but the BOOT GATE has to drop
+        // NOW, on this core: a host that resets the card and writes its first
+        // command ~0.6 ms later (WC's GS Player: `OUT (#33),#80`, 256 reads of
+        // #B3, `OUT (#BB),#23`) must find hostWriteBB's spin armed, or the
+        // command goes into the FIFO before core1 has even seen the reset, the
+        // LOADER then eats it (RDBYT01/RDBYT03 clear D0 without answering) and
+        // the player reads a stale latch as the page count — "GS not found"
+        // (hw log 2026-09-21: `first ZXDATWR 00` / `fw dispatcher ready` with
+        // the card already `unobserved`, no `hostWriteBB timeout`). The setters
+        // of s_gs_main_loop check s_ngs_grst_pending so the OLD firmware's
+        // idle loop cannot raise it again before core1 consumes the reset.
+        s_ngs_grst_pending = true;
+        s_grst_by_guest    = true;   // hostWriteBB must NOT spin on this boot, see there
+        __dmb();
+        s_gs_main_loop = false;
+        s_gs_booted    = false;
+        // ...and the host's view of the card->host DATA register collapses to
+        // its last byte HERE, not in ngs_warm_reset on core1 (which also does
+        // it, too late for what follows). Hardware has ONE data_reg_in; our
+        // g2h queue keeps every unread reply, and the fw's own boot leaves two
+        // in it — INIT's `XOR A / OUT (ZXDATWR)` and its NUMPG write — that its
+        // INITVAR-tail `IN (ZXDATRD)` clears only on hardware (our card-side
+        // read deliberately does not drop the queue; ZP4 needs it). GS Player
+        // then reads #B3 256 times right after its reset expecting one stable
+        // value and got 00 then 3E: "GS not found", first command F3 (hw log
+        // 2026-09-21, `boot gate held cmd F3 for 662 ms`). Core0 is this
+        // queue's consumer (hostReadB3), so advancing r here is race-free.
+        { const uint32_t w = s_g2h_w; if (w - s_g2h_r > 1) s_g2h_r = w - 1; }
+        Debug::log("NGS: host C_GRST via #33 (%02X) - boot gate dropped", (unsigned)data);
+    }
     if (data & 0x40) s_ngs_nmi_pending  = true;   // C_GNMI
     if (data & 0x20) s_ngs_led ^= 1;              // C_GLED — LED toggle
 }
