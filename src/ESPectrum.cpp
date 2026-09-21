@@ -968,7 +968,7 @@ void ESPectrum::setup() {
   // keeps the pick, so coming back to Pentagon does not need it re-entered; the menu's
   // resolveConstraints() clears it for real — with a note and the reboot prompt — at the
   // first commit made on another machine.
-  // TS-Conf sizes its RAM through its own persisted pick (1/2/4 MB), NOT the
+  // TS-Conf's RAM is a fixed 4 MB (Config::TSCONF_PAGES), NOT the
   // Murmuzavr field — so a user's Murmuzavr setting survives a trip through
   // TS-Conf. Config::wantedPages() is the single source of this decision;
   // the requestMachine/MachineSwitch reboot boundary compares against it.
@@ -1057,23 +1057,18 @@ void ESPectrum::setup() {
                   (unsigned)(((MEM_PG_CNT + 2) * 16u) >> 10));
     Debug::log("setup: ram5=%p ram7=%p diff=%d", MemESP::ram[5].direct(), MemESP::ram[7].direct(),
                (int)((uint8_t*)MemESP::ram[7].direct() - (uint8_t*)MemESP::ram[5].direct()));
-    // TS-Conf boot self-heal (the framebuffer-first pattern): every page must
-    // be POINTER-backed — the later render/DMA phases read arbitrary pages via
+    // TS-Conf residency check (the framebuffer-first pattern): every page should
+    // be POINTER-backed — the render/DMA phases read arbitrary pages via
     // TsConf::pagePtr(), and an accessor/SD-swap page there is a null pointer.
-    // Not enough butter for the pick → halve it, persist, reboot (floor 64,
-    // which always fits: pages 8+ land heap-first before butter).
+    // The strip is a fixed 4 MB (Config::TSCONF_PAGES — the only size a ZX-Evo
+    // has), so nothing can be halved: a short butter budget (a 4 MB NeoGS takes
+    // its RAM off the top of the same chip) runs degraded — pagePtr answers
+    // nullptr for the non-resident tail, ZX video falls back to page 5 — and the
+    // user is told once.
     if (Config::arch == A_TSCONF && (psram_pages || swap_pages)) {
-      uint16_t next = (Config::tsconf_ram > 64) ? (uint16_t)(Config::tsconf_ram / 2) : 64;
-      Debug::log2SD("setup: TS-Conf %u pages not pointer-backed (spi=%d swap=%d) -> %u pages, reboot",
-                    (unsigned)Config::tsconf_ram, psram_pages, swap_pages, (unsigned)next);
-      if (Config::tsconf_ram > 64) {
-        Config::tsconf_ram = next;
-        OSD::bootNotice("TS-Conf: not enough PSRAM - RAM reduced");
-        Config::save();
-        OSD::esp_hard_reset();
-      }
-      // 64 pages and still short: run degraded (pagePtr answers nullptr for
-      // the non-resident tail; ZX video falls back to page 5).
+      Debug::log2SD("setup: TS-Conf %d of %u pages not pointer-backed (spi=%d swap=%d) - running degraded",
+                    psram_pages + swap_pages, (unsigned)MEM_PG_CNT, psram_pages, swap_pages);
+      OSD::bootNotice("TS-Conf: not enough PSRAM for 4 MB - RAM incomplete");
     }
   } else {
     Debug::log("setup: no ext_ram path, freeHeap=%u", getFreeHeap());

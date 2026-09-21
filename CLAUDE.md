@@ -1921,13 +1921,24 @@ of `aligned(4096)` padding. Free heads: DVp2 82.7 KB, z0p2 79.1, z0p2-PIOUSB 64.
   `gsDmaPoke8` (the `g_ngs_zxdma` pattern — NEVER in `MemESP::writebyte`), the
   write does NOT consume (hardware stores to RAM and the FPGA array in
   parallel), even byte latched / odd commits the word (TSF_REGS/CRAM/SFILE).
-- **Memory**: `Config::tsconf_ram` (64/128/256 pages, NVS, menu Machine →
-  TS-Conf options → RAM, AC_REBOOT) — TS-Conf's own pick, `Config::mem_pg_cnt`
-  (Murmuzavr) deliberately untouched. **`Config::wantedPages(arch)` is the one
-  derivation** used by setup()'s MEM_PG_CNT, requestMachine's and
-  MachineSwitch's reboot boundaries — they must never disagree. Boot residency
-  self-heal: any non-POINTER page → halve tsconf_ram, bootNotice, save, reboot
-  (floor 64). Machine only offered on butter-PSRAM ≥1 MB + VGA_HDMI
+- **Memory**: a FIXED 4 MB = `Config::TSCONF_PAGES` (256) — every ZX-Evo has
+  4 MB, so the 1/2/4 MB pick (`Config::tsconf_ram`, NVS `tsconf_ram`, the menu
+  RAM radio, the `TS[nMB]` subheader tag) was REMOVED 2026-09-21 (owner's call,
+  hw-confirmed the same day together with the NeoGS cap below — "работает", not
+  itemised); `Config::mem_pg_cnt` (Murmuzavr) deliberately untouched.
+  **`Config::wantedPages(arch)` is the one derivation** used by setup()'s
+  MEM_PG_CNT, requestMachine's and MachineSwitch's reboot boundaries — they must
+  never disagree. Boot residency check: any non-POINTER page → one bootNotice
+  and the machine runs DEGRADED (`pagePtr` nullptr for the tail; the old
+  halve-and-reboot self-heal went with the pick). **NeoGS is capped at 2 MB on
+  TS-Conf** for exactly that reason (same day, owner's call): a 4 MB card on the
+  same 8 MB chip left a ≈3.3 MB budget for a 4 MB strip. The cap is ONE place,
+  `GS::configuredRamBytes()` (`gs_ram_size >= 3 && arch != A_TSCONF`), which
+  `Buffer::pageBudget`, `GS::init` and Hardware Info all derive from — so the
+  persisted `gs_ram_size` pick survives and a switch back to Pentagon gets its
+  4 MB again; the menu drops the 4 MB row while TS-Conf is staged (`gs_ramOpts`)
+  and `resolveConstraints` moves a staged 3 to 2 with a note, so the radio keeps
+  a marked row. Machine only offered on butter-PSRAM ≥1 MB + VGA_HDMI
   (`p_showTsconf`) — TSU/DMA phases read arbitrary pages via
   `TsConf::pagePtr()` (POINTER-backed or nullptr, cached XIP alias).
 - **Ports**: `#nnAF` hooks in input/output (`a8 == 0xAF`; DivIDE's #AF is the

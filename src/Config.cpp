@@ -72,7 +72,6 @@ uint16_t Config::max_tft_freq = 126;
 uint8_t  Config::vreq_voltage = VREG_VOLTAGE_1_50;
 bool     Config::Issue2 = true;
 uint16_t Config::mem_pg_cnt = 64;      // Murmuzavr off; the live count is MEM_PG_CNT
-uint16_t Config::tsconf_ram = 256;     // TS-Conf 4 MB default (64/128/256 pages)
 uint8_t  Config::tsconf_clk_cap = 2;   // ZCLK cap: 14 MHz allowed
 bool     Config::rtc_enabled = false;
 uint16_t Config::mouse_sens = 64;        // Q8: 64 = x1/4, the historical divisor
@@ -1530,10 +1529,6 @@ void Config::load() {
         nvs_get_i("MEM_PG_CNT", pg, sts);
         mem_pg_cnt = (pg < 8 || pg > 2048) ? 64 : (uint16_t)pg;
         MEM_PG_CNT = mem_pg_cnt;
-        // TS-Conf RAM pick: only the three real configurations are valid.
-        int tsr = 0;
-        nvs_get_i("tsconf_ram", tsr, sts);
-        tsconf_ram = (tsr == 64 || tsr == 128 || tsr == 256) ? (uint16_t)tsr : 256;
         int tsc = -1;
         nvs_get_i("tsconf_clk_cap", tsc, sts);
         tsconf_clk_cap = (tsc >= 0 && tsc <= 2) ? (uint8_t)tsc : 2;
@@ -1905,7 +1900,6 @@ void Config::save(const char* path, const char* profileName) {
     }
     // The PICK, not the live count — see Config::mem_pg_cnt in Config.h.
     nvs_set_i(buf,"MEM_PG_CNT", mem_pg_cnt);
-    nvs_set_i(buf,"tsconf_ram", tsconf_ram);
     nvs_set_i(buf,"tsconf_clk_cap", tsconf_clk_cap);
 
     if (handle) {

@@ -155,11 +155,10 @@ static void drawSubHeader() {
 
     // "Machine: Pentagon (128K+Gluk) + MZ[8MB]" — family and romset both named by the
     // Machine menu itself (machineMenuName), so the subheader says exactly which of a
-    // family's machines is running. The Murmuzavr/TS tag only appears while that mode
+    // family's machines is running. The Murmuzavr tag only appears while that mode
     // is on. A machine in no menu table falls back to the arch spelling alone.
     char mach[80];
     const char* mz = murmuzavrTag();
-    if (!mz) mz = tsconfTag();   // TS[4MB] — same slot, the two never coexist
     const char* fam = nullptr; const char* rom = nullptr;
     if (machineMenuName(fam, rom))
         snprintf(mach, sizeof(mach), "Machine: %s (%s)%s%s",

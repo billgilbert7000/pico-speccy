@@ -549,12 +549,6 @@ static const Option opt_mach_tsconf[] = {
     { TXT_ROM_TSBIOS,      NM_MACH(A_TSCONF, R_TSCONF),      TXT_ROM_TSBIOS_S      },
     { TXT_ROM_TSBIOS_GLUK, NM_MACH(A_TSCONF, R_TSCONF_GLUK), TXT_ROM_TSBIOS_GLUK_S },
 };
-// TS-Conf RAM size: values are page counts (the real configurations are 1/2/4 MB).
-static const Option opt_tsconf_ram[] = {
-    { "1 MB", 64  },
-    { "2 MB", 128 },
-    { "4 MB", 256 },
-};
 // Ceiling for the guest's SysConfig ZCLK (a 14 MHz Z80 costs ~4x a 3.5 MHz frame
 // of core0 time — TS titles that ask for 14 MHz can be pinned to 7 here; the
 // guest keeps its own timing, it just gets fewer T-states per frame).
@@ -595,16 +589,9 @@ static const Node kMurmuzavr[] = {
     NM_RADIO(TXT_MACH_MURM_SIZE, SET_MEM_PG_CNT, opt_murmuzavr, nullptr),
 };
 
-const char* tsconfTag() {
-    if (!p_tsconfActive()) return nullptr;
-    const int32_t pg = Stage::get(SET_TSCONF_RAM);
-    static char buf[12];
-    snprintf(buf, sizeof(buf), "TS[%dMB]", (int)(pg > 0 ? pg / 64 : 4));
-    return buf;
-}
-
+// TS-Conf RAM is a fixed 4 MB (Config::TSCONF_PAGES) — the only size a ZX-Evo
+// has — so the level holds the CPU cap alone.
 static const Node kTsconf[] = {
-    NM_RADIO(TXT_MACH_TSCONF_RAM, SET_TSCONF_RAM, opt_tsconf_ram, nullptr),
     NM_RADIO(TXT_MACH_TSCONF_CLK, SET_TSCONF_CLK, opt_tsconf_clk, nullptr),
 };
 
@@ -987,12 +974,20 @@ static const Option* gs_modeOpts(uint8_t& cnt) {
     return opts;
 }
 // NeoGS RAM sizes fw 1.11 auto-detects; values ARE Config::gs_ram_size
-// (1 = 1 MB is a classic-GS-only value, not offered here).
+// (1 = 1 MB is a classic-GS-only value, not offered here). Built at runtime
+// because the 4 MB row is dropped while TS-Conf is staged: the machine's fixed
+// 4 MB strip and the card share one 8 MB chip (GS::configuredRamBytes caps the
+// live value, resolveConstraints moves a staged 3 to 2 so the radio keeps a
+// marked row — a value with no row of its own blanks the pane).
 static const Option opt_gs_ram[] = {
     { "512 KB", 0 },
     { "2 MB",   2 },
     { "4 MB",   3 },
 };
+static const Option* gs_ramOpts(uint8_t& cnt) {
+    cnt = p_tsconfActive() ? 2 : 3;
+    return opt_gs_ram;
+}
 
 static const Option opt_sn_clock[] = {          // values are Config::sn_clock indices
     { "3.58 MHz", 0 },   // SMS / the VGM default
@@ -1079,7 +1074,7 @@ static const Node kAudio[] = {
     NM_RADIO_D (TXT_AUD_GS,          SET_GS_MODE,  gs_modeOpts,  p_gsAvail),
     NM_RADIO_EN(NM_IND TXT_GS_CLOCK, SET_GS_CLOCK,  opt_gs_clock,  p_gsClockCls, p_gsClassic),
     NM_RADIO   (NM_IND TXT_GS_CLOCK, SET_NGS_CLOCK, opt_ngs_clock, p_gsNeo),
-    NM_RADIO_EN(NM_IND TXT_GS_RAM,   SET_GS_RAM,    opt_gs_ram,    p_gsAvail, p_gsNeo),
+    NM_RADIO_DE(NM_IND TXT_GS_RAM,   SET_GS_RAM,    gs_ramOpts,    p_gsAvail, p_gsNeo),
     NM_RADIO   (TXT_AUD_BOOST,       SET_AUDIO_BOOST, opt_boost,  nullptr),
 };
 

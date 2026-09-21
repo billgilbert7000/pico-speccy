@@ -84,15 +84,15 @@ bool commit(ArchIdx arch, RomsetIdx romset) {
             !OSD::featureBudgetGate(Subsystems::FEAT_PROFI)) {
             return false;
         }
-        // Entering TS-Conf: ~2 KB of SRAM state (gated) plus tsconf_ram of
-        // butter PSRAM for the page strip. The PSRAM side is only warned
-        // about here — if it really doesn't fit, the boot residency
-        // self-heal (ESPectrum::setup) halves the RAM pick and reboots.
+        // Entering TS-Conf: ~2 KB of SRAM state (gated) plus 4 MB of butter
+        // PSRAM for the page strip (Config::TSCONF_PAGES — the size is fixed).
+        // The PSRAM side is only warned about here: a strip that does not fit
+        // runs degraded (ESPectrum::setup logs the non-resident tail).
         if (arch == A_TSCONF && Config::arch != A_TSCONF) {
             if (!OSD::featureBudgetGate(Subsystems::FEAT_TSCONF))
                 return false;
-            if (Buffer::pageBudgetButter() < (size_t)Config::tsconf_ram * MEM_PG_SZ)
-                OSD::osdCenteredMsg("TS-Conf: PSRAM short - RAM may be reduced", LEVEL_WARN, 2000);
+            if (Buffer::pageBudgetButter() < (size_t)Config::TSCONF_PAGES * MEM_PG_SZ)
+                OSD::osdCenteredMsg("TS-Conf: PSRAM short - RAM will be incomplete", LEVEL_WARN, 2000);
         }
         Config::ram_file = "none";
         if (romset != Config::romSet) {

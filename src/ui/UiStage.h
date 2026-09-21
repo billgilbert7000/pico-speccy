@@ -326,7 +326,6 @@ const char* romsetName(int32_t composite);
     /* — the one the nav plays for this keypress — come out at the new level.        */ \
     X(SET_UI_CLICK_VOL,    AC_LIVE,   F_PREVIEW,             get_uiClickVol, put_uiClickVol, hook_uiLook,    -1)          \
     X(SET_MOUSE_SENS,      AC_PURE,   0,                     get_mouseSens,  put_mouseSens,  nullptr,        -1)          \
-    X(SET_TSCONF_RAM,      AC_REBOOT, 0,                     get_tsconfRam,  put_tsconfRam,  nullptr,        -1)          \
     /* Video > Capture-safe colours (HDMI single-symbol palette snap). Appended last  */ \
     /* per the APPEND ONLY rule; the hook re-runs the whole palette pipeline.         */ \
     X(SET_HDMI_SNAP,       AC_LIVE,   F_PREVIEW | F_PALETTE, get_hdmiSnap,   put_hdmiSnap,   hook_hdmiSnap,  -1)          \

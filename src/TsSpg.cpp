@@ -104,7 +104,7 @@ bool FileSPG::load(const string& fn) {
     // cleanup() is the per-page zero and handles every backing; TS-Conf pages ARE
     // MemESP::ram[] (TsConf::pagePtr indexes it), and they are POINTER-backed
     // after the boot residency self-heal, so this is a straight memset of
-    // MEM_PG_CNT x 16 KB (1-4 MB by Config::tsconf_ram) into butter PSRAM.
+    // MEM_PG_CNT x 16 KB (4 MB, Config::TSCONF_PAGES) into butter PSRAM.
     {
         const uint64_t t0 = esp_timer_get_time();
         for (int i = 0; i < MEM_PG_CNT; i++) MemESP::ram[i].cleanup();

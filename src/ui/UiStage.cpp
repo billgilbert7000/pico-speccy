@@ -355,8 +355,6 @@ static void put_zifiTransport(int32_t v) {
 // (which is what used to lose it whenever enabling MZ also meant switching to Pentagon).
 static int32_t get_memPgCnt()          { return (int32_t)Config::mem_pg_cnt; }
 static void    put_memPgCnt(int32_t v) { Config::mem_pg_cnt = (uint16_t)v; }
-static int32_t get_tsconfRam()          { return (int32_t)Config::tsconf_ram; }
-static void    put_tsconfRam(int32_t v) { Config::tsconf_ram = (uint16_t)v; }
 static int32_t get_tsconfClk()          { return (int32_t)Config::tsconf_clk_cap; }
 static void    put_tsconfClk(int32_t v) { Config::tsconf_clk_cap = (uint8_t)v; }
 static bool    hook_tsconfClk(int32_t, int32_t) {
@@ -970,8 +968,8 @@ static void resolveConstraints(CommitReport& rep) {
         // set of exclusions as Profi, plus its own: Timex (#FF is the Beta
         // SYS register here too), MB-02/esxDOS (page-0 rewiring; DivIDE also
         // decodes port #AF, the TS register file's low byte), 16col (TS-Conf
-        // has its own 16c mode, not the #EFF7 one), Murmuzavr (TS-Conf sizes
-        // RAM through SET_TSCONF_RAM).
+        // has its own 16c mode, not the #EFF7 one), Murmuzavr (TS-Conf's RAM is
+        // a fixed 4 MB, Config::TSCONF_PAGES).
         if (stagedIsTsconf()) {
             if (staged(SET_TIMEX) != 0)
                 changed |= force(SET_TIMEX, 0, rep, "Timex is not available on TS-Conf");
@@ -983,6 +981,11 @@ static void resolveConstraints(CommitReport& rep) {
                 changed |= force(SET_16COL, 0, rep, "16col needs Pentagon or Profi");
             if (staged(SET_MEM_PG_CNT) > 64)
                 changed |= force(SET_MEM_PG_CNT, 64, rep, "Murmuzavr mode off: Pentagon only");
+            // NeoGS RAM: the machine's fixed 4 MB strip and the card's sample RAM
+            // share one 8 MB butter chip, so the card is capped at 2 MB here
+            // (GS::configuredRamBytes enforces it live; this keeps the menu honest).
+            if (staged(SET_GS_MODE) == 2 && staged(SET_GS_RAM) >= 3)
+                changed |= force(SET_GS_RAM, 2, rep, "NeoGS RAM: 2 MB max on TS-Conf");
         }
 
         // Port #FF on Profi/Karabas is the FDC SYS register (Beta scheme), the

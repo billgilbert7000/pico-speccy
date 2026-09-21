@@ -1938,10 +1938,16 @@ uint32_t GS::configuredRamBytes() {
         // NeoGS: total RAM 512K/2M/4M (fw 1.11 auto-detects exactly these).
         // The PSRAM reservation excludes the 64 KB low part (physical pages
         // 0+1), which is pointer-backed via s_workRamBuf.
+        // On TS-Conf the card is CAPPED at 2 MB (owner, 2026-09-21): the machine's
+        // own 4 MB page strip and the card's sample RAM share one 8 MB butter chip,
+        // and 4 MB + 4 MB + the arena does not fit — the strip would run degraded
+        // (Config::TSCONF_PAGES is fixed, nothing else can give). The persisted
+        // pick is left alone: every consumer (Buffer::pageBudget, GS::init, the
+        // Hardware Info line) derives from THIS function, so the cap is one place.
         uint32_t total = 2u << 20;
         if (Config::gs_ram_size == 0)      total = 512u << 10;
         else if (Config::gs_ram_size == 1) total = 2u << 20;   // no 1 MB on NGS
-        else if (Config::gs_ram_size >= 3) total = 4u << 20;
+        else if (Config::gs_ram_size >= 3 && Config::arch != A_TSCONF) total = 4u << 20;
         return total - NGS_LOW_RAM_SIZE;
     }
     uint32_t bytes = 2u << 20;                       // default 2 MB

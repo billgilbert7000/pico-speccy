@@ -183,7 +183,6 @@ const Node* rootNodes();
 // "MZ[8MB]" while Murmuzavr mode is picked, nullptr while it is Off — the subheader
 // appends it to the machine name. Defined next to the option table in UiTree.cpp.
 const char* murmuzavrTag();
-const char* tsconfTag();
 // The Machine menu's own names for what is running: the FAMILY row's label
 // ("Pentagon") and the selected option's short label ("128K+Gluk"), so the
 // subheader reads "Machine: Pentagon (128K+Gluk)". Both come out of the menu

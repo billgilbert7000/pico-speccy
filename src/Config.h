@@ -162,11 +162,14 @@ public:
     // 2026-07-29: "MZ does not turn on the first time" — that second save re-wrote the
     // stale live value over the fresh pick).
     static uint16_t mem_pg_cnt;
-    // TS-Conf RAM size in 16 KB pages (64/128/256 = 1/2/4 MB) — TS-Conf's own
-    // persisted pick, deliberately separate from mem_pg_cnt (same live-vs-pick
-    // rules as above). tsconf_clk_cap bounds the guest's SysConfig ZCLK
-    // (0/1/2 = 3.5/7/14 MHz) for boards that cannot keep up with 14 MHz.
-    static uint16_t tsconf_ram;
+    // TS-Conf RAM is FIXED at 4 MB = 256 pages: every ZX-Evo ever built has 4 MB,
+    // so there is no pick (the 1/2 MB configurations were removed 2026-09-21). A
+    // board whose butter budget cannot hold the whole strip runs degraded — the
+    // tail pages are SD-swap and TsConf::pagePtr() answers nullptr for them
+    // (see the boot check in ESPectrum::setup).
+    // tsconf_clk_cap bounds the guest's SysConfig ZCLK (0/1/2 = 3.5/7/14 MHz)
+    // for boards that cannot keep up with 14 MHz.
+    static constexpr uint16_t TSCONF_PAGES = 256;
     static uint8_t  tsconf_clk_cap;
     // The page-strip length the NEXT boot of `a` needs. The single source for
     // the live MEM_PG_CNT (ESPectrum::setup) and for the boot-layout reboot
@@ -179,7 +182,7 @@ public:
     // or a GMX boot reboots itself for ever (setup raises the strip to 128 and
     // then calls requestMachine, which compares against this).
     static uint32_t wantedPages(ArchIdx a, RomsetIdx rs = R_NONE) {
-        if (a == A_TSCONF) return tsconf_ram;
+        if (a == A_TSCONF) return TSCONF_PAGES;
         uint32_t n = mem_pg_cnt;
         if (n > 64 && !(a == A_PENT || a == A_P512 || a == A_P1024)) n = 64;
 #if GMX_IN_FLASH
