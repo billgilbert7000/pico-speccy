@@ -1,4 +1,3 @@
-
 #include "GS.h"
 #include "GS_ROM.h"
 #include "NGS_ROM.h"
@@ -46,6 +45,7 @@ static inline void gs_status_and(volatile uint8_t* p, uint8_t mask) {
 // closes the window: a byte stored after our exchange keeps its flag, and one
 // stored before it is simply the newer latch value, which is what the hardware
 // would have too.
+//
 // Card->host data path, NeoGS only: a short QUEUE, not the hardware's single
 // latch — on purpose.
 //
@@ -531,13 +531,25 @@ static inline void __not_in_flash_func(gs_end_reset)() {
 // Boards with BUTTER_PSRAM_GPIO defined but no PSRAM populated (e.g. ZERO2
 // without the optional PCM5122/PSRAM module) skip the allocation — saving
 // ~24 KB SRAM on configurations where GS cannot run anyway.
+//
+// CORRECTION (memory-map bug fix): on the BUTTER path, classic GS keeps
+// physical 0x4000-0x7FFF inside s_gs_ram (RAM 0.1 is part of the same array
+// as the banked pages, and hardware aliases it into bank 1 and into page-1
+// bank 3). s_gs_work_ram is therefore just a pointer — no separate buffer,
+// no separate allocation. On the SPI path we keep the dedicated SRAM buffer
+// (SPI PSRAM is far too slow for the firmware's stack) and gs_phys_read /
+// gs_phys_write / gs_pc_read redirect physical 0x4000-0x7FFF there.
 #define GS_WORK_RAM_SIZE 0x4000
 static uint8_t* s_gs_work_ram = nullptr;
 // Backing store for the work RAM + DAC rings: butter PSRAM preferred (frees ~32 KB
 // SRAM on PSRAM boards), heap fallback. NEED_POINTER keeps them addressable for the
 // core1 Z80 hot path (SPI PSRAM / SD-swap are never picked → SPI-only boards keep
-// them in SRAM, same as before). The PC prefetch cache stays in SRAM (new[]) — it
-// exists to HIDE sample-RAM latency, so moving it into PSRAM would defeat it.
+// them in SRAM, same as before). The PC prefetch cache stays in SRAM (new[]) —
+// it exists to HIDE sample-RAM latency, so moving it into PSRAM would defeat it.
+//
+// On the butter path, classic GS does NOT allocate s_workRamBuf — work_ram
+// aliases s_gs_ram[0x4000..0x7FFF]. Only NeoGS (which needs pointer-backed
+// low RAM) and classic GS on SPI PSRAM allocate it.
 static Buffer s_workRamBuf, s_ringLBuf, s_ringRBuf;
 
 // Host→GS FIFO. Some loaders (e.g. FH1_GS_TZ.scl) stream samples into port
@@ -660,6 +672,25 @@ static inline uint32_t __not_in_flash_func(gs_map_addr)(uint16_t address) {
     return (uint32_t)(GS::reg_page - 1) * 0x8000u + (address - 0x8000u);
 }
 
+// Classic GS physical-address helpers.
+//
+// The hardware memory map puts RAM 0.1 at physical 0x4000-0x7FFF, and that
+// SAME RAM appears in two CPU windows:
+//   bank 1 (0x4000-0x7FFF) — at every page value
+//   bank 3 (0xC000-0xFFFF) — when page == 1
+// A real GS has one RAM array; both windows must resolve to the same bytes.
+//
+// On the butter-PSRAM path we honor that literally: s_gs_work_ram is just
+// s_gs_ram + 0x4000, so bank 1 and the page-1 bank-3 view are the same PSRAM.
+// On the SPI-PSRAM path s_gs_work_ram is a dedicated SRAM buffer (the
+// firmware's stack is hammered; SPI PSRAM per push/pop is unusable), and
+// gs_phys_read/gs_phys_write/gs_pc_read redirect physical 0x4000-0x7FFF to it.
+//
+// gs_phys_is_workram() tells the two windows apart from a physical address.
+static inline bool gs_phys_is_workram(uint32_t phys) {
+    return phys >= 0x4000u && phys < 0x8000u;
+}
+
 // =================================================================
 // NeoGS state
 // =================================================================
@@ -761,7 +792,57 @@ static inline void __not_in_flash_func(gs_pc_invalidate_line)(uint32_t psram_off
     if (s_pc_last_line == line) { s_pc_last_line = ~0u; s_pc_last_buf = nullptr; }
 }
 
+// Physical-memory accessors for classic GS. All classic-GS reads/writes that
+// resolve a physical address go through these so the work_ram redirect lives
+// in exactly one place.
+//
+//   gs_phys_read(phys)   — raw byte read, bypasses the private SRAM cache.
+//   gs_phys_write(phys, v) — raw byte write + cache invalidate.
+//
+// Redirect rule: on the SPI path, physical 0x4000-0x7FFF is served from the
+// dedicated SRAM work_ram buffer instead of SPI PSRAM. On butter, s_gs_ram
+// already holds those bytes at 0x4000-0x7FFF, so the redirect is a no-op.
+static inline uint8_t __not_in_flash_func(gs_phys_read)(uint32_t phys) {
+    phys &= s_gs_ram_mask;
+    if (s_gs_use_spi) {
+        if (gs_phys_is_workram(phys) && s_gs_work_ram)
+            return s_gs_work_ram[phys - 0x4000];
+        return read8psram(s_gs_ram_base + phys);
+    }
+    return s_gs_ram[phys];
+}
+
+static inline void __not_in_flash_func(gs_phys_write)(uint32_t phys, uint8_t v) {
+    phys &= s_gs_ram_mask;
+    if (s_gs_use_spi) {
+        if (gs_phys_is_workram(phys) && s_gs_work_ram) {
+            s_gs_work_ram[phys - 0x4000] = v;
+            // gs_pc_read redirects this range straight to s_gs_work_ram, so
+            // no cache line for it exists — nothing to invalidate.
+            return;
+        }
+        write8psram(s_gs_ram_base + phys, v);
+        gs_pc_invalidate_line(phys);
+        return;
+    }
+    // Butter: s_gs_ram[phys] is the backing store for EVERY physical address
+    // including work_ram — gs_pc_read caches from it unconditionally, so an
+    // invalidate is always needed to keep a resident line coherent.
+    s_gs_ram[phys] = v;
+    gs_pc_invalidate_line(phys);
+}
+
 static inline zuint8 __not_in_flash_func(gs_pc_read)(uint32_t psram_off) {
+    // SPI path + physical 0x4000-0x7FFF: this range lives in s_gs_work_ram,
+    // not in SPI PSRAM. Reading it through the cache would either fetch the
+    // wrong bytes (PSRAM holds whatever the last page-1 bank-3 write left
+    // there) or point the cache at a region the work_ram writes never touch.
+    // Serve the line straight from work_ram — no cache slot is spent, no
+    // coherency to maintain. Line boundaries don't straddle 0x4000 or 0x8000
+    // because both are 64-byte aligned.
+    if (s_gs_use_spi && !s_ngs && gs_phys_is_workram(psram_off) && s_gs_work_ram) {
+        return s_gs_work_ram[psram_off & 0x3FFFu];
+    }
     uint32_t line = psram_off >> GS_PC_LINE_BITS;
     uint32_t col  = psram_off & GS_PC_LINE_MASK;
     if (line == s_pc_last_line) { GS_PERF(s_perf_pc_hit++); return s_pc_last_buf[col]; }
@@ -819,8 +900,7 @@ static inline zuint8 __not_in_flash_func(gs_mem_raw_read)(zuint16 address) {
     if (s_ngs) return gs_pc_read(s_bank_off[address >> 13] + (address & 0x1FFF));
     if (GS::reg_page == 0) return ROM_GS_M[address - 0x8000];
     // Banked sample pages — use private SRAM cache to survive core0 XIP thrash.
-    uint32_t off = (gs_map_addr(address) + 0x4000) & s_gs_ram_mask;
-    return gs_pc_read(off);
+    return gs_pc_read(gs_map_addr(address) & s_gs_ram_mask);
 }
 
 // Hot data-read path. Layout of the GS-Z80 address space for reads:
@@ -850,8 +930,7 @@ static zuint8 __not_in_flash_func(gs_cb_read)(void* ctx, zuint16 address) {
     // Banked PSRAM (sample data) — cache-backed.
     if (s_ngs) return gs_pc_read(s_bank_off[address >> 13] + (address & 0x1FFF));
     if (GS::reg_page == 0) return ROM_GS_M[address - 0x8000];
-    uint32_t off = (gs_map_addr(address) + 0x4000) & s_gs_ram_mask;
-    return gs_pc_read(off);
+    return gs_pc_read(gs_map_addr(address) & s_gs_ram_mask);
 }
 
 static void __not_in_flash_func(gs_cb_write)(void* ctx, zuint16 address, zuint8 value) {
@@ -873,17 +952,19 @@ static void __not_in_flash_func(gs_cb_write)(void* ctx, zuint16 address, zuint8 
     }
     if (address < 0x4000) return;
     if (address < 0x8000) {
-        s_gs_work_ram[address - 0x4000] = value;  // SRAM — no PSRAM latency
+        // Bank 1 = physical 0x4000-0x7FFF = RAM 0.1.
+        //   butter: s_gs_ram[0x4000..0x7FFF] IS that physical range, and
+        //           s_gs_work_ram points there — both windows land on the
+        //           same bytes.
+        //   SPI:    gs_phys_write redirects physical 0x4000-0x7FFF to the
+        //           dedicated SRAM work_ram buffer.
+        gs_phys_write((uint32_t)address, value);
         return;
     }
     if (GS::reg_page == 0) return;
-    uint32_t off = (gs_map_addr(address) + 0x4000) & s_gs_ram_mask;
-    if (s_gs_use_spi) {
-        write8psram(s_gs_ram_base + off, value);
-    } else {
-        s_gs_ram[off] = value;  // PSRAM — banked sample pages
-    }
-    gs_pc_invalidate_line(off);  // keep SRAM cache coherent
+    uint32_t off = gs_map_addr(address) & s_gs_ram_mask;
+    // gs_phys_write handles the SPI work_ram redirect and cache invalidate.
+    gs_phys_write(off, value);
 }
 
 // =================================================================
@@ -2065,6 +2146,17 @@ bool GS::init(uint32_t ram_size_bytes) {
     gs_ram_size   = ram_size_bytes;
     s_ngs_ram_total = s_ngs ? ram_size_bytes + NGS_LOW_RAM_SIZE : 0;
 
+    // Classic GS work_ram routing:
+    //   butter path: RAM 0.1 lives in s_gs_ram at physical 0x4000-0x7FFF.
+    //                s_gs_work_ram is just a pointer there — no allocation,
+    //                and gs_phys_write goes straight to s_gs_ram.
+    //   SPI path:    a dedicated SRAM buffer is allocated below and
+    //                gs_phys_read/write/gs_pc_read redirect physical
+    //                0x4000-0x7FFF to it.
+    if (!s_ngs && !s_gs_use_spi) {
+        s_gs_work_ram = s_gs_ram + 0x4000;   // aliases s_gs_ram[0x4000..0x7FFF]
+    }
+
     // Work RAM + DAC rings → butter PSRAM (else heap). Allocated via Buffer, so this
     // MUST run after Buffer::initPools() (see ESPectrum::setup ordering).
     // NeoGS needs the whole 64 KB of physical pages 0+1 pointer-backed (firmware
@@ -2078,6 +2170,8 @@ bool GS::init(uint32_t ram_size_bytes) {
             s_ngs_blank   = s_ngs_low_ram + NGS_LOW_RAM_SIZE;
             s_gs_work_ram = s_ngs_low_ram + 0xC000;  // fixed 0x4000-0x7FFF region
         } else {
+            // Classic GS on SPI PSRAM only. Butter path set s_gs_work_ram
+            // above to s_gs_ram+0x4000 and never reaches this branch.
             s_gs_work_ram = s_workRamBuf.data();
         }
     }
@@ -2115,6 +2209,10 @@ bool GS::init(uint32_t ram_size_bytes) {
         // still just leaves the MP3 path in stub mode.
         s_ngs_boot_hold = true;   // parked until ngsBootRelease() (see pump)
     } else {
+        // Classic GS: work_ram is now either a pointer into s_gs_ram (butter)
+        // or a dedicated SRAM buffer (SPI). Both back the same physical
+        // 0x4000-0x7FFF through gs_phys_read/gs_phys_write and gs_pc_read.
+        // Zero it so firmware starts from a clean state.
         memset(s_gs_work_ram, 0, GS_WORK_RAM_SIZE);
         gs_init_fetch_pages();   // hot-path fetch table: see gs_cb_fetch_opcode
     }
@@ -2163,6 +2261,9 @@ void GS::deinit() {
     s_gs_use_spi = false;
     s_gs_ram_mask = 0;
     gs_ram_size = 0;
+    // Butter-path classic GS never allocated s_workRamBuf (work_ram aliases
+    // s_gs_ram), so free() is a no-op there. s_gs_work_ram is invalidated
+    // here regardless; s_gs_ram was just nulled above.
     s_workRamBuf.free();    s_gs_work_ram = nullptr;
     s_ngs_low_ram = nullptr;
     s_ngs_blank   = nullptr;

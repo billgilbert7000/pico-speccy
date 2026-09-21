@@ -729,8 +729,10 @@ void ESPectrum::powerOnRamFill() {
     if (MemESP::ram[i].memType() == mem_type_t::POINTER) {
       uint8_t *p = MemESP::ram[i].direct();
       if (!p || p < (uint8_t *)0x11000000) continue;
-      if (dramPattern) powerOnDramFill(p, i);
-      else             memset(p, 0, MEM_PG_SZ);
+    //  if (dramPattern) powerOnDramFill(p, i); убирание шахматки DRAM
+    //  else            
+                       memset(p, 0, MEM_PG_SZ);
+
       n++;
     }
   }
@@ -1952,6 +1954,21 @@ void ESPectrum::reset(uint8_t romInUse) {
   // Re-mount the remembered tape (reset() wiped it above) so a tape survives an
   // F11 reset like a mounted disk does. No-op if no tape is remembered.
   Tape::LoadRemembered();
+
+    
+///////////////////////////////////////////////////////////////////////////////
+// --- Clear ZX Spectrum screen memory (0x4000-0x5AFF) ---
+// Bitmap (6144 B) + attributes (768 B) live at the start of physical page 5,
+// which is always mapped into the 0x4000 window (ramCurrent[1]).
+// Zero fill = black ink on black paper, non-bright, non-flash.
+{
+    uint8_t *page5 = MemESP::ram[5].direct();
+    if (page5) memset(page5, 0, 6912);
+}
+//////////////////////////////////////////////////////////////////////////////
+
+
+
 }
 
 //=======================================================================================
