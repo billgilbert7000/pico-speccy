@@ -1623,6 +1623,40 @@ TS_HOT uint8_t TsConf::dmaStatus() {
 
 // ------------------------------------------------------------ CPU clock ----
 
+// A ZCLK change is a change of UNITS. CPU::tstates and every absolute
+// timestamp derived from it count Z80 clocks at the OLD rate, and
+// updateStatesInFrame() is about to re-derive statesInFrame/IntStart/IntEnd at
+// the new one — so they have to be rescaled together, or the raster position
+// (the fraction of the frame the guest has reached) jumps. A real ZX-Evo's
+// raster does not move when the CPU clock does. Without this a 14 -> 7 MHz
+// write in the second half of the frame left tstates > the new statesInFrame
+// and ENDED THE FRAME on the spot: every FRAME-INT window still ahead in that
+// frame fired a whole frame late, and EndFrame ran with the clock at 7 MHz.
+// Wild Commander's VGM player (VGMPLAY.WMF v2.0) dips to 7 MHz around EVERY
+// chip register write — `OUT (#20AF),1 / OUT (#C4) / OUT (#C5) / OUT (#20AF),2`,
+// dozens of round trips a frame — and paces itself with a chain of FRAME-INT
+// windows re-programmed from its own handler, so about every other tick of
+// that chain came a frame late: "plays very slowly", with the emulator's own
+// FPS/IDL perfectly normal (owner, 2026-09-21). Rescaling up is exact; down
+// truncates to the T-state, which is below anything the guest can observe.
+// The beam-raced ZX-mode renderer keeps its own unscaled clock (`lastBrdTstate`
+// and the MainScreen thresholds are base units at every ZCLK — the documented
+// "turbo does not rescale the raster" deviation) and is deliberately not
+// touched here.
+static inline uint32_t tsRescaleT(uint32_t t, uint8_t om, uint8_t nm) {
+    if (t == 0xFFFFFFFFu) return t;   // "no more lines" sentinel (VIDEO::ts_line_t)
+    return nm >= om ? (t << (nm - om)) : (t >> (om - nm));
+}
+static void tsClockRescale(uint8_t om, uint8_t nm) {
+    CPU::tstates     = tsRescaleT(CPU::tstates, om, nm);
+    s_lin_next       = tsRescaleT(s_lin_next, om, nm);      // next LINE-INT start
+    s_dma_end        = tsRescaleT(s_dma_end, om, nm);       // DMA_ACT drop (a DMA may be in flight)
+    s_dma_steal_t    = tsRescaleT(s_dma_steal_t, om, nm);   // poll fast-forward memos, deltas only
+    s_poll_steal     = tsRescaleT(s_poll_steal, om, nm);
+    s_poll_t         = tsRescaleT(s_poll_t, om, nm);
+    VIDEO::ts_line_t = tsRescaleT(VIDEO::ts_line_t, om, nm);   // whole-line renderer clock
+}
+
 void TsConf::applyZclk(bool fromGuest) {
     // ZCLK 00/01/10 = 3.5/7/14 MHz -> multiplicator 0/1/2 (11 is reserved —
     // treated as 14), capped by Config::tsconf_clk_cap for boards that cannot
@@ -1635,8 +1669,15 @@ void TsConf::applyZclk(bool fromGuest) {
     if (zclk == 3) zclk = 2;
     if (zclk > Config::tsconf_clk_cap) zclk = Config::tsconf_clk_cap;
     if (zclk != ESPectrum::multiplicator) {
+        const uint8_t om = ESPectrum::multiplicator;
+        tsClockRescale(om, zclk);    // BEFORE the frame constants move (see above)
         ESPectrum::multiplicator = zclk;
         CPU::updateStatesInFrame();  // calls frameIntRecalc() + memcycRecalc() for TS-Conf
+        // updateStatesInFrame() reset CPU::stFrame to the frame tail, i.e. it
+        // EXTENDED the unchecked slice this write is executing in past any INT
+        // event it was sized to end at; end it here so CPU::loop re-slices in
+        // the new units (the INTMask/DMACtrl-write shape, tsWakeLoop).
+        tsWakeLoop();
         static bool warned14 = false;
         if (zclk == 2 && !warned14) {
             warned14 = true;

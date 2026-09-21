@@ -2567,6 +2567,59 @@ of `aligned(4096)` padding. Free heads: DVp2 82.7 KB, z0p2 79.1, z0p2-PIOUSB 64.
   question: does TS-BIOS Setup (SS+F12) need the ZX-Evo AVR (`slavespi`)
   keyboard path? Plain #FE should cover boot + TR-DOS.
 
+### A ZCLK write is a change of UNITS — rescale CPU::tstates, or the frame ends on the spot (hw-confirmed 2026-09-21)
+
+"TS-Conf + Wild Commander + VGMPlayer plays very slowly, and the CPU clock seems to
+switch all the time" — with FPS/IDL perfectly normal (owner). Both halves are the
+same defect and neither is the plugin's fault. Disassembling `VGMPLAY.WMF` v2.0
+(`debug/WC/WC/`, code page at `#8000`; `tools/z80disasm.py` on file offset 0x200)
+shows how it paces itself: a chain of FRAME-INT windows re-programmed from its own
+IM2 handler (`ABA3`: three `OUTI` into `#24AF/#23AF/#22AF` from a table at `AD6A`,
+one entry per tick), and around EVERY chip register write it dips the clock —
+`OUT (#20AF),1 / OUT (#C4),reg / OUT (#C5),val / OUT (#20AF),2` (`AC33`, the same
+shape for OPL set 2, the AY at `#FFFD/#BFFD` and the SAA at `#01FF/#00FF`). Dozens
+of 14 -> 7 -> 14 MHz round trips a frame, each a few T long — legitimate, the
+ZXBUS I/O wants the slower bus.
+
+- **The bug**: `applyZclk` swapped `statesInFrame` (286720 <-> 143360) and left
+  `CPU::tstates` in the OLD units. A 14 -> 7 dip anywhere in the second half of
+  the frame therefore left `tstates > statesInFrame`: the unchecked slice ended,
+  `CPU::loop` saw the frame over, EndFrame ran (with the clock at 7 MHz — hence
+  the F8 stats box flickering between the 7 and 14 MHz colours every other frame,
+  "the clock keeps switching"), and every FRAME-INT window still ahead in that
+  frame fired a whole frame late. About every other tick of the player's chain
+  lost a frame: slow music, correct FPS.
+- **Fix** (`tsClockRescale`, TsConf.cpp): before `updateStatesInFrame()` re-derives
+  the constants, rescale by the ratio of the clocks every absolute-T timestamp —
+  `CPU::tstates`, `s_lin_next`, `s_dma_end`, the DMAStatus fast-forward memos
+  (`s_poll_t`, `s_dma_steal_t`, `s_poll_steal`) and the whole-line renderer's
+  `VIDEO::ts_line_t` (its `UINT32_MAX` sentinel kept) — then `tsWakeLoop()`,
+  because `updateStatesInFrame()` resets `CPU::stFrame` to the frame tail, i.e.
+  EXTENDS the running slice past the INT event it was sized for. A real ZX-Evo's
+  raster does not move when the CPU clock does; this keeps the fraction of the
+  frame the guest has reached.
+- **Deliberately not rescaled**: the beam-raced ZX-mode renderer's `lastBrdTstate`
+  and the MainScreen thresholds — they are base units at every ZCLK (the documented
+  "turbo does not rescale the raster" deviation) and a rescaled `tstates` merely
+  changes where inside that deviation the beam sits. The Alt+F2 / Menu+F11 paths
+  write `multiplicator` between frames (tstates is the frame's leftover) and need
+  nothing. **The same class of bug is latent on the other live-clock ports** —
+  Pentagon-1024 `#EFF7` D4, Profi `#028B`, GMX `#7EFD` D7 (Ports.cpp) — all of them
+  change `multiplicator` mid-frame without touching `tstates`; TheLink is hw-tested
+  on the current behaviour (its switches sit right after the INT, where the error is
+  a few T), so they are left alone until a title shows it.
+- **`OSD::notifyClock` did not misfire**: the 250 ms settle never saw either value
+  hold, which is exactly why there was no banner storm — what the owner saw was the
+  stats box. After the fix EndFrame runs at 14 MHz on every frame (the 7 MHz dips
+  are three instructions long), so the box reads 14 steadily.
+- Test ELF `debug/DVp2-tsclk-rescale-1.0.6.elf`. **Hw 2026-09-21, owner:
+  "работает"** — the VGM player under WC, i.e. the case this exists for (TEXT mode +
+  whole-line renderer, dozens of 14/7 round trips a frame). Not itemised beyond
+  that, so **still owed**: the regression set for anything else that writes
+  SysConfig mid-frame or per line — Demorama (per-line VCONFIG/PalSel,
+  `intmask=03`), Ninja Gaiden / borntro12 (raster splits), fishbone, TMNT, and
+  TS-BIOS Setup -> TR-DOS (its `RESET2` writes SysConfig at boot).
+
 ### Alt+F11 on TS-Conf: the boot paging mode was WRONG, and only the SD boot noticed (hw-confirmed 2026-09-17)
 
 The dialog used to offer the two keys TS-BIOS samples at START — Symbol Shift ->
