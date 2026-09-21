@@ -773,6 +773,40 @@ unread command queued, the card just acked. Only what the card does NEXT tells
 them apart, which is why the decision belongs in the host's poll loop with a
 liveness gate, and why a deviation may be suppressed but never made destructive.
 
+### Classic GS: page 1 bank 3 IS the 0x4000-0x7FFF work RAM (2026-09-21, NOT hw-tested)
+
+From a fork's commit (billgilbert7000 `ab20654`), which claimed two bugs in the
+classic-GS memory map. **One of them is not a bug**: the `+ 0x4000` in the three
+banked accessors is an internal numbering (`s_gs_ram` offset = hardware RAM address
+- 0x4000), a bijection covering exactly 63 x 32 KB either way, and "RAM 0.0" is
+unreachable on real hardware too (page 0 in 8000-FFFF is ROM; RAM page 0 exists
+only under NeoGS NOROM). Do not "fix" it. **The other is real**: on hardware the
+fixed 0x4000-0x7FFF window is the UPPER HALF of RAM page 1, so `OUT (0),1` shows
+the same 16 KB at 0xC000-0xFFFF — Unreal `gsz80.cpp UpdateMemMapping`:
+`gsbankr[1] = GSRAM_M + 3*PAGE` and, at MPAG=1, `gsbankr[3]` = that same page 3.
+NeoGS here always modelled it (`s_ngs_low_ram + 0xC000`); classic GS kept the work
+RAM in a separate `s_workRamBuf`, so the two windows were different bytes.
+
+- **Fix, cheaper than the fork's**: in our numbering page 1 bank 3 lands at
+  `s_gs_ram[0x8000..0xBFFF]` (`GS_WORK_RAM_OFF`) and NOTHING else maps there (page 2
+  bank 2 starts at 0xC000), so on butter `s_gs_work_ram = s_gs_ram + 0x8000` with no
+  allocation, and `gs_p1b3()` (reg_page == 1 && address >= 0xC000) routes the banked
+  read AND write of that range straight to `s_gs_work_ram`, bypassing the prefetch
+  cache. On SPI the work RAM stays a dedicated SRAM buffer and the same redirect
+  aliases it. **The write path through 0x4000-0x7FFF is byte-for-byte untouched** —
+  the fork instead pushed every work-RAM write (the fw's stack and mixer variables,
+  the hottest write on core1) through a `gs_pc_invalidate_line`, which on a GS-Z80
+  that already sustains ~15 of 20 MHz on mixer loads would have needed measuring.
+  Cost here: one compare on banked reads/writes at page != 0.
+- Boot log says `GS::init: work/rings on gsram-alias/...` on butter. Test ELF
+  `debug/DVp2-gs-p1b3-alias-1.0.6.elf`. **Hw check owed**: classic-GS regression
+  (FH1, COMTR4GS, ZP4 in GS mode, a mixer-heavy module for the GS clock figure); no
+  known title is proven to depend on the alias — the fw's own page table excludes
+  page 1's upper half — so this is correctness against Unreal, not a reported hang.
+- The same commit also drops the DRAM power-on pattern (`memset 0`) and clears 6912
+  bytes of screen on every F11 — both against documented policy here (a reset keeps
+  RAM), not taken.
+
 ### The #B3/#BB host interface — read the RTL, it settles everything
 
 I burned three hardware round-trips guessing at this model before reading

@@ -532,6 +532,20 @@ static inline void __not_in_flash_func(gs_end_reset)() {
 // without the optional PCM5122/PSRAM module) skip the allocation — saving
 // ~24 KB SRAM on configurations where GS cannot run anyway.
 #define GS_WORK_RAM_SIZE 0x4000
+// Classic GS: the fixed 0x4000-0x7FFF window IS the upper half of RAM page 1 —
+// hardware RAM 0xC000-0xFFFF, and MPAG=1 shows that same 16 KB at 0xC000-0xFFFF
+// (Unreal gsz80 UpdateMemMapping: gsbankr[1] = GSRAM_M + 3*PAGE and, at page 1,
+// gsbankr[3] = the same page 3; the NeoGS model here has always done it via
+// s_ngs_low_ram + 0xC000). In s_gs_ram's numbering (gs_map_addr + 0x4000, i.e.
+// hardware RAM address - 0x4000) page 1 bank 3 lands at GS_WORK_RAM_OFF and NOTHING
+// else maps there (page 2 bank 2 starts at 0xC000), so on butter the work RAM is
+// simply that slice of s_gs_ram and both windows are the same bytes. On SPI PSRAM
+// the work RAM stays a dedicated SRAM buffer and page-1 bank-3 accesses are
+// redirected to it (gs_p1b3). Either way a page-1 bank-3 READ bypasses the private
+// prefetch cache, so a write through 0x4000-0x7FFF — the firmware's stack and mixer
+// variables, the hottest write path on core1 — needs no cache invalidate and stays
+// exactly as it was.
+#define GS_WORK_RAM_OFF  0x8000
 static uint8_t* s_gs_work_ram = nullptr;
 // Backing store for the work RAM + DAC rings: butter PSRAM preferred (frees ~32 KB
 // SRAM on PSRAM boards), heap fallback. NEED_POINTER keeps them addressable for the
@@ -658,6 +672,13 @@ static uint32_t s_depth_cnt  = 0;
 
 static inline uint32_t __not_in_flash_func(gs_map_addr)(uint16_t address) {
     return (uint32_t)(GS::reg_page - 1) * 0x8000u + (address - 0x8000u);
+}
+
+// Classic GS: is this banked access the page-1 bank-3 alias of the fixed
+// 0x4000-0x7FFF work RAM? (See GS_WORK_RAM_OFF.) Served straight from
+// s_gs_work_ram, never through the prefetch cache.
+static inline bool __not_in_flash_func(gs_p1b3)(uint16_t address) {
+    return GS::reg_page == 1 && address >= 0xC000;
 }
 
 // =================================================================
@@ -818,6 +839,7 @@ static inline zuint8 __not_in_flash_func(gs_mem_raw_read)(zuint16 address) {
     if (base) return base[address & 0x1FFF];
     if (s_ngs) return gs_pc_read(s_bank_off[address >> 13] + (address & 0x1FFF));
     if (GS::reg_page == 0) return ROM_GS_M[address - 0x8000];
+    if (gs_p1b3(address)) return s_gs_work_ram[address - 0xC000];  // alias of 0x4000-0x7FFF
     // Banked sample pages — use private SRAM cache to survive core0 XIP thrash.
     uint32_t off = (gs_map_addr(address) + 0x4000) & s_gs_ram_mask;
     return gs_pc_read(off);
@@ -850,6 +872,7 @@ static zuint8 __not_in_flash_func(gs_cb_read)(void* ctx, zuint16 address) {
     // Banked PSRAM (sample data) — cache-backed.
     if (s_ngs) return gs_pc_read(s_bank_off[address >> 13] + (address & 0x1FFF));
     if (GS::reg_page == 0) return ROM_GS_M[address - 0x8000];
+    if (gs_p1b3(address)) return s_gs_work_ram[address - 0xC000];  // alias of 0x4000-0x7FFF
     uint32_t off = (gs_map_addr(address) + 0x4000) & s_gs_ram_mask;
     return gs_pc_read(off);
 }
@@ -877,6 +900,10 @@ static void __not_in_flash_func(gs_cb_write)(void* ctx, zuint16 address, zuint8 
         return;
     }
     if (GS::reg_page == 0) return;
+    if (gs_p1b3(address)) {           // alias of 0x4000-0x7FFF (see GS_WORK_RAM_OFF)
+        s_gs_work_ram[address - 0xC000] = value;
+        return;
+    }
     uint32_t off = (gs_map_addr(address) + 0x4000) & s_gs_ram_mask;
     if (s_gs_use_spi) {
         write8psram(s_gs_ram_base + off, value);
@@ -2076,15 +2103,24 @@ bool GS::init(uint32_t ram_size_bytes) {
     // NeoGS needs the whole 64 KB of physical pages 0+1 pointer-backed (firmware
     // executes from page 0 under NOROM) plus one 8 KB blank page (0xFF) that
     // serves unpopulated ROM chunks.
+    // Classic GS on butter allocates nothing here: the work RAM is the page-1
+    // bank-3 slice of s_gs_ram itself (GS_WORK_RAM_OFF), which is what makes the
+    // two windows one memory. Classic GS on SPI PSRAM keeps a dedicated buffer
+    // (NEED_POINTER never picks SPI, so it lands in SRAM — the firmware's stack
+    // cannot live behind an SPI transaction) and gs_p1b3 redirects to it.
     if (!s_gs_work_ram) {
-        size_t wsz = s_ngs ? (NGS_LOW_RAM_SIZE + 0x2000) : GS_WORK_RAM_SIZE;
-        if (!s_workRamBuf.alloc(wsz, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM)) return gs_init_failed();
-        if (s_ngs) {
-            s_ngs_low_ram = s_workRamBuf.data();
-            s_ngs_blank   = s_ngs_low_ram + NGS_LOW_RAM_SIZE;
-            s_gs_work_ram = s_ngs_low_ram + 0xC000;  // fixed 0x4000-0x7FFF region
+        if (!s_ngs && !s_gs_use_spi) {
+            s_gs_work_ram = s_gs_ram + GS_WORK_RAM_OFF;
         } else {
-            s_gs_work_ram = s_workRamBuf.data();
+            size_t wsz = s_ngs ? (NGS_LOW_RAM_SIZE + 0x2000) : GS_WORK_RAM_SIZE;
+            if (!s_workRamBuf.alloc(wsz, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM)) return gs_init_failed();
+            if (s_ngs) {
+                s_ngs_low_ram = s_workRamBuf.data();
+                s_ngs_blank   = s_ngs_low_ram + NGS_LOW_RAM_SIZE;
+                s_gs_work_ram = s_ngs_low_ram + 0xC000;  // fixed 0x4000-0x7FFF region
+            } else {
+                s_gs_work_ram = s_workRamBuf.data();
+            }
         }
     }
     // Ring depth: full on butter (the rings sit in XIP and cost no SRAM), half on a
@@ -2104,7 +2140,8 @@ bool GS::init(uint32_t ram_size_bytes) {
         s_ring_R = (int16_t*)s_ringRBuf.data();
     }
     Debug::log("GS::init: work/rings on %s/%s/%s",
-               s_workRamBuf.tierName(), s_ringLBuf.tierName(), s_ringRBuf.tierName());
+               s_workRamBuf.ok() ? s_workRamBuf.tierName() : "gsram-alias",
+               s_ringLBuf.tierName(), s_ringRBuf.tierName());
     // PC prefetch cache stays in SRAM/heap — it hides PSRAM latency, don't move it.
     if (!s_pc_data)     s_pc_data     = new uint8_t[GS_PC_SETS][GS_PC_WAYS][GS_PC_LINE_SZ];
     if (!s_pc_tag)      s_pc_tag      = new uint32_t[GS_PC_SETS][GS_PC_WAYS];
@@ -2169,7 +2206,7 @@ void GS::deinit() {
     s_gs_use_spi = false;
     s_gs_ram_mask = 0;
     gs_ram_size = 0;
-    s_workRamBuf.free();    s_gs_work_ram = nullptr;
+    s_workRamBuf.free();    s_gs_work_ram = nullptr;   // free() is a no-op for the butter alias (never allocated)
     s_ngs_low_ram = nullptr;
     s_ngs_blank   = nullptr;
     s_ngs_ram_total = 0;
