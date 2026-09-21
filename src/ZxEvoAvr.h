@@ -49,8 +49,13 @@ namespace ZxEvoAvr {
     // TS-BIOS Setup reads keys through KBD_POLL on #FE, and so do TR-DOS and
     // games. Reg D/E (the modifier status bytes) deliberately do NOT count — a
     // program may read Shift state without wanting the function keys.
-    bool    guestPollsKeys();        // the log was read within the idle window
-    bool    keysToGuest();           // guestPollsKeys(), unless overridden below
-    bool    toggleKeysToGuest();     // manual override FOR THE SESSION; returns the new state
-    void    clearKeysOverride();     // a machine reset starts a new program
+    //
+    // Three named states, and the UI calls them exactly this: ON = the guest
+    // gets the keys, OFF = the hotkey layer keeps them, AUTO = follow the log.
+    enum KeysMode : int8_t { KEYS_AUTO = -1, KEYS_OFF = 0, KEYS_ON = 1 };
+    bool     guestPollsKeys();       // the log was read within the idle window
+    bool     keysToGuest();          // the live answer under the mode below
+    KeysMode keysMode();             // AUTO unless overridden FOR THE SESSION
+    KeysMode cycleKeysMode();        // ON/OFF/AUTO; returns the new mode
+    void     clearKeysOverride();    // a machine reset starts a new program
 }

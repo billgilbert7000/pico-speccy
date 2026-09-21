@@ -3450,8 +3450,9 @@ void ESPectrum::loop() {
         const bool  keys_now = ZxEvoAvr::keysToGuest();
         if (keys_now != s_keys_prev) {
             s_keys_prev = keys_now;
-            OSD::notify(keys_now ? " PS/2 keys: guest " : " PS/2 keys: menu ", LEVEL_INFO, 900);
-            Debug::log("[PS2] keys -> %s", keys_now ? "guest (reading the scancode log)" : "menu");
+            OSD::notify(keys_now ? " PS/2 keys: ON " : " PS/2 keys: OFF ", LEVEL_INFO, 900);
+            Debug::log("[PS2] keys -> %s", keys_now ? "ON (guest is reading the scancode log)"
+                                                    : "OFF (the hotkey layer keeps them)");
         }
     }
 

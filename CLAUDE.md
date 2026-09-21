@@ -3832,14 +3832,23 @@ that does is telling us in the machine's own terms that F1-F10 are ITS keys.
 - **Reg D/E (the modifier-status bytes) deliberately do NOT count.** A program may
   want Shift state without wanting the function keys, and TS-BIOS might read them
   at boot; keying on the LOG alone is the tightest signal available.
-- **The manual override is SESSION-only** (PrtScr / Alt+~, as on Profi): it flips
-  to the opposite of the live verdict and is dropped by `ESPectrum::reset`, since
-  a reset starts a new program. That is what keeps "a program is holding my
-  F-keys" recoverable — and why nothing about it is persisted.
-- **A transition is announced** (`" PS/2 keys: guest "` / `" menu "`, one toast
-  per change from `ESPectrum::loop`, plus a `[PS2]` log line): F5 silently ceasing
-  to open the browser is not something a user can be asked to guess. Hardware Info
-  says `guest (polling)` / `guest (manual)` / `menu (manual)` / `menu`.
+- **The three states are named ON / OFF / AUTO** (2026-09-21, NOT hw-tested) —
+  `ZxEvoAvr::KeysMode`, and every string the user sees uses exactly those words:
+  ON = the guest gets F1-F10, OFF = the hotkey layer keeps them, AUTO = the
+  log-polling verdict decides. The earlier wording (`guest (manual)` /
+  `menu (polling)` …) said two things at once and named neither clearly.
+- **The manual override is SESSION-only** (PrtScr / Alt+~, as on Profi) and
+  `cycleKeysMode()` walks all three, dropped by `ESPectrum::reset` since a reset
+  starts a new program. **The step OUT of AUTO takes whichever override differs
+  from the live verdict**, so the first press always changes behaviour — a user
+  reaching for that key has just watched F5 stop working (or start working under
+  a program that wanted it); a fixed ON -> OFF -> AUTO order would no-op half the
+  time. Both routes then pass through the remaining state and return to AUTO.
+- **A transition is announced** (`" PS/2 keys: ON "` / `" OFF "`, one toast per
+  change of the EFFECTIVE state from `ESPectrum::loop`, plus a `[PS2]` log line):
+  F5 silently ceasing to open the browser is not something a user can be asked to
+  guess. The hotkey toasts the MODE it just selected, so it is the only one that
+  can say `AUTO`. Hardware Info prints the mode: `ON` / `OFF` / `AUTO`.
 - **There is no equivalent on Profi, and that is structural** — its extended keys
   ride **bit 5 of the ordinary `#FE` matrix rows** (Ports.cpp), with no separate
   port and no select step, and every program on earth reads `#FE`. Telling "reads

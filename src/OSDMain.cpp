@@ -2166,11 +2166,15 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
             return;
         }
         if (Z80Ops::isTsconf) {
-            // Not persisted: the automatic verdict is the resting state and this
-            // only overrides it for the session (and a machine reset drops it).
-            const bool on = ZxEvoAvr::toggleKeysToGuest();
-            notify(on ? " PS/2 keys: guest (manual) " : " PS/2 keys: menu (manual) ", LEVEL_INFO, 900);
-            Debug::log("[PS2] keys -> %s (manual override)", on ? "guest" : "menu");
+            // ON -> OFF -> AUTO, for the session only: AUTO is the resting
+            // state (the guest's own polling decides) and a machine reset
+            // drops any override, because a reset starts a new program.
+            const ZxEvoAvr::KeysMode m = ZxEvoAvr::cycleKeysMode();
+            notify(m == ZxEvoAvr::KEYS_ON  ? " PS/2 keys: ON "
+                 : m == ZxEvoAvr::KEYS_OFF ? " PS/2 keys: OFF "
+                                           : " PS/2 keys: AUTO ", LEVEL_INFO, 900);
+            Debug::log("[PS2] keys -> %s", m == ZxEvoAvr::KEYS_ON  ? "ON"
+                                         : m == ZxEvoAvr::KEYS_OFF ? "OFF" : "AUTO");
             return;
         }
     }
@@ -6133,9 +6137,8 @@ static void buildEmulatorInfoText() {
         pos += infoAppend(buf, pos, bufsz, " XT keyboard    : On\n");
     if (Z80Ops::isTsconf)
         pos += infoAppend(buf, pos, bufsz, " PS/2 keys      : %s\n",
-                          ZxEvoAvr::keysToGuest()
-                              ? (ZxEvoAvr::guestPollsKeys() ? "guest (polling)" : "guest (manual)")
-                              : (ZxEvoAvr::guestPollsKeys() ? "menu (manual)"   : "menu"));
+                          ZxEvoAvr::keysMode() == ZxEvoAvr::KEYS_ON  ? "ON"
+                        : ZxEvoAvr::keysMode() == ZxEvoAvr::KEYS_OFF ? "OFF" : "AUTO");
     if (Config::byte_cobmect_mode)
         pos += infoAppend(buf, pos, bufsz, " COBMECT mode   : On\n");
     if (MEM_PG_CNT != 64)   // Murmuzavr SD-swap: 64 pages = no swap
@@ -8113,7 +8116,7 @@ const char* hotkeysText() {
         // reading the PS/2 scancode log), so there the toggle is an override,
         // and saying so is the difference between a setting and a surprise.
         pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " %-20s %s\n",
-                        profi ? "XT keyboard" : "PS/2 keys (auto)", "Alt+~ or PrtScr");
+                        profi ? "XT keyboard" : "PS/2 keys", "Alt+~ or PrtScr");
         pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " %-20s %s\n",
                         "BMP capture", "Alt+PrtScr");
     } else {

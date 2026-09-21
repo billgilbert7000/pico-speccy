@@ -205,10 +205,21 @@ bool ZxEvoAvr::keysToGuest() {
     return s_keys_ovr >= 0 ? (s_keys_ovr != 0) : guestPollsKeys();
 }
 
-bool ZxEvoAvr::toggleKeysToGuest() {
-    const bool now = keysToGuest();
-    s_keys_ovr = now ? 0 : 1;
-    return !now;
+ZxEvoAvr::KeysMode ZxEvoAvr::keysMode() { return (KeysMode)s_keys_ovr; }
+
+// ON / OFF / AUTO, in that order — except that the step out of AUTO takes
+// whichever override DIFFERS from what the log is currently saying, so the
+// first press always changes behaviour (a user reaching for this key has just
+// watched F5 stop opening the browser, or start opening it under a program
+// that wanted it). Both routes then pass through the remaining state and come
+// back to AUTO.
+ZxEvoAvr::KeysMode ZxEvoAvr::cycleKeysMode() {
+    switch (s_keys_ovr) {
+        case KEYS_AUTO: s_keys_ovr = keysToGuest() ? KEYS_OFF : KEYS_ON; break;
+        case KEYS_ON:   s_keys_ovr = KEYS_OFF;  break;
+        default:        s_keys_ovr = KEYS_AUTO; break;
+    }
+    return (KeysMode)s_keys_ovr;
 }
 
 void ZxEvoAvr::clearKeysOverride() { s_keys_ovr = -1; }
